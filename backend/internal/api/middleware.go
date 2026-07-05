@@ -262,14 +262,32 @@ func AccessLogMiddleware(log Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// RoutePath returns the route template chi matched for this
-// request. For unmatched paths we fall back to a coarse bucket
-// so the log line still tells operators whether the request hit
-// a real route or 404'd. We never return the raw URL.Path
-// because it can carry query parameters shaped like PII.
+// RoutePath returns the route TEMPLATE chi matched for this
+// request — NEVER the substituted URL.
+//
+// PRIVACY (ADR-0006 §Veri Minimizasyonu): chi.RouteContext
+// exposes TWO different paths:
+//
+//   - rctx.RoutePath     — the SUBSTITUTED path, i.e. the raw
+//     URL with path params expanded (e.g. "/api/v1/users/
+//     c8f3a1b2…"). This is the field that previously caused
+//     the device_id_hash to leak into the access log.
+//   - rctx.RoutePattern() — the REGISTERED template, e.g.
+//     "/api/v1/users/{device_id_hash}". The placeholder
+//     names never carry user data.
+//
+// We deliberately use RoutePattern() so the log line shows
+// "/api/v1/users/{device_id_hash}" — not the substituted
+// value. PII_LOG_TEST in middleware_test.go pins this
+// behaviour.
+//
+// For unmatched paths we fall back to a coarse bucket so the
+// log line still tells operators whether the request hit a
+// real route or 404'd. We never return r.URL.Path because it
+// can carry query parameters shaped like PII.
 func RoutePath(r *http.Request) string {
 	if rctx := chi.RouteContext(r.Context()); rctx != nil {
-		if p := rctx.RoutePath; p != "" {
+		if p := rctx.RoutePattern(); p != "" {
 			return p
 		}
 	}
