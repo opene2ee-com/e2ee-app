@@ -1,0 +1,46 @@
+# OpenE2EE — mobile/android — dev tooling local ignores
+# Sprint 3 §9 — Native dev tooling setup (release build Sprint 4+).
+#
+# Files matched here are NEVER committed. Team-shared Android Studio config
+# lives in mobile/android/.idea/ and is whitelisted via the root .gitignore.
+
+# Local SDK / Flutter paths (see local.properties.example for the template).
+local.properties
+
+# Signing config — release build is Sprint 4+, so key.properties is dev-local only.
+key.properties
+*.jks
+*.keystore
+*.p12
+
+# Gradle cache (build artifact)
+.gradle/
+
+# Android Studio profiler captures (device traces)
+captures/
+
+# Android Studio navigation editor (auto-generated)
+.navigation/
+
+# Android Studio user-specific files (already ignored in root .gitignore,
+# but listed here for clarity inside the android/ dir).
+*.iml
+.idea/libraries/
+.idea/caches/
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/dictionaries/
+.idea/shelf/
+.idea/httpRequests/
+.idea/dataSources/
+.idea/dataSources.local.xml
+.idea/compiler.xml
+.idea/encodings.xml
+.idea/jarRepositories.xml
+.idea/mongo-express.xml
+
+# Generated files (built from sources)
+.cxx/
+build/
+outputs/
