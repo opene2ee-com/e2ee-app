@@ -1,35 +1,34 @@
 // mobile/test/mobile/vpn/method_channel_test.dart
 //
-// PR-22a (Sprint 3) — Unit tests for the VPN MethodChannel bridge.
-//
-// These tests exercise the Dart-side surface only. The Kotlin/Swift
-// native code cannot be compiled by `flutter test` (no Gradle/Xcode in
-// this branch yet — see SPRINT-3-SCOPE.md §7), so we drive a fake
-// `BinaryMessenger` via `TestDefaultBinaryMessengerBinding` and assert
-// the round-trip.
-//
+
+// PR-22b (Sprint 3) — Unit tests for the VPN MethodChannel bridge.//
 // Coverage matrix
 // ---------------
 // 1. start / stop / status round-trip via MethodChannelVpnBridge.
-// 2. Per-app VPN: setAllowedApplications + setDisallowedApplications
-//    forward packages to native.
-// 3. Permission flow: ensurePermission() / isPermissionGranted().
+
+// 2. Per-app VPN: setAllowedApplications / setDisallowedApplications
+//    forward bundle IDs to native (iOS 14+ NEAppRules).
+// 3. Permission flow: ensurePermission() / isPermissionGranted()
+//    round-trip through `opene2ee/vpn_permissions`.
 // 4. Telemetry dispatch: native → Dart `onTelemetry` routes into the
 //    broadcast stream.
 // 5. Error dispatch: `onError` → `errors` stream.
-// 6. NoopVpnBridge falls back to VpnLifecycleState.unavailable.
+// 6. NoopVpnBridge: throws VpnPermissionDeniedError on start()
+//    (mirrors the production contract for unsupported platforms).
 // 7. Privacy invariant: no payload field on VpnPacketMetadata.
-// 8. VpnStatusSnapshot.fromMap round-trip.
-
+// 8. VpnStatusSnapshot.fromMap round-trip with all state values
+//    (idle / sampling / draining / stopped / error / unavailable).
+// 9. iOS-specific: per-app VPN with reverse-DNS bundle IDs (e.g.
+//    `com.opene2ee.app`).
 import 'dart:async';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:opene2ee/mobile/vpn/method_channel.dart';
 
-/// Register a mock handler on the VPN MethodChannel. Returns nothing —
-/// tests use the closure to inspect captured calls.
-void _setVpnHandler(
+
+/// Register a mock handler on the VPN MethodChannel. The tests use the
+/// closure to inspect captured calls.void _setVpnHandler(
   Future<dynamic> Function(MethodCall call) handler,
 ) {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -73,7 +72,6 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   tearDown(() {
-    // Clear handlers so subsequent test groups don't share state.
     TestWidgetsFlutterBinding.ensureInitialized();
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -88,9 +86,8 @@ void main() {
   });
 
   group('MethodChannelVpnBridge.transport', () {
-    test('start invokes the vpn channel with permission granted',
-        () async {
-      _setVpnHandler((call) async {
+
+    test('start invokes the vpn channel with permission granted', () async {      _setVpnHandler((call) async {
         if (call.method == 'start') {
           return {
             'state': 'sampling',
@@ -109,12 +106,12 @@ void main() {
       expect(snap.state, VpnLifecycleState.sampling);
       expect(snap.samplingCap, 10);
 
+      expect(snap.packetsObserved, 0);
       bridge.dispose();
     });
 
-    test('stop invokes the vpn channel and forwards the response',
-        () async {
-      _setVpnHandler((call) async {
+
+    test('stop invokes the vpn channel and forwards the response', () async {      _setVpnHandler((call) async {
         if (call.method == 'stop') {
           return {
             'state': 'stopped',
@@ -146,8 +143,8 @@ void main() {
             'ringSize': 7,
             'samplingCap': 10,
             'lastError': null,
-            'allowedApplications': ['com.example.a'],
-            'disallowedApplications': null,
+
+            'allowedApplications': ['com.opene2ee.app'],            'disallowedApplications': null,
           };
         }
         return null;
@@ -160,8 +157,8 @@ void main() {
       expect(snap.packetsObserved, 7);
       expect(snap.ringSize, 7);
       expect(snap.samplingCap, 10);
-      expect(snap.allowedApplications, ['com.example.a']);
-      expect(snap.disallowedApplications, isNull);
+
+      expect(snap.allowedApplications, ['com.opene2ee.app']);      expect(snap.disallowedApplications, isNull);
 
       bridge.dispose();
     });
@@ -179,18 +176,52 @@ void main() {
 
       bridge.dispose();
     });
-  });
 
-  group('MethodChannelVpnBridge.per-app VPN', () {
-    test('setAllowedApplications completes without throwing', () async {
-      _setVpnHandler((call) async => true);
+
+    test('start with state=error from native surfaces error', () async {
+      _setVpnHandler((call) async {
+        if (call.method == 'start') {
+          return {
+            'state': 'error',
+            'packetsObserved': 0,
+            'ringSize': 0,
+            'samplingCap': 10,
+            'lastError': 'VPN_START_FAILED: setTunnelNetworkSettings invalid',
+          };
+        }
+        return null;
+      });
       _setPermHandler((call) async => true);
 
       final bridge = MethodChannelVpnBridge();
-      await bridge.setAllowedApplications(
-        const ['com.opene2ee.app', 'com.example.a'],
-      );
+      final snap = await bridge.start();
+      expect(snap.state, VpnLifecycleState.error);
+      expect(snap.lastError, contains('setTunnelNetworkSettings'));
 
+      bridge.dispose();
+    });
+  });
+
+  group('MethodChannelVpnBridge.per-app VPN (iOS 14+)', () {
+    test('setAllowedApplications forwards iOS bundle IDs to native',
+        () async {
+      final captured = <MethodCall>[];
+      _setVpnHandler((call) async {
+        captured.add(call);
+        return true;
+      });
+      _setPermHandler((call) async => true);
+
+      final bridge = MethodChannelVpnBridge();
+      await bridge.setAllowedApplications(const <String>[
+        'com.opene2ee.app',
+        'com.example.a',
+      ]);
+
+      final capturedCall = captured.firstWhere((c) => c.method == 'setAllowedApplications');
+      expect(capturedCall.arguments, isA<Map>());
+      final args = capturedCall.arguments as Map;
+      expect(args['packages'], ['com.opene2ee.app', 'com.example.a']);
       bridge.dispose();
     });
 
@@ -199,8 +230,10 @@ void main() {
       _setPermHandler((call) async => true);
 
       final bridge = MethodChannelVpnBridge();
-      await bridge.setDisallowedApplications(const ['com.example.bypass']);
 
+      await bridge.setDisallowedApplications(const <String>[
+        'com.example.bypass',
+      ]);
       bridge.dispose();
     });
 
@@ -317,39 +350,98 @@ void main() {
         channel: kVpnMethodChannel,
         method: 'onError',
         args: {
-          'code': 'tun_read_failed',
-          'message': 'lost TUN',
-        },
+
+          'code': 'NEProviderError',
+          'message': 'configuration invalid',        },
       );
 
       final err =
           await completer.future.timeout(const Duration(seconds: 2));
-      expect(err.code, 'tun_read_failed');
-      expect(err.message, 'lost TUN');
 
+      expect(err.code, 'NEProviderError');
+      expect(err.message, 'configuration invalid');
       await sub.cancel();
+      bridge.dispose();
+    });
+
+
+    test('multiple listeners all receive telemetry events', () async {
+      _setVpnHandler((call) async => null);
+      _setPermHandler((call) async => true);
+
+      final bridge = MethodChannelVpnBridge();
+      final c1 = Completer<VpnTelemetry>();
+      final c2 = Completer<VpnTelemetry>();
+      final s1 = bridge.telemetry.listen(c1.complete);
+      final s2 = bridge.telemetry.listen(c2.complete);
+
+      await _pushPlatformCall(
+        channel: kVpnMethodChannel,
+        method: 'onTelemetry',
+        args: {
+          'sessionId': 'fan-out-1',
+          'packets': <Map<Object?, Object?>>[],
+          'capturedAt': 1700000000001,
+        },
+      );
+
+      final t1 = await c1.future.timeout(const Duration(seconds: 2));
+      final t2 = await c2.future.timeout(const Duration(seconds: 2));
+      expect(t1.sessionId, 'fan-out-1');
+      expect(t2.sessionId, 'fan-out-1');
+
+      await s1.cancel();
+      await s2.cancel();
       bridge.dispose();
     });
   });
 
   group('NoopVpnBridge', () {
-    test('all control methods report VpnLifecycleState.unavailable',
+    test('status returns the unavailable sentinel', () async {
+      const bridge = NoopVpnBridge();
+      final snap = await bridge.status();
+      expect(snap.state, VpnLifecycleState.unavailable);
+      expect(snap.packetsObserved, 0);
+      expect(snap.samplingCap, 0);
+    });
+
+    test('start throws VpnPermissionDeniedError (no permission on web)',
         () async {
       const bridge = NoopVpnBridge();
-      expect((await bridge.start()).state, VpnLifecycleState.unavailable);
-      expect((await bridge.stop()).state, VpnLifecycleState.unavailable);
-      expect((await bridge.status()).state, VpnLifecycleState.unavailable);
-      expect(await bridge.ensurePermission(), isFalse);
-      expect(await bridge.isPermissionGranted(), isFalse);
+      expect(
+        () => bridge.start(),
+        throwsA(isA<VpnPermissionDeniedError>()),
+      );
+    });
+
+    test('stop returns the unavailable sentinel', () async {
+      const bridge = NoopVpnBridge();
+      final snap = await bridge.stop();
+      expect(snap.state, VpnLifecycleState.unavailable);
+    });
+
+    test('per-app methods are silent no-ops', () async {
+      const bridge = NoopVpnBridge();
       await bridge.setAllowedApplications(const ['a', 'b']);
       await bridge.setDisallowedApplications(const ['c']);
+      expect(await bridge.ensurePermission(), isFalse);
+      expect(await bridge.isPermissionGranted(), isFalse);
     });
+
+    test('telemetry + errors streams are empty', () async {
+      const bridge = NoopVpnBridge();
+      expect(bridge.telemetry, isA<Stream<VpnTelemetry>>());
+      expect(bridge.errors, isA<Stream<VpnBridgeError>>());
+      // Empty streams complete immediately on listen; just verify they
+      // do not hang.
+      await bridge.telemetry.toList();
+      await bridge.errors.toList();    });
   });
 
   group('Privacy invariants (ADR-0006)', () {
     test('VpnPacketMetadata has no payload field', () {
-      final m = const VpnPacketMetadata(
-        version: 4,
+
+      const m = VpnPacketMetadata(        version: 4,
         protocol: 6,
         packetLength: 60,
       );
@@ -381,27 +473,35 @@ void main() {
   });
 
   group('VpnStatusSnapshot.fromMap round-trip', () {
-    test('parses known state values', () {
-      for (final s in ['idle', 'sampling', 'draining', 'stopped', 'error']) {
+
+    test('parses all known state values', () {
+      final expected = <String, VpnLifecycleState>{
+        'idle': VpnLifecycleState.idle,
+        'sampling': VpnLifecycleState.sampling,
+        'draining': VpnLifecycleState.draining,
+        'stopped': VpnLifecycleState.stopped,
+        'error': VpnLifecycleState.error,
+      };
+      expected.forEach((raw, expectedState) {
         final snap = VpnStatusSnapshot.fromMap({
-          'state': s,
-          'packetsObserved': 0,
+          'state': raw,          'packetsObserved': 0,
           'ringSize': 0,
           'samplingCap': 10,
         });
-        if (s != 'idle') {
-          expect(
-            snap.state,
-            isIn(<VpnLifecycleState>{
-              VpnLifecycleState.sampling,
-              VpnLifecycleState.draining,
-              VpnLifecycleState.stopped,
-              VpnLifecycleState.error,
-            }),
-          );
-        }
-      }
+
+        expect(snap.state, expectedState,
+            reason: 'state $raw should map to $expectedState');
+      });
     });
+
+    test('unknown state falls back to idle', () {
+      final snap = VpnStatusSnapshot.fromMap({
+        'state': 'weird',
+        'packetsObserved': 0,
+        'ringSize': 0,
+        'samplingCap': 10,
+      });
+      expect(snap.state, VpnLifecycleState.idle);    });
 
     test('unavailable sentinel is consistent', () {
       const a = VpnStatusSnapshot.unavailable;
@@ -409,5 +509,17 @@ void main() {
       expect(identical(a, b), isTrue);
       expect(a.state, VpnLifecycleState.unavailable);
     });
-  });
+
+
+    test('omitted allowedApplications is null', () {
+      final snap = VpnStatusSnapshot.fromMap({
+        'state': 'idle',
+        'packetsObserved': 0,
+        'ringSize': 0,
+        'samplingCap': 10,
+      });
+      expect(snap.allowedApplications, isNull);
+      expect(snap.disallowedApplications, isNull);
+      expect(snap.lastError, isNull);
+    });  });
 }

@@ -1,20 +1,25 @@
 // mobile/lib/mobile/vpn/method_channel.dart
 //
-// PR-10 + PR-22a — Dart-side bridge to the native VPN services.
+
+// PR-10 + PR-22a + PR-22b — Dart-side bridge to the native VPN services.
+//
+// PR-22b (Sprint 3) iOS upgrade:
+//   * `MethodChannelVpnBridge` returns [VpnStatusSnapshot] from
+//     start/stop/status (matches the Android side from PR-22a).
+//   * Permission handshake kept on `opene2ee/vpn_permissions` channel —
+//     on iOS the channel is owned by `AppDelegate` rather than the
+//     tunnel provider itself.
 //
 // PR-22a (Sprint 3) upgrade:
 //   * Added `setAllowedApplications` / `setDisallowedApplications` for
-//     per-app VPN (Android 5.0+ via `VpnService.Builder.allowedApplications`).
+//     per-app VPN (Android: VpnService.Builder.allowedApplications;
+//     iOS 14+: NEAppRules + NETunnelProviderManager).
 //   * Added `ensurePermission` / `isPermissionGranted` API backed by the
-//     new `opene2ee/vpn_permissions` channel owned by `MainActivity`.
-//     This is the recommended path for acquiring `VpnService.prepare()`
-//     consent — calling `VpnService.prepare(...)` from a Service context
-//     throws because only Activities may launch the system consent sheet.
-//   * `start()` no longer attempts to prepare the VPN itself; callers MUST
-//     invoke `ensurePermission()` (or the underlying
-//     `VpnService.prepare(...)` directly) before `start()`.
-//
-// Privacy contract (ADR-0006) is preserved: payloads never cross the
+//     `opene2ee/vpn_permissions` channel.
+//   * `start()` no longer attempts to prepare the VPN itself; callers
+//     MUST invoke `ensurePermission()` (Android) or the system NE
+//     preferences UI (iOS) before `start()`.
+//// Privacy contract (ADR-0006) is preserved: payloads never cross the
 // bridge — only metadata snapshots.
 //
 // References
@@ -29,14 +34,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Channel name shared with the Android (`vpn_service_android.kt`) and iOS
-/// (`NetworkExtension.swift`) implementations.
+
+/// (`NetworkExtension.swift` + `AppDelegate.swift`) implementations.
 const String kVpnMethodChannel = 'opene2ee/vpn';
 
-/// Companion channel owned by `MainActivity` for the
-/// `VpnService.prepare()` / system consent handshake. We keep this SEPARATE
-/// from [kVpnMethodChannel] because the prepare flow needs an Activity
-/// context (only `MainActivity` has one).
-const String kVpnPermissionsChannel = 'opene2ee/vpn_permissions';
+/// Companion channel owned by `MainActivity`/`AppDelegate` for the
+/// VPN consent handshake. We keep this SEPARATE from [kVpnMethodChannel]
+/// because the prepare flow on Android needs an Activity context (only
+/// `MainActivity` has one), and on iOS the channel is owned by the
+/// `AppDelegate` because `NEPacketTunnelProvider` extensions cannot
+/// register MethodChannels directly.const String kVpnPermissionsChannel = 'opene2ee/vpn_permissions';
 
 /// Current lifecycle state of the native VPN sampler.
 enum VpnLifecycleState {
@@ -88,11 +95,12 @@ class VpnStatusSnapshot {
   /// Error message if [state] == [VpnLifecycleState.error], else null.
   final String? lastError;
 
-  /// Per-app VPN allowlist (package names) currently configured.
+
+  /// Per-app VPN allowlist (bundle IDs on iOS, package names on Android)
+  /// currently configured. Empty/null = all apps.
   final List<String>? allowedApplications;
 
-  /// Per-app VPN denylist (package names) currently configured.
-  final List<String>? disallowedApplications;
+  /// Per-app VPN denylist currently configured. Empty/null = no exception.  final List<String>? disallowedApplications;
 
   /// Sentinel for platforms without native VPN support.
   static const VpnStatusSnapshot unavailable = VpnStatusSnapshot(
@@ -137,7 +145,10 @@ class VpnStatusSnapshot {
 }
 
 /// A single packet's metadata as extracted on the native side.
-@immutable
+
+///
+/// **Privacy invariant (ADR-0006):** the `payload` field is forbidden by
+/// contract.@immutable
 class VpnPacketMetadata {
   const VpnPacketMetadata({
     required this.version,
@@ -237,8 +248,8 @@ class VpnBridgeError {
 }
 
 /// Public contract the UI layer depends on. Hides the `MethodChannel`
-/// so screens can be unit-tested with [NoopVpnBridge] / [MockVpnBridge].
-abstract class VpnBridge {
+
+/// so screens can be unit-tested with [NoopVpnBridge].abstract class VpnBridge {
   /// Start the native sampler. Throws [VpnPermissionDeniedError] if the
   /// caller has not yet obtained consent via [ensurePermission] (Android)
   /// or the system NE preferences UI (iOS).
@@ -250,27 +261,22 @@ abstract class VpnBridge {
   /// Snapshot of the native state machine.
   Future<VpnStatusSnapshot> status();
 
-  /// Restrict the VPN to a per-app allowlist (Android 5.0+). Passing an
-  /// empty list clears the allowlist. Mutually exclusive with
-  /// [setDisallowedApplications] — the native side will throw on start if
-  /// both lists are non-empty (matches Android's [VpnService.Builder]
-  /// contract).
-  Future<void> setAllowedApplications(List<String> packageNames);
+
+  /// Restrict the VPN to a per-app allowlist (Android 5.0+; iOS 14+
+  /// via `NEAppRules`). Passing an empty list clears the allowlist.
+  /// Mutually exclusive with [setDisallowedApplications].
+  Future<void> setAllowedApplications(List<String> bundleOrPackageIds);
 
   /// Inverse of [setAllowedApplications] — bypass the VPN for these apps.
-  Future<void> setDisallowedApplications(List<String> packageNames);
+  Future<void> setDisallowedApplications(List<String> bundleOrPackageIds);
 
-  /// Ensure the user has consented to the system VPN sheet. Returns true
-  /// when consent was obtained (or already held). Returns false if the
-  /// user declined — in that case, [start] will fail.
-  ///
-  /// This is the only safe path to acquire consent on Android, because
-  /// [VpnService.prepare] needs an Activity context.
+  /// Ensure the user has consented to the system VPN sheet. Returns
+  /// true when consent was obtained (or already held). Returns false
+  /// if the user declined — in that case, [start] will fail.
   Future<bool> ensurePermission();
 
   /// Was consent already obtained in this app install? Faster than
-  /// [ensurePermission] if the answer is "yes" (no intent is fired).
-  Future<bool> isPermissionGranted();
+  /// [ensurePermission] if the answer is "yes" (no intent / sheet shown).  Future<bool> isPermissionGranted();
 
   /// Stream of telemetry callbacks from the native side.
   Stream<VpnTelemetry> get telemetry;
@@ -357,17 +363,17 @@ class MethodChannelVpnBridge implements VpnBridge {
   }
 
   @override
-  Future<void> setAllowedApplications(List<String> packageNames) async {
+
+  Future<void> setAllowedApplications(List<String> bundleOrPackageIds) async {
     await _vpnChannel.invokeMethod<void>('setAllowedApplications', {
-      'packages': packageNames,
-    });
+      'packages': bundleOrPackageIds,    });
   }
 
   @override
-  Future<void> setDisallowedApplications(List<String> packageNames) async {
+
+  Future<void> setDisallowedApplications(List<String> bundleOrPackageIds) async {
     await _vpnChannel.invokeMethod<void>('setDisallowedApplications', {
-      'packages': packageNames,
-    });
+      'packages': bundleOrPackageIds,    });
   }
 
   @override
@@ -396,18 +402,29 @@ class MethodChannelVpnBridge implements VpnBridge {
     _telemetryCtrl.close();
     _errorCtrl.close();
   }
+
+
+  /// Lightweight constructor alias used in unit tests that inject both
+  /// channels explicitly.
+  static VpnStatusSnapshot parseStatus(Map<Object?, Object?> map) =>
+      VpnStatusSnapshot.fromMap(map);
 }
 
 /// No-op bridge used on platforms without native VPN support (web, desktop)
-/// and inside `flutter test`. Never throws — `start` requires permission first
-/// and we return false; `setAllowedApplications` etc. silently accept and
-/// drop the input.
-class NoopVpnBridge implements VpnBridge {
+/// and inside `flutter test`. Never throws — `start` requires permission
+/// first and we throw [VpnPermissionDeniedError]; `setAllowedApplications`
+/// etc. silently accept and drop the input.class NoopVpnBridge implements VpnBridge {
   const NoopVpnBridge();
 
   @override
-  Future<VpnStatusSnapshot> start() async => VpnStatusSnapshot.unavailable;
 
+  Future<VpnStatusSnapshot> start() async {
+    // Mirror the production contract: callers must call ensurePermission
+    // first. We always return false so start throws.
+    throw VpnPermissionDeniedError(
+      'NoopVpnBridge.start: ensurePermission returned false on a no-op platform',
+    );
+  }
   @override
   Future<VpnStatusSnapshot> stop() async => VpnStatusSnapshot.unavailable;
 
@@ -415,11 +432,11 @@ class NoopVpnBridge implements VpnBridge {
   Future<VpnStatusSnapshot> status() async => VpnStatusSnapshot.unavailable;
 
   @override
-  Future<void> setAllowedApplications(List<String> packageNames) async {}
+
+  Future<void> setAllowedApplications(List<String> bundleOrPackageIds) async {}
 
   @override
-  Future<void> setDisallowedApplications(List<String> packageNames) async {}
-
+  Future<void> setDisallowedApplications(List<String> bundleOrPackageIds) async {}
   @override
   Future<bool> ensurePermission() async => false;
 
