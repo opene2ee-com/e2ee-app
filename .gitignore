@@ -37,13 +37,8 @@ $RECYCLE.BIN/
 # ─────────────────────────────────────────────────────────────
 # Editor / IDE
 # ─────────────────────────────────────────────────────────────
-# VSCode — workspace state ignored, allowlist team config
+# Visual Studio (NOT VSCode — farklı araç, farklı klasör)
 .vs/
-.vscode/
-!.vscode/settings.json
-!.vscode/extensions.json
-!.vscode/launch.json
-!.vscode/tasks.json
 
 # IntelliJ / GoLand / Android Studio
 .idea/
