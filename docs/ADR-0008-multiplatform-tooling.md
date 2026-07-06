@@ -133,8 +133,64 @@ pass on Linux before merge.
 
 ---
 
+## Per-OS Matrix (Sprint 3 §5)
+
+Sprint 3 PR-MP-CI shipped a GitHub Actions multi-OS matrix. The matrix
+is the authoritative source for "what runs on which OS today". The
+table below mirrors the matrix in `.github/workflows/ci.yml` and adds
+two rows (iOS Xcode, Android Gradle) that are not yet CI jobs but
+express the platform-runtime expectation for native builds.
+
+Legend: ✓ = runs in CI / supported on this OS, ✗ = not run / not
+supported, ✓✓ = primary canonical CI runner.
+
+| Feature                      | Ubuntu (linux)        | macOS                  | Windows                | Notes                                                                                                                  |
+|------------------------------|-----------------------|------------------------|------------------------|------------------------------------------------------------------------------------------------------------------------|
+| Go build (`go build`)        | ✓✓                    | ✓                      | ✓                      | Cross-OS matrix leg `go-build-test` (ubuntu + macos + windows)                                                        |
+| Go test (`go test`)          | ✓✓                    | ✓                      | ✓                      | Same matrix leg; services: `timescale/timescaledb-ha:pg16` + `redis:7-alpine`                                          |
+| Flutter analyze              | ✓✓                    | ✓                      | ✓                      | Matrix leg `flutter-analyze-test` (3 OSes); `--fatal-infos`                                                            |
+| Flutter test                 | ✓✓                    | ✓                      | ✓                      | Same matrix leg                                                                                                        |
+| Docker compose config        | ✓                     | ✓                      | ✗                      | Matrix leg `docker-compose-config` (Linux + macOS only); Windows skipped — bash anchors + POSIX secret paths in `infra/docker-compose.yml` |
+| Privacy check (KVKK DELETE)  | ✓✓                    | ✓                      | ✓                      | Matrix leg `privacy-check` (3 OSes); grep + KVKK DELETE smoke test                                                     |
+| Race detection (`-race`)     | ✓                     | ✗                      | ✗                      | `backend-test` job (`ubuntu-latest` only); Sprint 5 PR-31 added it (separate from the cross-OS matrix)                |
+| iOS Xcode build              | ✗                     | ✓                      | ✗                      | Xcode + CocoaPods required; macOS-only — Windows + Linux runners not provisioned                                       |
+| Android Gradle build         | ✓                     | ✗                      | ✗                      | Gradle wrapper runs on Linux only (no macOS/Windows runner provisioned for `gradlew assembleDebug`)                    |
+
+### Runner rationale
+
+* `ubuntu-latest` is the **canonical CI runner** — every PR must pass
+  on Linux before merge.
+* macOS + Windows are kept on the matrix for early cross-OS regression
+  catching; both are Linux-equivalent for `go test` / `flutter test`.
+* `-race` is Linux-only: the matrix's job is to confirm the suite
+  PASSES on all 3 runners with the same source; race detection would
+  multiply runner-minutes without proportional signal (Sprint 5
+  PR-31).
+* Docker compose validation is intentionally Linux + macOS —
+  `infra/docker-compose.yml` uses bash anchors (`<<: *default-restart`)
+  and POSIX secret file paths (`../.secrets/...`) that don't translate
+  to Windows bash.
+
+### Sprint 3 PR-MP-CI deliverable
+
+* `.github/workflows/ci.yml` multi-OS matrix with 11 legs (3+3+2+3).
+* This matrix is the canonical source for the ✓/✗ cells above.
+* Sprint 5 PR-31 added the dedicated `backend-test` (race + cover) job
+  on Linux (not in the original 11-leg matrix).
+
+### Follow-ups
+
+* Provision a `macos-latest` runner for iOS Xcode build (Sprint 6+).
+* Decide whether Windows Android build is worth the runner-minute
+  cost (low value — Flutter mobile targets Linux CI already).
+* Reconsider `-race` parity on macOS once cgo / clang parity is
+  verified (Sprint 5 PR-31 memory entry).
+
+---
+
 **Cross-references.**
 * Source: [`docs/ARCHITECTURE_DECISIONS.md`](ARCHITECTURE_DECISIONS.md) §1, §2
 * Contributor guide: [`docs/MULTIPLATFORM.md`](MULTIPLATFORM.md)
 * Native dev tooling: [`docs/NATIVE-DEV-SETUP.md`](NATIVE-DEV-SETUP.md)
 * Sprint 3 plan template: [`docs/SPRINT-3-PLAN-TEMPLATE.md`](SPRINT-3-PLAN-TEMPLATE.md)
+* CI workflow: [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)
