@@ -1,6 +1,6 @@
 // mobile/lib/mobile/screens/active_pool_screen.dart
 //
-// PR-10: Mobile-only — Active pool screen (UI skeleton).
+// PR-10 + PR-22b — Active pool screen (UI skeleton, calls real VPN bridge).
 //
 // Purpose (per HANDOFF §4.2 PR-10 + BRD §6.1)
 // -------------------------------------------
@@ -8,6 +8,9 @@
 // requests. Real matchmaking lives in the backend (PR-6 matching pool
 // + WebSocket signalling); this screen just toggles "I am in the pool"
 // state and surfaces a placeholder list of nearby sessions.
+//
+// PR-22b updates: handles `VpnPermissionDeniedError` from `start()`
+// when the user has not yet granted VPN consent.
 //
 // Privacy contract (ADR-0006)
 // ---------------------------
@@ -27,10 +30,6 @@ import 'package:flutter/material.dart';
 import '../vpn/method_channel.dart';
 
 /// Active pool screen — "be a receiver" toggle.
-///
-/// Skeleton: empty Scaffold + AppBar + title + body placeholder.
-/// Phase 2 work (operator name + city list, real pool enrolment via
-/// PR-6 backend) is out of scope for Sprint 1.
 class ActivePoolScreen extends StatefulWidget {
   const ActivePoolScreen({super.key, VpnBridge? bridge})
       : _bridgeOverride = bridge;
@@ -52,18 +51,27 @@ class _ActivePoolScreenState extends State<ActivePoolScreen> {
     if (value) {
       // Joining the pool requires the native sampler to be running so the
       // user can act as a receiver for inbound test requests.
-      final next = await _bridge.start();
-      if (!mounted) return;
-      setState(() {
-        _enrolled = next == VpnLifecycleState.sampling;
-        _state = next;
-      });
+      try {
+        final next = await _bridge.start();
+        if (!mounted) return;
+        setState(() {
+          _enrolled = next.state == VpnLifecycleState.sampling;
+          _state = next.state;
+        });
+      } on VpnPermissionDeniedError catch (_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('VPN permission is required to join the pool'),
+          ),
+        );
+      }
     } else {
       final next = await _bridge.stop();
       if (!mounted) return;
       setState(() {
         _enrolled = false;
-        _state = next;
+        _state = next.state;
       });
     }
   }
