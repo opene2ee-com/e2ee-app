@@ -167,12 +167,29 @@ services:
   # --------------------------------------------------------------------------
   # AOF (Append-Only File) persistence: every second fsync.
   # Internal-only.
+  #
+  # Sprint 7 PR-43 (SEC-6/7): REDIS_PASSWORD is now REQUIRED (fail-closed)
+  # — `${REDIS_PASSWORD:?...}` expansion. Previously the redis container
+  # started with --protected-mode no and no --requirepass, exposing an
+  # unauthenticated cache on the docker bridge. Now:
+  #   --protected-mode yes  (default; explicit)
+  #   --requirepass X       (X = $REDIS_PASSWORD, same as backend's)
+  # Backend is also updated to consume the same REDIS_PASSWORD env (see
+  # the backend service above). Host port mapping is removed so the
+  # container is internal-only (the only access path is via the `internal`
+  # docker network). To debug from the host with `redis-cli`, prefer the
+  # `docker compose exec redis redis-cli -a "$REDIS_PASSWORD"` pattern.
   # --------------------------------------------------------------------------
   redis:
     <<: *default-restart
     image: redis:7-alpine
     container_name: opene2ee-redis
     hostname: redis
+    # REDIS_PASSWORD is required by both --requirepass below AND the
+    # backend service's REDIS_PASSWORD env. Compose :? expansion fails
+    # the stack at startup if either is unset.
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD gerekli (bkz infra/.env.example — openssl rand -hex 32)}"
     command:
       - "redis-server"
       - "--appendonly"
@@ -187,21 +204,38 @@ services:
       - "900 1"
       - "--save"
       - "300 10"
+      # NB: --bind keeps 0.0.0.0 because backend talks to redis via
+      # the docker bridge NIC (172.30.0.x). True bind 127.0.0.1 would
+      # require network_mode: host for the redis service AND a
+      # topology rewrite — out of scope for SEC-6/7. Equivalent
+      # security: --protected-mode yes + --requirepass + no host
+      # port mapping (below) + internal-only network.
       - "--bind"
       - "0.0.0.0"
       - "--protected-mode"
-      - "no"
-      # Dev ortamı şifresiz; üretimde requirepass eklenmeli.
+      - "yes"
+      # Sprint 7 PR-43 (SEC-6/7): --requirepass is required. Auth is
+      # enforced — clients (backend's Redis client) MUST `AUTH` with
+      # the matching REDIS_PASSWORD before any non-AUTH command.
+      - "--requirepass"
+      - "${REDIS_PASSWORD:?REDIS_PASSWORD gerekli (bkz infra/.env.example — openssl rand -hex 32)}"
     volumes:
       - redis_data:/data
     networks:
       - internal
     expose:
       - "6379"
-    ports:
-      - "${REDIS_HOST_PORT:-6379}:6379"
+    # Sprint 7 PR-43 (SEC-6/7): host port mapping removed by default
+    # (no `ports:` block) so the container is internal-only. To debug
+    # from the host: `docker compose exec redis redis-cli -a "$REDIS_PASSWORD"`.
+    # If a host port mapping is genuinely needed for an external client,
+    # document the justification in infra/README.md and add back the
+    # mapping with a non-default REDIS_HOST_PORT.
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # Use `-a` to pass the same REDIS_PASSWORD — required now that
+      # --requirepass is enforced (Sprint 7 PR-43). Without `-a`,
+      # `redis-cli ping` would fail with NOAUTH and crash the healthcheck.
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -229,7 +263,15 @@ services:
       SERVER_PORT: "${SERVER_PORT:-8080}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-opene2ee}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-opene2ee}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
-      REDIS_PASSWORD: "${REDIS_PASSWORD:-}"
+      # REDIS_PASSWORD — Sprint 7 PR-43 (SEC-6/7). The backend's
+      # REDIS_PASSWORD MUST match the one the redis container is
+      # started with (see the redis service below:
+      # `--requirepass ${REDIS_PASSWORD:?...}`). :? = required;
+      # both the redis server AND the backend's Go client
+      # (redis.Connect in cmd/server/main.go) fail closed when
+      # this is unset. Match the Sprint 5 PR-32 JWT_SECRET
+      # fail-closed posture (ADV-3).
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD gerekli (bkz infra/.env.example — openssl rand -hex 32)}"
       SERVER_SALT: "${SERVER_SALT:?SERVER_SALT gerekli (32+ char önerilir)}"
       # JWT_SECRET — Sprint 5 PR-32 (ADV-3). Shared HS256 secret
       # used by the Go backend's auth.IssueJWT (POST /api/v1/auth)
@@ -330,6 +372,17 @@ services:
   # RFC 5766 (TURN) + RFC 5389 (STUN). WebRTC için public UDP/TCP relay.
   # Kong Bypass — HTTP proxy'lerden geçemez (UDP).
   # Dış portlar doğrudan host'a açılır.
+  #
+  # Sprint 7 SCA-22 — TLS/DTLS production config (hand-off from
+  # cyber-security). COTURN_TLS_ENABLED=true olduğunda:
+  #   - --no-tls --no-dtls komutları kaldırılır
+  #   - 5349/tcp (TURNS) + 5349/udp (DTLS) portları host'a açılır
+  #   - certbot_data volume /etc/coturn/certs olarak mount edilir (RO)
+  #   - cert/pkey + cipher-list turnserver.conf'tan aktifleşir
+  #   - Mobile client turns://turn.opene2ee.com:5349 (TLS) veya
+  #     turn+dtls://turn.opene2ee.com:5349 (DTLS) URI kullanır
+  # Dev'de COTURN_TLS_ENABLED unset/false → mevcut davranış (plain UDP/TCP
+  # STUN-only, sertifika gerektirmez) korunur.
   # --------------------------------------------------------------------------
   coturn:
     <<: *default-restart
@@ -338,39 +391,41 @@ services:
     hostname: coturn
     # network_mode: host KULLANMA — external bridge ağ üzerinden gidelim
     # ki docker DNS / healthcheck çalışsın. Prod'da net=host + firewall tercih edilir.
-    command: >
-      -n
-      --log-file=stdout
-      --realm=${COTURN_REALM:-opene2ee.local}
-      --static-auth-secret=${COTURN_STATIC_SECRET:?COTURN_STATIC_SECRET gerekli}
-      --use-auth-secret
-      --no-tls
-      --no-dtls
-      --listening-port=${COTURN_LISTEN_PORT:-3478}
-      --min-port=${COTURN_MIN_PORT:-49152}
-      --max-port=${COTURN_MAX_PORT:-65535}
-      --fingerprint
-      --no-multicast-peers
-      --no-cli
-      --no-tcp-relay
-      --stale-nonce=600
-      --no-loopback-peers
-      --no-multicast-peers
-      --allowed-peer-ip=${COTURN_PUBLIC_IP:?COTURN_PUBLIC_IP gerekli (host'un dış IP'si)}
+    # Sprint 7 SCA-22 — entrypoint script COTURN_TLS_ENABLED env'ine göre
+    # dev/prod komut ayarlarını kurar (--no-tls/--no-dtls vs --tls/--dtls +
+    # cert/pkey + cipher-list). Detay: infra/coturn/entrypoint.sh.
+    command: ["/etc/coturn/entrypoint.sh"]
     volumes:
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./coturn/entrypoint.sh:/etc/coturn/entrypoint.sh:ro
       - coturn_data:/var/lib/coturn
+      # Certbot volume mount — RO. Üretimde certbot standard layout'a
+      # göre /etc/coturn/certs/live/${COTURN_TLS_DOMAIN}/ altında cert'leri
+      # bulur. Dev'de certbot_data boş olduğundan COTURN_TLS_ENABLED=false
+      # kalır ve entrypoint --no-tls --no-dtls modunda başlatır.
+      - certbot_data:/etc/coturn/certs:ro
     networks:
       - external
     ports:
-      # STUN/TURN UDP+TCP (RFC 5766)
+      # STUN/TURN UDP+TCP (RFC 5766) — plain (SCA-22: dev fallback)
       - "${COTURN_LISTEN_PORT:-3478}:3478/udp"
       - "${COTURN_LISTEN_PORT:-3478}:3478/tcp"
-      # TURN-over-TLS (opsiyonel, dev'de kapalı)
-      # - "${COTURN_TLS_PORT:-5349}:5349/tcp"
-      # - "${COTURN_TLS_PORT:-5349}:5349/udp"
       # Port range for relay
       - "${COTURN_MIN_PORT:-49152}-${COTURN_MAX_PORT:-65535}:${COTURN_MIN_PORT:-49152}-${COTURN_MAX_PORT:-65535}/udp"
+      # Sprint 7 SCA-22 — TURN-over-TLS (5349/tcp) + TURN-over-DTLS (5349/udp).
+      # Üretimde COTURN_TLS_ENABLED=true olduğunda entrypoint Coturn'u
+      # --tls --dtls ile başlatır ve bu portlar dinlenir. Dev'de unset → false
+      # → portlar host'a expose edilse bile Coturn listener'ı yok (unreachable,
+      # ancak healthcheck UDP 3478'i kullanır — fail olmaz).
+      - "${COTURN_TLS_PORT:-5349}:5349/tcp"
+      - "${COTURN_TLS_PORT:-5349}:5349/udp"
+    environment:
+      # Sprint 7 SCA-22 — TLS gate.
+      # Dev:  unset veya "false" → --no-tls --no-dtls
+      # Prod: "true" → --tls --dtls + cert/pkey + cipher-list (TLS 1.2+ only)
+      COTURN_TLS_ENABLED: "${COTURN_TLS_ENABLED:-false}"
+      COTURN_TLS_DOMAIN: "${COTURN_TLS_DOMAIN:-${DOMAIN:-opene2ee.local}}"
+      COTURN_TLS_CERTDIR: "${COTURN_TLS_CERTDIR:-/etc/coturn/certs}"
     healthcheck:
       test: ["CMD-SHELL", "nc -z -u 127.0.0.1 ${COTURN_LISTEN_PORT:-3478} || exit 1"]
       interval: 30s
@@ -412,7 +467,13 @@ services:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
+      # Sprint 7 AUTHZ-2 — /healthz is JWT-protected at Kong (per
+      # infra/kong/kong.yml `healthz` route). The nginx container
+      # has no JWT credential, so we ping the backend directly via
+      # the internal Docker network (`backend:8080/healthz`) to
+      # confirm upstream reachability. External probes must present
+      # a JWT (see infra/kong/README.md §"Health Check").
+      test: ["CMD-SHELL", "wget -qO- http://backend:8080/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
