@@ -1,0 +1,185 @@
+# OpenE2EE — Android release build workflow
+#
+# Sprint 7 / Item 11 (MOB-4) — Hand-off from cyber-security.
+#
+# Closes the "missing android/key.properties in CI fails silent with
+# unhelpful error" finding: previously, running `./gradlew :app:assembleRelease`
+# (or `flutter build apk --release`) on a CI runner without
+# `mobile/android/key.properties` would NOT fail — instead
+# `mobile/android/app/build.gradle.kts` line 107 silently falls back to
+# the Android SDK debug keystore. The build logs "BUILD SUCCESSFUL" but
+# the resulting APK is signed with the publicly-known debug key, which
+# is a release-readiness blocker (Play Store would reject it, and any
+# "release" build distributed internally would be trivially re-signable).
+#
+# This workflow gates the release build on `key.properties` being present,
+# with a `::error::` annotation pointing operators at the runbook. The
+# gate fires BEFORE any toolchain setup so a missing file fails the
+# job in <5 seconds rather than after 3+ minutes of JDK / Flutter /
+# Android SDK provisioning.
+#
+# Scope notes:
+#   * Separate workflow (not a job in `ci.yml`) per the brief's
+#     "improved: separate dev + release workflows" suggestion. The
+#     dev jobs in `ci.yml` (`mobile-analyze`, `mobile-test`,
+#     `mobile-build-web`) intentionally do NOT require key.properties
+#     because they build debug variants that use the AGP-generated
+#     debug keystore (`~/.android/debug.keystore`).
+#   * Ubuntu-only: the Android SDK + JDK 17 toolchain is most reliable
+#     on github-hosted `ubuntu-latest` runners; macOS-hosted Android
+#     builds are slower and not needed for this gate.
+#
+# Cross-references:
+#   * docs/CI-DEBUG-FAILURES.md §key.properties — runbook for the
+#     "key.properties missing" failure mode.
+#   * mobile/android/app/build.gradle.kts lines 87-111 — the silent
+#     debug-signing fallback this gate prevents.
+#   * .gitignore line 123 — confirms `key.properties` is intentionally
+#     untracked (each dev / CI secret-store holds its own copy).
+
+name: android-release
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  FLUTTER_VERSION: "3.44.1"
+
+jobs:
+  android-release-build:
+    # Sprint 7 / Item 11 (MOB-4) — release-build job. Fires only when
+    # `mobile/android/key.properties` is present (gitignored, supplied
+    # per-runner via secret-store). On absence the job emits a
+    # `::error::` annotation referencing `docs/CI-DEBUG-FAILURES.md`
+    # and exits non-zero in the FIRST step, before toolchain setup.
+    name: Android — release build (key.properties gate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # `rootProject.file("key.properties")` in build.gradle.kts is
+        # resolved relative to the rootProject, which is
+        # `mobile/android/`. Working-directory must mirror that so
+        # the `key.properties` path in the gate step matches what
+        # the build script reads.
+        working-directory: mobile/android
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify key.properties is present (MOB-4 gate)
+        # THE FIX. Runs BEFORE JDK / Flutter / Android SDK setup so a
+        # missing key.properties fails the job in seconds, not after
+        # 3+ minutes of toolchain provisioning.
+        #
+        # The `::error::` annotation surfaces as a red marker on the
+        # workflow run summary in the GitHub Actions UI, and the
+        # runbook link in the message points reviewers at
+        # docs/CI-DEBUG-FAILURES.md §key.properties on first failure.
+        shell: bash
+        run: |
+          if [ ! -f key.properties ]; then
+            echo "::error::mobile/android/key.properties missing — required for release builds. See docs/CI-DEBUG-FAILURES.md §key.properties for setup (keytool + key.properties format + secret-store wiring)."
+            echo "::error::Without key.properties, app/build.gradle.kts falls back to the AGP debug keystore (silently signs APKs with the publicly-known debug key — release-readiness blocker)."
+            exit 1
+          fi
+          echo "key.properties present."
+
+      - name: Set up JDK 17 (Temurin)
+        # JDK 17 is the pin in mobile/android/app/build.gradle.kts
+        # compileOptions (JavaVersion.VERSION_17). Temurin is the
+        # github-actions convention; matches what `flutter doctor`
+        # recommends on Linux.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Set up Android SDK
+        # android-actions/setup-android installs the Android SDK +
+        # build-tools + platform-tools at the version the Flutter
+        # Android Gradle Plugin expects (compileSdk=34 in
+        # mobile/android/app/build.gradle.kts line 43).
+        uses: android-actions/setup-android@v3
+        with:
+          # Match the compileSdk pin in app/build.gradle.kts. The
+          # android-34 platform + build-tools 34.0.0 cover AGP 8.x
+          # defaults; bumping this in lockstep with the Gradle plugin
+          # version is a release-management concern outside this PR's
+          # scope.
+          android-platform: 34
+          android-build-tools: 34.0.0
+
+      - name: Cache pub + Android Gradle dependencies
+        # Two caches: pubspec-derived Dart deps + Gradle module
+        # artifacts. Cache keys are content-hashed so any lockfile
+        # change re-resolves, restoring the warm-cache path on the
+        # next run.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-android-release-${{ hashFiles('mobile/pubspec.lock', 'mobile/android/gradle/wrapper/gradle-wrapper.properties', 'mobile/android/build.gradle.kts', 'mobile/android/app/build.gradle.kts') }}
+          restore-keys: |
+            ${{ runner.os }}-android-release-
+
+      - name: flutter pub get
+        # Resolve Dart deps for the Flutter Android module. Required
+        # before any Gradle build because Flutter's
+        # `dev.flutter.flutter-gradle-plugin` (declared in
+        # mobile/android/app/build.gradle.kts line 38) invokes
+        # `flutter pub get` transitively if this step is skipped —
+        # doing it explicitly makes the failure mode predictable.
+        working-directory: mobile
+
+      - name: Verify Gradle wrapper
+        # Defensive: confirm `./gradlew` exists and is executable. The
+        # Flutter Android scaffold ships a wrapper but `mobile/android/
+        # gradlew` and `mobile/android/gradlew.bat` are gitignored
+        # (see .gitignore lines 120-121); if the PR under review
+        # dropped the wrapper, this step catches it BEFORE the
+        # assembleRelease step produces a confusing permission error.
+        run: |
+          if [ ! -x ./gradlew ]; then
+            echo "::error::mobile/android/gradlew missing or not executable. The Flutter Android scaffold expects a wrapper; regenerate via 'flutter create --platforms=android .' from the mobile/ directory."
+            exit 1
+          fi
+          ./gradlew --version
+
+      - name: ./gradlew :app:assembleRelease
+        # The actual release build. With key.properties present
+        # (gate above), build.gradle.kts resolves the release
+        # signingConfig at lines 87-98 and the APK is signed with
+        # the project keystore. The resulting APK lands at
+        # `mobile/android/app/build/outputs/apk/release/app-release.apk`.
+        #
+        # `set -o pipefail` keeps any piped post-processor from
+        # masking failures (matches the ios.yml convention).
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew :app:assembleRelease
+
+      - name: Upload release APK
+        # Always-uploaded (via `if: always()`) so a partial build
+        # failure still leaves a debuggable artifact for the
+        # reviewer. Retention kept short (7 days) — release builds
+        # are published through a separate signed artifact path
+        # outside CI.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: mobile/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: warn
+          retention-days: 7
