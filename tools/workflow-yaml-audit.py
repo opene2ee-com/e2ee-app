@@ -1,9 +1,11 @@
 """
-PyYAML audit for 4 GH Actions workflows + Gradle wrapper version invariant.
+PyYAML audit for 4 GH Actions workflows + Gradle wrapper version invariant
++ AGP version invariant.
 Per memory rule: PyYAML 1.1 parses `on:` as boolean `True` — use d[True].
-Applies to all workflow files; tracks the Sprint 9.6.2 + 9.6.3 fix invariants
-(added 2026-07-08 after Sprint 9.6.1 PR #13 push CI FAIL and Sprint 9.6.2
-PR #14 push CI FAIL).
+Applies to all workflow files; tracks the Sprint 9.6.2 + 9.6.3 + 9.6.4 fix
+invariants (added 2026-07-08 after Sprint 9.6.1 PR #13 push CI FAIL,
+Sprint 9.6.2 PR #14 push CI FAIL, and Sprint 9.6.3 PR #15 (push pending)
+CI FAIL).
 
 Verifies:
   1. All 4 workflows have ONLY workflow_dispatch trigger (no push/pull_request).
@@ -25,6 +27,13 @@ Verifies:
      run after Sprint 9.6.2 PR #14 push failed at app/build.gradle.kts:80
      with "Your project's Gradle version (8.5.0) is lower than Flutter's
      minimum supported version of 8.7.0".
+  8. **Sprint 9.6.4:** mobile/android/build.gradle.kts AGP plugin version
+     must be >= 8.6.0 (Flutter 3.44.1 minimum). Sprint 9.6.3 cherry-pick
+     bumped Gradle 8.5 → 8.10, but Flutter then emitted a deprecation
+     warning (Gradle 8.10 soon-dropped) and failed at app/build.gradle.kts:80
+     with "Your project's Android Gradle Plugin version (8.1.4) is lower
+     than Flutter's minimum supported version of Android Gradle Plugin
+     version 8.6.0".
 """
 import re
 import yaml
@@ -35,9 +44,10 @@ WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TARGETS = ["android-debug.yml", "ci.yml", "ios.yml", "android-release.yml"]
 
-# Flutter 3.44.1 minimum Gradle version (set in env.FLUTTER_VERSION in all
-# 4 workflows; cross-cycle consistency).
+# Flutter 3.44.1 minimum version pins (env.FLUTTER_VERSION in all 4
+# workflows; cross-cycle consistency).
 FLUTTER_MIN_GRADLE = (8, 7)
+FLUTTER_MIN_AGP = (8, 6)
 
 
 def audit_workflow(path: Path) -> list[str]:
@@ -175,6 +185,65 @@ def check_gradle_wrapper_version() -> list[str]:
     return findings
 
 
+def check_agp_version() -> list[str]:
+    """Sprint 9.6.4: mobile/android/build.gradle.kts AGP plugin version >= 8.6.0.
+
+    Flutter SDK 3.44.1 minimum AGP is 8.6.0. Sprint 9.6.3 cherry-pick
+    bumped Gradle 8.5 -> 8.10 LTS (passed `:gradle:jar`) but a live
+    workflow_dispatch run AFTER Sprint 9.6.3 cherry-pick failed at
+    `mobile/android/app/build.gradle.kts:80` with:
+        "Your project's Android Gradle Plugin version (Android Gradle
+         Plugin version 8.1.4) is lower than Flutter's minimum
+         supported version of Android Gradle Plugin version 8.6.0.
+         Please upgrade your Android Gradle Plugin version."
+
+    This check parses the AGP plugin block in the root build.gradle.kts:
+        plugins {
+            id("com.android.application") version "X.Y.Z" apply false
+            ...
+        }
+    and fails if the declared AGP version is below FLUTTER_MIN_AGP.
+
+    Note: settings.gradle.kts uses `id("com.android.application")` without
+    version (in the subproject's plugins block); the VERSION is declared
+    ONCE in the root build.gradle.kts plugins block. So this check
+    targets the root file.
+    """
+    findings = []
+    build_gradle_path = REPO_ROOT / "mobile" / "android" / "build.gradle.kts"
+    if not build_gradle_path.exists():
+        findings.append(
+            f"{build_gradle_path.name}: file missing (Sprint 9.6.4 AGP invariant)"
+        )
+        return findings
+    text = build_gradle_path.read_text(encoding="utf-8")
+    # Pattern: id("com.android.application") version "X.Y.Z" apply false
+    # Match `id("com.android.application")` (with opening + closing
+    # double-quotes around plugin ID) followed by `version "X.Y.Z"`.
+    match = re.search(
+        r'id\("com\.android\.application"\)\s+version\s+"(\d+)\.(\d+)(?:\.(\d+))?"',
+        text,
+    )
+    if not match:
+        findings.append(
+            f"build.gradle.kts: AGP plugin version pattern not recognized "
+            "(expected `id(\"com.android.application\") version \"X.Y.Z\" apply false`)"
+        )
+        return findings
+    agp_major = int(match.group(1))
+    agp_minor = int(match.group(2))
+    agp_version = (agp_major, agp_minor)
+    if agp_version < FLUTTER_MIN_AGP:
+        findings.append(
+            f"build.gradle.kts: AGP version {agp_major}.{agp_minor} "
+            f"< Flutter 3.44.1 minimum {FLUTTER_MIN_AGP[0]}.{FLUTTER_MIN_AGP[1]} "
+            "(Sprint 9.6.4 fix — was 8.1.4 before; live run after Sprint 9.6.3 "
+            "cherry-pick failed at app/build.gradle.kts:80 with Flutter Gradle "
+            "plugin AGP version check)"
+        )
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -195,12 +264,19 @@ def main() -> int:
     else:
         print(f"PASS: gradle-wrapper.properties distributionUrl >= {FLUTTER_MIN_GRADLE[0]}.{FLUTTER_MIN_GRADLE[1]}")
 
+    # Sprint 9.6.4: AGP version invariant check.
+    agp_findings = check_agp_version()
+    if agp_findings:
+        all_findings.extend(agp_findings)
+    else:
+        print(f"PASS: build.gradle.kts AGP version >= {FLUTTER_MIN_AGP[0]}.{FLUTTER_MIN_AGP[1]} (Flutter 3.44.1 minimum)")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP PASS PyYAML AUDIT.")
     return 0
 
 
