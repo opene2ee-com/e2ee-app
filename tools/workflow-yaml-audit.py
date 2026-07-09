@@ -90,6 +90,8 @@ ANDROID_GRADLE_KTS_PATH = REPO_ROOT / "mobile" / "android" / "app" / "build.grad
 # favour of the gradle namespace. Keep this single-source-of-truth
 # in one place so audit + tests + docs agree.
 ANDROID_APP_NAMESPACE = "com.opene2ee.opene2ee"
+# Sprint 9.6.11 — Android resource skeleton directories (S10).
+ANDROID_RES_DIR = REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / "res"
 # XML namespace URIs — see
 # https://developer.android.com/guide/topics/manifest/manifest-intro.
 ANDROID_NS = "http://schemas.android.com/apk/res/android"
@@ -1038,6 +1040,138 @@ def check_android_manifest_v6() -> list[str]:
     return findings
 
 
+def check_android_res_skeleton_v7() -> list[str]:
+    """Sprint 9.6.11 v7: Flutter Android resource skeleton check (S10).
+
+    The 9.6.10 live build (commit 5f3ee01 on main, fast-forward
+    merged by Owner) advanced past `processDebugMainManifest` for
+    the first time (manifest fix worked). The next task,
+    `:app:processDebugResources`, failed because three Android
+    resources referenced by AndroidManifest.xml were never
+    generated:
+
+      `mipmap/ic_launcher` (app icon)
+      `style/LaunchTheme` (launch screen style)
+      `style/NormalTheme` (normal theme style)
+
+    The repo's `mobile/android/app/src/main/res/` contained only
+    `xml/network_security_config.xml`. The rest of the Flutter
+    Android resource skeleton (mipmap-*, drawable/launch_background.xml,
+    values/styles.xml, values/colors.xml, values-night/styles.xml)
+    was never generated. The repo has had no Flutter Android
+    skeleton since PR-3.
+
+    Sprint 9.6.11 ran `flutter create . --platforms=android` and
+    kept ONLY the res/ additions (rejected any flutter create
+    changes to the preservation list: MainActivity.kt, Android
+    Manifest.xml, build.gradle.kts, lib/*, pubspec.yaml, test/).
+
+    This check verifies that the skeleton stays intact:
+
+      (a) `mobile/android/app/src/main/res/values/styles.xml`
+          exists AND contains both `<style name="LaunchTheme">`
+          AND `<style name="NormalTheme">` (parse with
+          xml.etree.ElementTree). aapt2 rejects the manifest
+          without these styles.
+      (b) AT LEAST ONE mipmap representation of the app icon
+          exists — either `mipmap-anydpi-v26/ic_launcher.xml`
+          (adaptive icon) OR any density's
+          `mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png`
+          (legacy raster). aapt2 rejects the manifest
+          without `mipmap/ic_launcher`.
+      (c) `mobile/android/app/src/main/res/drawable/launch_background.xml`
+          exists. Referenced by `LaunchTheme`'s `windowBackground`.
+
+    We do NOT check exact file contents (icon design, color palette,
+    etc.) — a future visual design sprint can refine. The audit's
+    job is "is the skeleton present", not "is the design good".
+    """
+    findings = []
+    if not ANDROID_RES_DIR.exists():
+        findings.append(
+            f"S10 {ANDROID_RES_DIR.relative_to(REPO_ROOT)}: directory "
+            f"missing (Sprint 9.6.11 invariant — Android resource "
+            f"directory should exist; PR-3 introduced the skeleton "
+            f"and every subsequent Flutter Android build expects it)"
+        )
+        return findings
+
+    # (a) styles.xml with LaunchTheme + NormalTheme
+    styles_path = ANDROID_RES_DIR / "values" / "styles.xml"
+    if not styles_path.exists():
+        findings.append(
+            f"S10 {styles_path.relative_to(REPO_ROOT)}: file missing. "
+            f"Flutter create --platforms=android generates this file. "
+            f"Without it, AndroidManifest.xml's references to "
+            f"`@style/LaunchTheme` and `@style/NormalTheme` fail to "
+            f"resolve at processDebugResources time."
+        )
+    else:
+        try:
+            tree = ET.parse(styles_path)
+        except ET.ParseError as e:
+            findings.append(
+                f"S10 {styles_path.relative_to(REPO_ROOT)}: XML parse "
+                f"failed ({e.msg} at line {e.position[0]} col {e.position[1]})"
+            )
+        else:
+            style_names = set()
+            for style in tree.getroot().findall("style"):
+                name = style.get("name")
+                if name:
+                    style_names.add(name)
+            if "LaunchTheme" not in style_names:
+                findings.append(
+                    f"S10 {styles_path.relative_to(REPO_ROOT)}: "
+                    f"`<style name=\"LaunchTheme\">` missing. Flutter create "
+                    f"generates this; it's referenced by @style/LaunchTheme "
+                    f"in AndroidManifest.xml's <activity> tag."
+                )
+            if "NormalTheme" not in style_names:
+                findings.append(
+                    f"S10 {styles_path.relative_to(REPO_ROOT)}: "
+                    f"`<style name=\"NormalTheme\">` missing. Flutter create "
+                    f"generates this; it's referenced by @style/NormalTheme "
+                    f"in AndroidManifest.xml's <meta-data android:name=\"io.flutter.embedding.android.NormalTheme\">."
+                )
+
+    # (b) at least one mipmap/ic_launcher representation
+    mipmap_dirs = [
+        ANDROID_RES_DIR / "mipmap-anydpi-v26",
+        ANDROID_RES_DIR / "mipmap-mdpi",
+        ANDROID_RES_DIR / "mipmap-hdpi",
+        ANDROID_RES_DIR / "mipmap-xhdpi",
+        ANDROID_RES_DIR / "mipmap-xxhdpi",
+        ANDROID_RES_DIR / "mipmap-xxxhdpi",
+    ]
+    has_mipmap = False
+    for d in mipmap_dirs:
+        if d.exists() and any(d.iterdir()):
+            has_mipmap = True
+            break
+    if not has_mipmap:
+        findings.append(
+            f"S10 {ANDROID_RES_DIR.relative_to(REPO_ROOT)}: no "
+            f"`mipmap/ic_launcher` representation found in any density "
+            f"directory. Flutter create generates `mipmap-mdpi/ic_launcher.png` "
+            f"through `mipmap-xxxhdpi/ic_launcher.png` and "
+            f"`mipmap-anydpi-v26/ic_launcher.xml`. AndroidManifest.xml's "
+            f"`android:icon=\"@mipmap/ic_launcher\"` fails to resolve at "
+            f"processDebugResources time."
+        )
+
+    # (c) drawable/launch_background.xml
+    launch_bg = ANDROID_RES_DIR / "drawable" / "launch_background.xml"
+    if not launch_bg.exists():
+        findings.append(
+            f"S10 {launch_bg.relative_to(REPO_ROOT)}: file missing. "
+            f"Referenced by LaunchTheme's `windowBackground`; without "
+            f"it, the launch splash has no background drawable."
+        )
+
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -1107,12 +1241,19 @@ def main() -> int:
     else:
         print("PASS: AndroidManifest.xml merger-spec (no `package=` attr + tools:replace not tools:remove + gradle namespace present) — Sprint 9.6.10 S9")
 
+    # Sprint 9.6.11 v7: Flutter Android resource skeleton check (S10).
+    s10_findings = check_android_res_skeleton_v7()
+    if s10_findings:
+        all_findings.extend(s10_findings)
+    else:
+        print("PASS: Android res/ skeleton (mipmap + drawable/launch_background + values/styles.xml with LaunchTheme+NormalTheme) — Sprint 9.6.11 S10")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton PASS PyYAML AUDIT.")
     return 0
 
 

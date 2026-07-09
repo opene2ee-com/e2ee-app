@@ -1,32 +1,24 @@
 """Self-test for check_app_build_gradle_syntax_v2 (S1-S5),
 check_android_debug_workflow_v3 (S6),
 check_mobile_entry_point_v4 (S7),
-check_android_xml_comments_v5 (S8), and
-check_android_manifest_v6 (S9).
+check_android_xml_comments_v5 (S8),
+check_android_manifest_v6 (S9), and
+check_android_res_skeleton_v7 (S10).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
-revert + audit finds 4 FAIL)". Sprint 9.6.7 extends the self-test
-to cover S6 (4 new cases: 1 PASS, 3 FAIL). Sprint 9.6.8 extends
-further to cover S7 (4 new cases: 1 PASS, 3 FAIL). Sprint 9.6.9
-extends further to cover S8 (2 new cases: 1 PASS, 1 FAIL).
-Sprint 9.6.10 extends further to cover S9 (3 new cases: 1
-PASS, 2 FAIL).
+revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
+9.6.8 extends to S7. 9.6.9 extends to S8. 9.6.10 extends to S9.
+9.6.11 extends to S10.
 
-S1-S5 cases: 6 (1 PASS + 5 FAIL, each violating exactly one of the
-S1-S5 sub-checks for app/build.gradle.kts).
-S6 cases: 4 (1 PASS + 3 FAIL, each violating exactly one of the
-S6 conditions on android-debug.yml: name match, run contains
-"flutter pub get", working-directory == "./mobile").
-S7 cases: 4 (1 PASS + 3 FAIL, each violating exactly one of the
-S7 conditions: lib/main.dart exists, has runApp(, has
-ProviderScope, pubspec has flutter_riverpod:, pubspec has
-go_router:).
-S8 cases: 2 (1 PASS + 1 FAIL — XML well-formed + no `--` inside
-`<!-- -->`).
-S9 cases: 3 (1 PASS + 2 FAIL — manifest well-formed + no package
-attr + no tools:remove clash + gradle namespace present).
+S1-S5 cases: 6 (1 PASS + 5 FAIL, ...).
+S6 cases: 4 (1 PASS + 3 FAIL, ...).
+S7 cases: 4 (1 PASS + 3 FAIL, ...).
+S8 cases: 2 (1 PASS + 1 FAIL).
+S9 cases: 3 (1 PASS + 2 FAIL).
+S10 cases: 3 (1 PASS + 2 FAIL — styles.xml + mipmap +
+launch_background.xml).
 
-Total: 19 cases.
+Total: 22 cases.
 """
 import sys
 from pathlib import Path
@@ -259,6 +251,47 @@ def run_s9_check(manifest_text: str | None, gradle_text: str | None) -> list[str
     # (5) gradle namespace present
     if 'namespace = "com.opene2ee.opene2ee"' not in gradle_text:
         findings.append("S9 fail")
+        return findings
+    return findings
+
+
+def run_s10_check(styles_text: str | None, has_mipmap: bool, has_launch_bg: bool) -> list[str]:
+    """Replicate check_android_res_skeleton_v7 logic on raw inputs.
+
+    Mirrors the audit's three-part S10 check:
+    (a) values/styles.xml exists and has both LaunchTheme + NormalTheme
+        <style> elements (parse with xml.etree.ElementTree),
+    (b) at least one mipmap representation exists (boolean probe),
+    (c) drawable/launch_background.xml exists (boolean probe).
+
+    The audit reads files from disk; the self-test takes raw text +
+    boolean flags for the boolean checks so a single fixture
+    (a styles.xml string + two booleans) can drive all 3
+    cases without a temp directory.
+    """
+    findings = []
+    if styles_text is None:
+        findings.append("S10 fail")
+        return findings
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(styles_text)
+    except Exception:
+        findings.append("S10 fail")
+        return findings
+    style_names = set()
+    for style in root.findall("style"):
+        name = style.get("name")
+        if name:
+            style_names.add(name)
+    if "LaunchTheme" not in style_names or "NormalTheme" not in style_names:
+        findings.append("S10 fail")
+        return findings
+    if not has_mipmap:
+        findings.append("S10 fail")
+        return findings
+    if not has_launch_bg:
+        findings.append("S10 fail")
         return findings
     return findings
 
@@ -659,6 +692,32 @@ case_s9_manifest_tools_remove = """<?xml version="1.0" encoding="utf-8"?>
 </manifest>
 """
 
+# ─── S10 test cases (Sprint 9.6.11) ──────────────────────────────
+
+# Case 19 (S10 PASS): post-`flutter create` resource skeleton.
+case_s10_styles_pass = """<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+    </style>
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">?android:colorBackground</item>
+    </style>
+</resources>
+"""
+
+# Case 20 (S10 FAIL — styles.xml missing LaunchTheme).
+case_s10_styles_no_launch = """<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="SomeOther" parent="@android:style/Theme.Light.NoTitleBar"/>
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar"/>
+</resources>
+"""
+
+# Case 21 (S10 FAIL — no mipmap representation).
+# (uses the same styles XML as the PASS case but has_mipmap=False triggers the mipmap sub-check)
+case_s10_styles_for_mipmap = case_s10_styles_pass
+
 # ─── Run all cases ───────────────────────────────────────────────
 
 cases = [
@@ -692,14 +751,21 @@ cases = [
      run_s8_check, (case_s8_xml_pass,), []),
     ("S8 FAIL (comment contains `--` run — Sprint 9.6.9 broken state)",
      run_s8_check, (case_s8_xml_bad,), ["S8 fail"]),
-    # S9 cases (Sprint 9.6.10 — new)
+# S9 cases (Sprint 9.6.10 — new)
     ("S9 PASS (manifest well-formed, no package attr, tools:replace, gradle namespace present)",
      run_s9_check, (case_s9_manifest_pass, case_s9_gradle_pass), []),
     ("S9 FAIL (manifest has package= attribute — Sprint 9.6.10 broken state)",
      run_s9_check, (case_s9_manifest_package, case_s9_gradle_pass), ["S9 fail"]),
     ("S9 FAIL (tools:remove co-exists with android:usesCleartextTraffic — MOB-1 broken state)",
      run_s9_check, (case_s9_manifest_tools_remove, case_s9_gradle_pass), ["S9 fail"]),
-]
+    # S10 cases (Sprint 9.6.11 — new)
+    ("S10 PASS (values/styles.xml has LaunchTheme + NormalTheme + mipmap + launch_background)",
+     run_s10_check, (case_s10_styles_pass, True, True), []),
+    ("S10 FAIL (values/styles.xml missing LaunchTheme)",
+     run_s10_check, (case_s10_styles_no_launch, True, True), ["S10 fail"]),
+    ("S10 FAIL (no mipmap/ic_launcher representation)",
+     run_s10_check, (case_s10_styles_for_mipmap, False, True), ["S10 fail"]),
+]   # noqa: E501
 
 failed = []
 for name, check_fn, args, expected in cases:
