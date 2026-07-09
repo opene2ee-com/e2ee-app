@@ -4,13 +4,15 @@ check_mobile_entry_point_v4 (S7),
 check_android_xml_comments_v5 (S8),
 check_android_manifest_v6 (S9),
 check_android_res_skeleton_v7 (S10),
-check_flutter_plugins_dependencies_v8 (S11), and
-check_flutter_kotlin_embedding_v9 (S12).
+check_flutter_plugins_dependencies_v8 (S11),
+check_flutter_kotlin_embedding_v9 (S12), and
+check_flutter_storage_repo_v10 (S13).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
 revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
 9.6.8 extends to S7. 9.6.9 extends to S8. 9.6.10 extends to S9.
 9.6.11 extends to S10. 9.6.12 extends to S11. 9.6.13 extends to S12.
+9.6.14 extends to S13.
 
 S1-S5 cases: 6 (1 PASS + 5 FAIL, ...).
 S6 cases: 4 (1 PASS + 3 FAIL, ...).
@@ -22,8 +24,10 @@ launch_background.xml).
 S11 cases: 3 (1 PASS + 2 FAIL — file missing + plugins.android
 empty array).
 S12 cases: 3 (1 PASS + 2 FAIL — dependency missing + wrong hash).
+S13 cases: 3 (1 PASS + 2 FAIL — settings block missing +
+Flutter URL missing).
 
-Total: 28 cases.
+Total: 31 cases.
 """
 import sys
 from pathlib import Path
@@ -415,6 +419,67 @@ def run_s12_check(app_gradle_text: str | None, engine_version: str | None) -> li
     if declared_hash != engine_version:
         findings.append("S12 fail")
         return findings
+    return findings
+
+
+def run_s13_check(settings_gradle_text: str | None, app_gradle_text: str | None) -> list[str]:
+    """Replicate check_flutter_storage_repo_v10 logic on raw inputs.
+
+    Mirrors the audit's S13 check:
+    (a) settings.gradle.kts contains `dependencyResolutionManagement { ... }` block
+    (b) Flutter storage URL `https://storage.googleapis.com/download.flutter.io`
+        is declared inside that block (or in app/build.gradle.kts
+        top-level `repositories { }` as fallback).
+
+    The audit reads from disk; the self-test takes the raw text of
+    both files so a single (settings, app_gradle) pair can drive
+    all 3 cases without a temp directory.
+    """
+    import re
+    findings = []
+    flutter_url = "https://storage.googleapis.com/download.flutter.io"
+    if settings_gradle_text is None:
+        findings.append("S13 fail")
+        return findings
+    # (a) find dependencyResolutionManagement block via balanced-brace walk.
+    drm_match = re.search(
+        r"^\s*dependencyResolutionManagement\s*\{",
+        settings_gradle_text,
+        re.MULTILINE,
+    )
+    if drm_match:
+        block_start = drm_match.end()
+        depth = 1
+        i = block_start
+        while i < len(settings_gradle_text) and depth > 0:
+            c = settings_gradle_text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            i += 1
+        if depth == 0:
+            drm_block_text = settings_gradle_text[block_start:i - 1]
+            if flutter_url in drm_block_text:
+                return findings  # PASS — found in settings.gradle.kts
+    # Fallback: check app/build.gradle.kts top-level `repositories { ... }`.
+    if app_gradle_text is not None:
+        for repo_match in re.finditer(r"^repositories\s*\{", app_gradle_text, re.MULTILINE):
+            block_start = repo_match.end()
+            depth = 1
+            i = block_start
+            while i < len(app_gradle_text) and depth > 0:
+                c = app_gradle_text[i]
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                i += 1
+            if depth == 0:
+                repo_block_text = app_gradle_text[block_start:i - 1]
+                if flutter_url in repo_block_text:
+                    return findings  # PASS — found in app/build.gradle.kts
+    findings.append("S13 fail")
     return findings
 
 
@@ -943,6 +1008,66 @@ dependencies {
 }
 """
 
+# Case 28 (S13 PASS): post-fix settings.gradle.kts with the
+# dependencyResolutionManagement block containing the Flutter
+# storage URL.
+case_s13_settings_pass = """pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("https://storage.googleapis.com/download.flutter.io") }
+        gradlePluginPortal()
+    }
+}
+
+include(":app")
+"""
+case_s13_app_pass_empty = ""
+
+# Case 29 (S13 FAIL - dependencyResolutionManagement block missing).
+case_s13_settings_no_drm = """pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+include(":app")
+"""
+case_s13_app_no_drm_empty = ""
+
+# Case 30 (S13 FAIL - DRM block present but Flutter storage URL missing).
+case_s13_settings_no_url = """pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+include(":app")
+"""
+case_s13_app_no_url_empty = ""
+
 # ─── Run all cases ───────────────────────────────────────────────
 
 cases = [
@@ -1004,6 +1129,13 @@ cases = [
      run_s12_check, (case_s12_gradle_no_embedding, S12_ENGINE_VERSION), ["S12 fail"]),
     ("S12 FAIL (dependency declared with wrong hash — does not match Flutter SDK engine.version)",
      run_s12_check, (case_s12_gradle_wrong_hash, S12_ENGINE_VERSION), ["S12 fail"]),
+    # S13 cases (Sprint 9.6.14 - new)
+    ("S13 PASS (settings.gradle.kts dependencyResolutionManagement block contains Flutter storage URL)",
+     run_s13_check, (case_s13_settings_pass, case_s13_app_pass_empty), []),
+    ("S13 FAIL (settings.gradle.kts missing dependencyResolutionManagement block - Sprint 9.6.14 broken state)",
+     run_s13_check, (case_s13_settings_no_drm, case_s13_app_no_drm_empty), ["S13 fail"]),
+    ("S13 FAIL (DRM block present but Flutter storage URL not declared - missing since PR-28 Sprint 5)",
+     run_s13_check, (case_s13_settings_no_url, case_s13_app_no_url_empty), ["S13 fail"]),
 ]   # noqa: E501
 
 failed = []

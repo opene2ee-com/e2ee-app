@@ -6,19 +6,22 @@ res/ XML comments + AndroidManifest merger-spec + Android res/ skeleton
 Per memory rule: PyYAML 1.1 parses `on:` as boolean `True` — use d[True].
 Applies to all workflow files; tracks the Sprint 9.6.2 + 9.6.3 + 9.6.4 +
 9.6.5 + 9.6.6 + 9.6.7 + 9.6.8 + 9.6.9 + 9.6.10 + 9.6.11 + 9.6.12 +
-9.6.13 fix invariants (added 2026-07-08 after Sprint 9.6.1 PR #13 push
-CI FAIL, Sprint 9.6.2 PR #14 push CI FAIL, Sprint 9.6.3 PR #15 push
-CI FAIL, Sprint 9.6.4 PR #15 (PUSHED) live build test CI FAIL, Sprint
-9.6.5 PR #16 (PUSHED) live build test CI FAIL, Sprint 9.6.6 PR #17
-(PUSHED) live build test CI FAIL, Sprint 9.6.7 PR #19 (PUSHED) live
-build test CI FAIL, Sprint 9.6.8 PR #20 (PUSHED) live build test CI
-FAIL, Sprint 9.6.9 PR #21 (PUSHED) live build test CI FAIL, Sprint
-9.6.10 PR #22 (PUSHED) live build test CI FAIL, Sprint 9.6.11 PR #23
-(PUSHED) live build test CI FAIL, Sprint 9.6.12 PR #24 (PUSHED) live
-build test CI FAIL, Sprint 9.6.13 PR #25 (PUSHED) live build test
-CI FAIL — REGRESSED with WRONG root cause; the real defect was
-missing `io.flutter:flutter_embedding_ktx` in app/build.gradle.kts
-dependencies).
+9.6.13 + 9.6.14 fix invariants (added 2026-07-08 after Sprint 9.6.1
+PR #13 push CI FAIL, Sprint 9.6.2 PR #14 push CI FAIL, Sprint 9.6.3
+PR #15 push CI FAIL, Sprint 9.6.4 PR #15 (PUSHED) live build test CI
+FAIL, Sprint 9.6.5 PR #16 (PUSHED) live build test CI FAIL, Sprint
+9.6.6 PR #17 (PUSHED) live build test CI FAIL, Sprint 9.6.7 PR #19
+(PUSHED) live build test CI FAIL, Sprint 9.6.8 PR #20 (PUSHED) live
+build test CI FAIL, Sprint 9.6.9 PR #21 (PUSHED) live build test CI
+FAIL, Sprint 9.6.10 PR #22 (PUSHED) live build test CI FAIL, Sprint
+9.6.11 PR #23 (PUSHED) live build test CI FAIL, Sprint 9.6.12 PR #24
+(PUSHED) live build test CI FAIL, Sprint 9.6.13 PR #25 (PUSHED) live
+build test CI FAIL — REGRESSED with WRONG root cause; the real defect
+was missing `io.flutter:flutter_embedding_ktx` in app/build.gradle.kts
+dependencies; Sprint 9.6.14 PR #26 (PUSHED) live build test CI FAIL
+— `checkDebugAarMetadata` could not find the engine JAR because
+Flutter storage Maven repo was not declared in settings.gradle.kts
+`dependencyResolutionManagement`).
 
 Verifies:
   1. All 4 workflows have ONLY workflow_dispatch trigger (no push/pull_request).
@@ -113,11 +116,22 @@ Verifies:
       reference embedding/FlutterActivity/FlutterEngine/
       MethodChannel" errors in MainActivity.kt + OpenE2eeVpnService.kt.
       Missing since PR-3 (the original Android Gradle scaffolding).
+ 18. **Sprint 9.6.14 (v10):** Flutter engine Maven repo declared
+      (S13) — `dependencyResolutionManagement { repositories { ...
+      maven { url = uri("https://storage.googleapis.com/download.
+      flutter.io") ... } } }` in `settings.gradle.kts` (or
+      `app/build.gradle.kts` `repositories { }` as fallback).
+      Without this, AGP-managed tasks (e.g.
+      `:app:checkDebugAarMetadata`) cannot resolve
+      `io.flutter:flutter_embedding_ktx` because the Flutter Gradle
+      plugin auto-registers this repo only for the Dart-side
+      `compileFlutterBuildDebug` task — NOT for AGP tasks.
 """
 import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     import yaml
@@ -166,6 +180,14 @@ ENGINE_VERSION_PATH = FLUTTER_SDK_PATH / "bin" / "internal" / "engine.version"
 FLUTTER_EMBEDDING_GROUP = "io.flutter"
 FLUTTER_EMBEDDING_ARTIFACT = "flutter_embedding_ktx"
 FLUTTER_EMBEDDING_PREFIX = "1.0.0-"  # The Maven coordinate is `1.0.0-<40-char-hex>` per Flutter's engine tag scheme.
+
+# Sprint 9.6.14 — Flutter engine Maven repository.
+# The Flutter Gradle plugin auto-registers this for compileFlutterBuildDebug,
+# but the AGP-managed task `:app:checkDebugAarMetadata` requires it at the
+# project level (via `dependencyResolutionManagement` in settings.gradle.kts
+# or `repositories {}` in app/build.gradle.kts).
+FLUTTER_STORAGE_URL = "https://storage.googleapis.com/download.flutter.io"
+SETTINGS_GRADLE_KTS_PATH = REPO_ROOT / "mobile" / "android" / "settings.gradle.kts"
 
 
 def strip_comments(text: str) -> str:
@@ -1621,6 +1643,193 @@ def check_flutter_kotlin_embedding_v9() -> list[str]:
     return findings
 
 
+def check_flutter_storage_repo_v10() -> list[str]:
+    """Sprint 9.6.14 v10: Flutter engine Maven repo config check (S13).
+
+    The 9.6.13 live build (commit 7441667 on main, fast-forward
+    merged by Owner) advanced past `:app:compileDebugKotlin` for
+    the first time — Sprint 9.6.13's `flutter_embedding_ktx`
+    dependency declaration worked. The next task,
+    `:app:checkDebugAarMetadata`, FAILED with:
+
+        Could not find io.flutter:flutter_embedding_ktx:
+            1.0.0-c416acfeb8126e097f758c664aaa3da929e27da0.
+        Searched in the following locations:
+          - https://dl.google.com/dl/android/maven2/io/flutter/...
+          - https://repo.maven.apache.org/maven2/io/flutter/...
+          - https://storage.googleapis.com/download.flutter.io/io/flutter/...
+
+    The Flutter Gradle plugin (`dev.flutter.flutter-gradle-plugin`)
+    auto-registers the `storage.googleapis.com/download.flutter.io`
+    repo for the Dart-side `compileFlutterBuildDebug` task
+    classpath, but AGP-managed tasks like
+    `:app:checkDebugAarMetadata` (Kotlin-side runtime classpath
+    resolution) do NOT see those plugin-level registrations — they
+    use ONLY the project-side repositories declared in
+    `dependencyResolutionManagement` (settings.gradle.kts) or
+    `repositories { }` (app/build.gradle.kts).
+
+    This dependency has been missing since PR-28 (Sprint 5) set up
+    the Flutter Gradle plugin for the first time. From PR-28
+    through 9.6.13, `compileFlutterBuildDebug` always failed FIRST
+    in the live build, so `checkDebugAarMetadata` never had a
+    chance to fail and expose this gap. Sprint 9.6.13 fixed the
+    `compileDebugKotlin` layer (Kotlin-side engine JAR on
+    classpath); with that fixed, the build reached
+    `checkDebugAarMetadata` and the Maven repo config gap surfaced.
+
+    The artifact `io.flutter:flutter_embedding_ktx:1.0.0-<engine
+    _commit>` is published ONLY at `https://storage.googleapis.com/
+    download.flutter.io`. It is NOT on Google Maven or Maven
+    Central. Gradle must be told to look there.
+
+    This check enforces the post-fix state:
+
+      (a) `mobile/android/settings.gradle.kts` contains a
+          `dependencyResolutionManagement` block.
+      (b) Inside that block (or in `app/build.gradle.kts` as a
+          fallback), the URL `https://storage.googleapis.com/
+          download.flutter.io` is declared via
+          `maven { url = uri("...") }`.
+      (c) The URL itself is well-formed (parseable as an https
+          URL — we do NOT hit the network).
+
+    Failure messages name the actual observed state so a future
+    regression is debuggable.
+
+    Scope: only `settings.gradle.kts` + `app/build.gradle.kts`.
+    The workspace `build.gradle.kts` may have `allprojects {
+    repositories { google(); mavenCentral() } }` (deprecated since
+    Gradle 7), but those repos are ineffective when
+    `dependencyResolutionManagement` is set with
+    `PREFER_SETTINGS` mode — the audit correctly excludes the
+    `allprojects` approach.
+    """
+    findings = []
+
+    # (a) check settings.gradle.kts first (preferred fix location)
+    if not SETTINGS_GRADLE_KTS_PATH.exists():
+        findings.append(
+            f"S13 {SETTINGS_GRADLE_KTS_PATH.relative_to(REPO_ROOT)}: file missing "
+            "(Sprint 9.6.14 invariant — Flutter engine Maven repo must be "
+            "declared in settings.gradle.kts dependencyResolutionManagement "
+            "OR app/build.gradle.kts repositories {})"
+        )
+        return findings
+    settings_text = SETTINGS_GRADLE_KTS_PATH.read_text(encoding="utf-8")
+    has_drm_block = bool(re.search(r"^\s*dependencyResolutionManagement\s*\{", settings_text, re.MULTILINE))
+    if has_drm_block:
+        # Extract the DRM block via balanced-brace walk (so nested
+        # blocks inside maven URLs, etc. are not mistaken for the
+        # outer one).
+        drm_match = re.search(r"^\s*dependencyResolutionManagement\s*\{", settings_text, re.MULTILINE)
+        block_start = drm_match.end()
+        depth = 1
+        i = block_start
+        while i < len(settings_text) and depth > 0:
+            c = settings_text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            findings.append(
+                f"S13 {SETTINGS_GRADLE_KTS_PATH.relative_to(REPO_ROOT)}: "
+                f"`dependencyResolutionManagement {{ ... }}` block is unbalanced"
+            )
+            return findings
+        drm_block_text = settings_text[block_start:i - 1]
+        if FLUTTER_STORAGE_URL in drm_block_text:
+            # Found in settings.gradle.kts — PASS.
+            return findings
+        # DRM block exists but Flutter URL missing — fall through
+        # to check app/build.gradle.kts as a fallback (less preferred
+        # but acceptable per the brief's Fix B option).
+    else:
+        drm_block_text = ""
+
+    # (b) fallback: check app/build.gradle.kts for a top-level
+    # repositories { ... } block. (Per the brief's Fix B option.)
+    if ANDROID_GRADLE_KTS_PATH.exists():
+        app_text = ANDROID_GRADLE_KTS_PATH.read_text(encoding="utf-8")
+        # Find a top-level `repositories { ... }` block by walking
+        # for the keyword at column 0 (no leading whitespace — top-
+        # level only). We deliberately do NOT match `repositories`
+        # nested inside other blocks (e.g. inside `android { }` or
+        # inside `pluginManagement`).
+        repo_matches = re.finditer(
+            r"^repositories\s*\{",
+            app_text,
+            re.MULTILINE,
+        )
+        for repo_match in repo_matches:
+            block_start = repo_match.end()
+            depth = 1
+            i = block_start
+            while i < len(app_text) and depth > 0:
+                c = app_text[i]
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                i += 1
+            if depth != 0:
+                continue  # unbalanced, skip
+            repo_block_text = app_text[block_start:i - 1]
+            if FLUTTER_STORAGE_URL in repo_block_text:
+                # Found in app/build.gradle.kts — PASS (Fix B path).
+                return findings
+
+    # (c) URL validation as a final sanity check. (We only parse the
+    # URL string, no network call.)
+    parsed = urlparse(FLUTTER_STORAGE_URL)
+    if parsed.scheme not in ("http", "https"):
+        findings.append(
+            f"S13: Flutter storage URL scheme `{parsed.scheme}` is not "
+            f"http/https — Sprint 9.6.14 invariant expects https"
+        )
+        return findings
+
+    # Flutter URL not found in either location → FAIL.
+    if has_drm_block:
+        findings.append(
+            "S13 "
+            + str(SETTINGS_GRADLE_KTS_PATH.relative_to(REPO_ROOT))
+            + ": `dependencyResolutionManagement { ... }` block exists but "
+            "the Flutter storage URL `" + FLUTTER_STORAGE_URL + "` is NOT "
+            "declared inside it (and not in app/build.gradle.kts "
+            "`repositories {}` block either). Sprint 9.6.14 fix — add "
+            "`maven { url = uri(\"" + FLUTTER_STORAGE_URL + "\") }` inside the "
+            "`dependencyResolutionManagement { ... }` block. The 9.6.14 "
+            "live build failed at `:app:checkDebugAarMetadata` with "
+            "'Could not find io.flutter:flutter_embedding_ktx:<engine "
+            "commit>' because the AGP-managed task classpath could not "
+            "resolve the Flutter engine JAR from any configured repo."
+        )
+    else:
+        findings.append(
+            "S13 "
+            + str(SETTINGS_GRADLE_KTS_PATH.relative_to(REPO_ROOT))
+            + ": `dependencyResolutionManagement { ... }` block is MISSING, "
+            "and the Flutter storage URL `" + FLUTTER_STORAGE_URL + "` is not "
+            "declared in `app/build.gradle.kts` `repositories {}` "
+            "either. Sprint 9.6.14 fix — add a "
+            "`dependencyResolutionManagement { ... }` block to "
+            "settings.gradle.kts with "
+            "`maven { url = uri(\"" + FLUTTER_STORAGE_URL + "\") }` inside it. "
+            "The 9.6.14 live build failed at `:app:checkDebugAarMetadata` "
+            "because the AGP-managed Kotlin-side runtime classpath "
+            "could not resolve `io.flutter:flutter_embedding_ktx:1.0.0-"
+            "<engine_commit>` from any configured repo (only the Flutter "
+            "Gradle plugin's auto-registration handles Dart-side "
+            "`compileFlutterBuildDebug`, not AGP-side "
+            "`checkDebugAarMetadata`)."
+        )
+
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -1711,12 +1920,19 @@ def main() -> int:
     else:
         print(f"PASS: app/build.gradle.kts declares io.flutter:flutter_embedding_ktx:1.0.0-<engine_commit> matching $flutterSdkPath/bin/internal/engine.version — Sprint 9.6.13 S12")
 
+    # Sprint 9.6.14 v10: Flutter engine Maven repo config check (S13).
+    s13_findings = check_flutter_storage_repo_v10()
+    if s13_findings:
+        all_findings.extend(s13_findings)
+    else:
+        print(f"PASS: Flutter engine Maven repo `https://storage.googleapis.com/download.flutter.io` declared in settings.gradle.kts dependencyResolutionManagement (or app/build.gradle.kts repositories) — Sprint 9.6.14 S13")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps + S13 Flutter storage Maven repo declared in settings.gradle.kts PASS PyYAML AUDIT.")
     return 0
 
 

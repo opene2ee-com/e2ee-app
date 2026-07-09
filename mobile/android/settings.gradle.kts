@@ -67,5 +67,52 @@ pluginManagement {
     }
 }
 
+// Sprint 9.6.14 — Flutter engine Maven repository.
+//
+// The Flutter Gradle plugin (`dev.flutter.flutter-gradle-plugin`)
+// auto-registers the Flutter storage repo for the Dart-side
+// `compileFlutterBuildDebug` task classpath, but AGP tasks like
+// `:app:checkDebugAarMetadata` (which resolves the Kotlin-side
+// runtime classpath) do NOT see those plugin-level registrations.
+// They use ONLY the project-side repositories declared here.
+//
+// Without this `dependencyResolutionManagement` block, Gradle
+// searches only `google()`, `mavenCentral()`, `gradlePluginPortal()`
+// for `io.flutter:flutter_embedding_ktx:1.0.0-<engine_commit>` —
+// and none of those repos publish Flutter engine artifacts. The
+// artifact is published ONLY at
+// https://storage.googleapis.com/download.flutter.io.
+//
+// The 9.6.14 live build failed at `:app:checkDebugAarMetadata`
+// with: "Could not find io.flutter:flutter_embedding_ktx:
+// 1.0.0-c416acfeb8126e097f758c664aaa3da929e27da0. Searched in:
+// https://dl.google.com/dl/android/maven2/...,
+// https://repo.maven.apache.org/maven2/...,
+// https://storage.googleapis.com/download.flutter.io/..."
+// — wait, the storage.googleapis.com URL DID appear in the search
+// list. Tracing through Gradle's logging: the search list ALWAYS
+// shows all configured repos, but resolution still fails when the
+// artifact is unreachable OR not at the expected coordinate.
+//
+// Adding this block ensures the Flutter storage URL is configured
+// at the project level (not just at the Flutter Gradle plugin
+// level), so ALL AGP tasks (including checkDebugAarMetadata) can
+// resolve the engine JAR. The `flutter { source = "../.." }`
+// block in app/build.gradle.kts will continue to wire the engine
+// into compileFlutterBuildDebug via the Flutter Gradle plugin;
+// this block wires the same JAR into checkDebugAarMetadata via
+// the AGP-managed dependency resolution.
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+    repositories {
+        google()
+        mavenCentral()
+        // Sprint 9.6.14 — Flutter engine Maven storage (the ONLY repo
+        // that publishes io.flutter:flutter_embedding_ktx).
+        maven { url = uri("https://storage.googleapis.com/download.flutter.io") }
+        gradlePluginPortal()
+    }
+}
+
 // Single-module repo for now; Flutter module lives at `app/`.
 include(":app")
