@@ -2,13 +2,14 @@
 check_android_debug_workflow_v3 (S6),
 check_mobile_entry_point_v4 (S7),
 check_android_xml_comments_v5 (S8),
-check_android_manifest_v6 (S9), and
-check_android_res_skeleton_v7 (S10).
+check_android_manifest_v6 (S9),
+check_android_res_skeleton_v7 (S10), and
+check_flutter_plugins_dependencies_v8 (S11).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
 revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
 9.6.8 extends to S7. 9.6.9 extends to S8. 9.6.10 extends to S9.
-9.6.11 extends to S10.
+9.6.11 extends to S10. 9.6.12 extends to S11.
 
 S1-S5 cases: 6 (1 PASS + 5 FAIL, ...).
 S6 cases: 4 (1 PASS + 3 FAIL, ...).
@@ -17,8 +18,10 @@ S8 cases: 2 (1 PASS + 1 FAIL).
 S9 cases: 3 (1 PASS + 2 FAIL).
 S10 cases: 3 (1 PASS + 2 FAIL — styles.xml + mipmap +
 launch_background.xml).
+S11 cases: 3 (1 PASS + 2 FAIL — file missing + plugins.android
+empty array).
 
-Total: 22 cases.
+Total: 25 cases.
 """
 import sys
 from pathlib import Path
@@ -293,6 +296,57 @@ def run_s10_check(styles_text: str | None, has_mipmap: bool, has_launch_bg: bool
     if not has_launch_bg:
         findings.append("S10 fail")
         return findings
+    return findings
+
+
+def run_s11_check(fpd_text: str | None) -> list[str]:
+    """Replicate check_flutter_plugins_dependencies_v8 logic on raw JSON text.
+
+    Mirrors the audit's four-part S11 check:
+    (a) .flutter-plugins-dependencies file exists (signalled by
+        fpd_text != None),
+    (b) parses as JSON via json.loads (well-formedness + real
+        parser, per the 9.6.x chain rule "audit must use a real
+        parser, not a regex-grep heuristic"),
+    (c) `plugins.android` is a non-empty list,
+    (d) each entry has `name` (str) and `native_build` (bool).
+
+    The audit reads the file from disk; the self-test takes the
+    raw JSON text so a single fixture string can drive all 3
+    cases (PASS / missing / empty-android) without a temp file.
+    """
+    findings = []
+    if fpd_text is None:
+        findings.append("S11 fail")
+        return findings
+    import json
+    try:
+        fpd_doc = json.loads(fpd_text)
+    except Exception:
+        findings.append("S11 fail")
+        return findings
+    if not isinstance(fpd_doc, dict):
+        findings.append("S11 fail")
+        return findings
+    plugins = fpd_doc.get("plugins", None)
+    if not isinstance(plugins, dict):
+        findings.append("S11 fail")
+        return findings
+    android_plugins = plugins.get("android", None)
+    if not isinstance(android_plugins, list):
+        findings.append("S11 fail")
+        return findings
+    if len(android_plugins) == 0:
+        findings.append("S11 fail")
+        return findings
+    for entry in android_plugins:
+        if not isinstance(entry, dict):
+            findings.append("S11 fail")
+            continue
+        if not isinstance(entry.get("name"), str) or not entry.get("name"):
+            findings.append("S11 fail")
+        if not isinstance(entry.get("native_build"), bool):
+            findings.append("S11 fail")
     return findings
 
 
@@ -718,6 +772,46 @@ case_s10_styles_no_launch = """<?xml version="1.0" encoding="utf-8"?>
 # (uses the same styles XML as the PASS case but has_mipmap=False triggers the mipmap sub-check)
 case_s10_styles_for_mipmap = case_s10_styles_pass
 
+# ─── S11 test cases (Sprint 9.6.12) ──────────────────────────────
+
+# Case 22 (S11 PASS): post-`flutter pub get` mobile/.flutter-plugins-
+# dependencies content. Mirrors the real file shape: 7 Android plugins
+# with `name` + `native_build` fields. (iOS array is omitted from
+# this fixture for brevity — the audit only inspects the android
+# array.)
+case_s11_fpd_pass = """{
+    "info": "This is a generated file; do not edit or check into version control.",
+    "plugins": {
+        "android": [
+            {"name": "flutter_plugin_android_lifecycle", "path": "C:/Users/User/AppData/Local/Pub/Cache/hosted/pub.dev/flutter_plugin_android_lifecycle-2.0.35/", "native_build": true, "dependencies": [], "dev_dependency": false},
+            {"name": "flutter_secure_storage", "path": "C:/Users/User/AppData/Local/Pub/Cache/hosted/pub.dev/flutter_secure_storage-9.2.4/", "native_build": true, "dependencies": [], "dev_dependency": false},
+            {"name": "flutter_webrtc", "path": "C:/Users/User/AppData/Local/Pub/Cache/hosted/pub.dev/flutter_webrtc-1.5.2/", "native_build": true, "dependencies": [], "dev_dependency": false},
+            {"name": "jni", "path": "C:/Users/User/AppData/Local/Pub/Cache/hosted/pub.dev/jni-1.0.0/", "native_build": true, "dependencies": [], "dev_dependency": false},
+            {"name": "jni_flutter", "path": "C:/Users/User/AppData/Local/Pub/Cache/hosted/pub.dev/jni_flutter-1.0.1/", "native_build": true, "dependencies": ["jni"], "dev_dependency": false},
+            {"name": "local_auth_android", "path": "C:/Users/User/AppData/Local/Pub/Cache/hosted/pub.dev/local_auth_android-1.0.46/", "native_build": true, "dependencies": [], "dev_dependency": false},
+            {"name": "path_provider_android", "path": "C:/Users/User/AppData/Local/Pub/Cache/hosted/pub.dev/path_provider_android-2.2.10/", "native_build": false, "dependencies": [], "dev_dependency": false}
+        ]
+    }
+}"""
+
+# Case 23 (S11 FAIL — file missing entirely).
+# fpd_text=None signals to the self-test the file is absent
+# (the worktree was created from a clean main checkout without
+# running `flutter pub get` locally — Sprint 9.6.12 broken state).
+
+# Case 24 (S11 FAIL — plugins.android empty array).
+# The file EXISTS and parses as JSON, but `plugins.android` is an
+# empty array — no Android plugins declared. The Flutter Gradle
+# plugin would have no plugin code to wire and the engine JAR
+# classpath would be incomplete, leading to the 9.6.12
+# compileDebugKotlin failure.
+case_s11_fpd_empty_android = """{
+    "info": "This is a generated file; do not edit or check into version control.",
+    "plugins": {
+        "android": []
+    }
+}"""
+
 # ─── Run all cases ───────────────────────────────────────────────
 
 cases = [
@@ -765,6 +859,13 @@ cases = [
      run_s10_check, (case_s10_styles_no_launch, True, True), ["S10 fail"]),
     ("S10 FAIL (no mipmap/ic_launcher representation)",
      run_s10_check, (case_s10_styles_for_mipmap, False, True), ["S10 fail"]),
+    # S11 cases (Sprint 9.6.12 — new)
+    ("S11 PASS (mobile/.flutter-plugins-dependencies exists with non-empty plugins.android[] + name+native_build per entry)",
+     run_s11_check, (case_s11_fpd_pass,), []),
+    ("S11 FAIL (.flutter-plugins-dependencies file missing entirely — Sprint 9.6.12 broken state)",
+     run_s11_check, (None,), ["S11 fail"]),
+    ("S11 FAIL (file exists but plugins.android[] is empty array — no Android plugins declared)",
+     run_s11_check, (case_s11_fpd_empty_android,), ["S11 fail"]),
 ]   # noqa: E501
 
 failed = []

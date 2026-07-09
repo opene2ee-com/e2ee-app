@@ -1,12 +1,20 @@
 """
 PyYAML audit for 4 GH Actions workflows + Gradle wrapper + AGP + Kotlin
-+ app/build.gradle.kts syntax invariants.
++ app/build.gradle.kts syntax invariants + mobile entry point + Android
+res/ XML comments + AndroidManifest merger-spec + Android res/ skeleton
++ .flutter-plugins-dependencies regen.
 Per memory rule: PyYAML 1.1 parses `on:` as boolean `True` — use d[True].
 Applies to all workflow files; tracks the Sprint 9.6.2 + 9.6.3 + 9.6.4 +
-9.6.5 + 9.6.6 fix invariants (added 2026-07-08 after Sprint 9.6.1 PR #13
-push CI FAIL, Sprint 9.6.2 PR #14 push CI FAIL, Sprint 9.6.3 PR #15 push
-CI FAIL, Sprint 9.6.4 PR #15 (PUSHED) live build test CI FAIL, Sprint
-9.6.5 PR #16 (PUSHED) live build test CI FAIL).
+9.6.5 + 9.6.6 + 9.6.7 + 9.6.8 + 9.6.9 + 9.6.10 + 9.6.11 + 9.6.12 fix
+invariants (added 2026-07-08 after Sprint 9.6.1 PR #13 push CI FAIL,
+Sprint 9.6.2 PR #14 push CI FAIL, Sprint 9.6.3 PR #15 push CI FAIL,
+Sprint 9.6.4 PR #15 (PUSHED) live build test CI FAIL, Sprint 9.6.5
+PR #16 (PUSHED) live build test CI FAIL, Sprint 9.6.6 PR #17 (PUSHED)
+live build test CI FAIL, Sprint 9.6.7 PR #19 (PUSHED) live build test
+CI FAIL, Sprint 9.6.8 PR #20 (PUSHED) live build test CI FAIL, Sprint
+9.6.9 PR #21 (PUSHED) live build test CI FAIL, Sprint 9.6.10 PR #22
+(PUSHED) live build test CI FAIL, Sprint 9.6.11 PR #23 (PUSHED) live
+build test CI FAIL).
 
 Verifies:
   1. All 4 workflows have ONLY workflow_dispatch trigger (no push/pull_request).
@@ -43,21 +51,48 @@ Verifies:
      S5. fully-qualified `java.util.Properties()` usage is NOT present
          in code (must use short form `Properties()` after the import).
  11. **Sprint 9.6.7 (v3):** android-debug.yml `flutter pub get` step check
-     (S6):
-     The CI runner resolves `./gradlew assembleDebug` →
-     `:app:compileFlutterBuildDebug` which needs
-     `mobile/.dart_tool/package_config.json`. That file is NEVER
-     produced unless a step runs `flutter pub get` with
-     `working-directory: ./mobile` (the Dart project root, where
-     `pubspec.yaml` lives — NOT `./mobile/android`). S6 verifies:
-     (a) step name matches "Install Flutter dependencies" (case-
-         insensitive substring on parsed `name` field, not raw text),
-     (b) step `run` field contains "flutter pub get",
-     (c) step `working-directory` is EXACTLY "./mobile".
-     Uses PyYAML-parsed step dicts (Sprint 9.6.5 comment-claim
-     lesson reapplies — a comment claiming "we run flutter pub get"
-     must NOT pass this audit).
+      (S6):
+      The CI runner resolves `./gradlew assembleDebug` →
+      `:app:compileFlutterBuildDebug` which needs
+      `mobile/.dart_tool/package_config.json`. That file is NEVER
+      produced unless a step runs `flutter pub get` with
+      `working-directory: ./mobile` (the Dart project root, where
+      `pubspec.yaml` lives — NOT `./mobile/android`). S6 verifies:
+      (a) step name matches "Install Flutter dependencies" (case-
+          insensitive substring on parsed `name` field, not raw text),
+      (b) step `run` field contains "flutter pub get",
+      (c) step `working-directory` is EXACTLY "./mobile".
+      Uses PyYAML-parsed step dicts (Sprint 9.6.5 comment-claim
+      lesson reapplies — a comment claiming "we run flutter pub get"
+      must NOT pass this audit).
+ 12. **Sprint 9.6.8 (v4):** mobile entry point check (S7) —
+      `mobile/lib/main.dart` + `runApp(` + `ProviderScope` +
+      `pubspec.yaml` `flutter_riverpod:` + `go_router:`. PyYAML-
+      parsed pubspec deps (comment-claim lesson reapplies).
+ 13. **Sprint 9.6.9 (v5):** Android res/xml/ comment well-formedness
+      (S8) — XML 1.0 `<!-- ... -->` may not contain `--`. Uses
+      `xml.etree.ElementTree.fromstring` (well-formedness) + regex
+      walk over comment bodies (content rule). aapt2 rejects the
+      file with 'The string "--" is not permitted within comments'.
+ 14. **Sprint 9.6.10 (v6):** AndroidManifest merger-spec (S9) —
+      no `package=` attr (AGP 8.11.1 ignores / AGP 9 rejects) +
+      `xmlns:tools` declared + `tools:replace` (NOT `tools:remove`)
+      co-exists with `android:usesCleartextTraffic` + gradle
+      `namespace = "..."` declared (cross-check).
+ 15. **Sprint 9.6.11 (v7):** Android res/ skeleton (S10) — mipmap
+      ic_launcher representation + `drawable/launch_background.xml`
+      + `values/styles.xml` with `LaunchTheme` + `NormalTheme`.
+ 16. **Sprint 9.6.12 (v8):** mobile/.flutter-plugins-dependencies
+      regen (S11) — file exists, parses as JSON via `json.load`
+      (real parser, per the 9.6.x chain rule "audit must use a
+      real parser, not a regex-grep heuristic"), `plugins.android[]`
+      non-empty with `name` + `native_build` per entry. The Flutter
+      Gradle plugin reads this file to wire engine JARs into the
+      Kotlin compile classpath; without it, `compileDebugKotlin`
+      fails with 40+ 'Unresolved reference embedding/FlutterActivity/
+      FlutterEngine/MethodChannel' errors.
 """
+import json
 import re
 import sys
 from pathlib import Path
@@ -1172,6 +1207,181 @@ def check_android_res_skeleton_v7() -> list[str]:
     return findings
 
 
+def check_flutter_plugins_dependencies_v8() -> list[str]:
+    """Sprint 9.6.12 v8: mobile/.flutter-plugins-dependencies regen check (S11).
+
+    The 9.6.11 live build (commit f4881cd on main, fast-forward
+    merged by Owner) advanced past `processDebugResources` for the
+    first time (resource skeleton fix worked). The next task,
+    `:app:compileDebugKotlin`, failed with 40+ "Unresolved
+    reference" errors in `MainActivity.kt` and `OpenE2eeVpnService.kt`:
+
+        e: MainActivity.kt:39:19 Unresolved reference 'embedding'.
+        e: MainActivity.kt:48:22 Unresolved reference 'FlutterActivity'.
+        e: MainActivity.kt:57:37 Unresolved reference 'MethodChannel'.
+        e: OpenE2eeVpnService.kt:103:19 Unresolved reference 'embedding'.
+        e: OpenE2eeVpnService.kt:184:36 Unresolved reference 'FlutterEngine'.
+        e: OpenE2eeVpnService.kt:251:32 Unresolved reference 'MethodChannel'.
+
+    The Kotlin compiler cannot find `io.flutter.embedding.*` and
+    `io.flutter.plugin.*` because the Flutter engine JAR is not on
+    the compile classpath. The Flutter Gradle plugin (`app_plugin_
+    loader.gradle` under `$FLUTTER_HOME/packages/flutter_tools/
+    gradle/`) reads `mobile/.flutter-plugins-dependencies` to
+    discover the set of Flutter plugins and wire their generated
+    classes + the engine JARs into the Kotlin compile classpath.
+
+    Sprint 9.6.7 added the `flutter pub get` step to
+    `android-debug.yml` (S6 — `Install Flutter dependencies` with
+    `working-directory: ./mobile`). That step regenerates
+    `.flutter-plugins-dependencies` on the CI runner BEFORE the
+    `Build Debug APK` step, so the engine JARs are wired into the
+    classpath.
+
+    However, the file is gitignored (`**/.flutter-plugins-
+    dependencies` in repo-root `.gitignore` line 96), so when a
+    Coder worktree is created from a clean main checkout, the file
+    is ABSENT. `flutter pub get` must be run locally to regenerate
+    it. If a future commit changes the pubspec dependency graph
+    (adds/removes a Flutter plugin) without re-running `flutter
+    pub get` AND the workflow's `flutter pub get` step is
+    accidentally removed or misconfigured, the build will fail at
+    `compileDebugKotlin` with the symptoms above.
+
+    This check enforces the LOCAL pre-build state:
+
+      (a) `mobile/.flutter-plugins-dependencies` exists.
+      (b) The file parses as JSON via `json.load` (real parser,
+          per the 9.6.x chain rule "audit must use a real
+          parser, not a regex-grep heuristic").
+      (c) `plugins.android` is a non-empty list (at least one
+          Android plugin declared). Without this list, the
+          Flutter Gradle plugin has no Android plugins to wire
+          and (in some configurations) no engine JAR to add to
+          the Kotlin classpath.
+      (d) Each entry in `plugins.android` has both `name` (str)
+          and `native_build` (bool) fields — the schema
+          `flutter pub get` writes.
+
+    Failure messages report the actual observed state (file
+    missing / JSON parse error / empty array / missing fields)
+    so a future regression is debuggable. We do NOT
+    cross-validate against `mobile/pubspec.yaml` deps here — that
+    is a stricter check that the live `flutter pub get` step is
+    already responsible for (S6 invariant). This audit's job is
+    "is the generated state consistent", not "do the pubspec
+    deps match".
+
+    Scope: only `mobile/.flutter-plugins-dependencies`. We do
+    NOT scan the analogous `ios` array or any sibling
+    Dart-side state — iOS / web / desktop plugins are not on
+    the Android Kotlin classpath.
+    """
+    findings = []
+    fpd_path = REPO_ROOT / "mobile" / ".flutter-plugins-dependencies"
+
+    # (a) file exists
+    if not fpd_path.exists():
+        findings.append(
+            f"S11 {fpd_path.relative_to(REPO_ROOT)}: file missing. "
+            f"Run `cd mobile && flutter pub get` to regenerate it "
+            f"(the file is gitignored at repo-root .gitignore line 96; "
+            f"it is NEVER committed and must be regenerated locally "
+            f"for the Android Kotlin compile classpath to include the "
+            f"Flutter engine JAR + plugin code). Sprint 9.6.12 fix: "
+            f"the 9.6.11 live build (commit f4881cd) failed at "
+            f":app:compileDebugKotlin with 40+ 'Unresolved reference "
+            f"embedding/FlutterActivity/FlutterEngine/MethodChannel' "
+            f"errors in MainActivity.kt + OpenE2eeVpnService.kt because "
+            f"the engine JAR was not on the Kotlin compile classpath; "
+            f"the Flutter Gradle plugin reads this file to wire engine "
+            f"JARs into the classpath."
+        )
+        return findings
+
+    # (b) parse as JSON via real parser
+    try:
+        text = fpd_path.read_text(encoding="utf-8")
+        fpd_doc = json.loads(text)
+    except json.JSONDecodeError as e:
+        findings.append(
+            f"S11 {fpd_path.relative_to(REPO_ROOT)}: JSON parse failed "
+            f"({e.msg} at line {e.lineno} col {e.colno}). flutter pub get "
+            f"may have written a partial file (disk full / signal "
+            f"interrupted). Re-run `cd mobile && flutter pub get`. Sprint "
+            f"9.6.12 invariant — the audit uses json.load, not regex-grep, "
+            f"per the 9.6.x chain rule."
+        )
+        return findings
+
+    # (c) plugins.android is a non-empty list
+    if not isinstance(fpd_doc, dict):
+        findings.append(
+            f"S11 {fpd_path.relative_to(REPO_ROOT)}: top-level is not a "
+            f"JSON object (parsed type: {type(fpd_doc).__name__}). flutter "
+            f"pub get should always write a top-level object with a "
+            f"`plugins` field. Re-run `cd mobile && flutter pub get`."
+        )
+        return findings
+    plugins = fpd_doc.get("plugins", None)
+    if not isinstance(plugins, dict):
+        findings.append(
+            f"S11 {fpd_path.relative_to(REPO_ROOT)}: `plugins` is not a "
+            f"JSON object (parsed type: {type(plugins).__name__ if plugins is not None else 'NoneType'}). "
+            f"flutter pub get should write a `plugins` field. Re-run "
+            f"`cd mobile && flutter pub get`."
+        )
+        return findings
+    android_plugins = plugins.get("android", None)
+    if not isinstance(android_plugins, list):
+        findings.append(
+            f"S11 {fpd_path.relative_to(REPO_ROOT)}: `plugins.android` "
+            f"is not a JSON array (parsed type: {type(android_plugins).__name__ if android_plugins is not None else 'NoneType'}). "
+            f"flutter pub get should write a `plugins.android` array. "
+            f"Re-run `cd mobile && flutter pub get`."
+        )
+        return findings
+    if len(android_plugins) == 0:
+        findings.append(
+            f"S11 {fpd_path.relative_to(REPO_ROOT)}: `plugins.android` is "
+            f"an empty array. Without at least one entry, the Flutter "
+            f"Gradle plugin has no Android plugin code to wire into the "
+            f"compile classpath. The .flutter-plugins-dependencies file "
+            f"was likely written by a `flutter pub get` run with no "
+            f"plugins installed (e.g. pubspec deps cleared). Re-run "
+            f"`cd mobile && flutter pub get` after restoring the deps."
+        )
+        return findings
+
+    # (d) each entry has name + native_build
+    for i, entry in enumerate(android_plugins):
+        if not isinstance(entry, dict):
+            findings.append(
+                f"S11 {fpd_path.relative_to(REPO_ROOT)}: "
+                f"`plugins.android[{i}]` is not a JSON object (parsed "
+                f"type: {type(entry).__name__}). flutter pub get writes "
+                f"objects with `name` + `native_build` fields."
+            )
+            continue
+        if not isinstance(entry.get("name"), str) or not entry.get("name"):
+            findings.append(
+                f"S11 {fpd_path.relative_to(REPO_ROOT)}: "
+                f"`plugins.android[{i}].name` is missing or not a "
+                f"non-empty string. flutter pub get writes a `name` "
+                f"field per plugin."
+            )
+        if not isinstance(entry.get("native_build"), bool):
+            findings.append(
+                f"S11 {fpd_path.relative_to(REPO_ROOT)}: "
+                f"`plugins.android[{i}].native_build` is missing or not "
+                f"a boolean. flutter pub get writes a `native_build` "
+                f"field per plugin (True for plugins with native source, "
+                f"False for plugins that ship prebuilt)."
+            )
+
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -1248,12 +1458,19 @@ def main() -> int:
     else:
         print("PASS: Android res/ skeleton (mipmap + drawable/launch_background + values/styles.xml with LaunchTheme+NormalTheme) — Sprint 9.6.11 S10")
 
+    # Sprint 9.6.12 v8: mobile/.flutter-plugins-dependencies regen check (S11).
+    s11_findings = check_flutter_plugins_dependencies_v8()
+    if s11_findings:
+        all_findings.extend(s11_findings)
+    else:
+        print("PASS: mobile/.flutter-plugins-dependencies exists, parses as JSON, plugins.android[] non-empty with name+native_build per entry — Sprint 9.6.12 S11")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen PASS PyYAML AUDIT.")
     return 0
 
 
