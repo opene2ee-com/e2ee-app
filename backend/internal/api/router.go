@@ -136,6 +136,12 @@ func (a *API) buildRouter() http.Handler {
 			r.Post("/sessions", a.handleCreateSession())
 			r.Get("/sessions", a.handleListSessions())
 			r.Get("/sessions/{id}", a.handleGetSession())
+			// Sprint 11.0C — close the active session. The
+			// handler marks the session "completed" in the
+			// storage layer and returns the canonical
+			// `summary_stats` block the Skorlar screen reads
+			// into `SessionScoreCalculator.compute(...)`.
+			r.Post("/sessions/{id}/close", a.handleCloseSession())
 			r.Post("/sessions/{id}/telemetry", a.handlePostTelemetry())
 
 			// users (KVKK delete)

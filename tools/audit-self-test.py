@@ -41,8 +41,23 @@ check_webrtc_service_rtc_peer_connection_v16 (S54),
 check_webrtc_service_on_ice_candidate_v16 (S55),
 check_session_orchestrator_start_session_v16 (S56),
 check_session_orchestrator_long_poll_v16 (S57),
-check_webrtc_service_on_track_v16 (S59), and
-check_active_pool_webrtc_status_indicator_v16 (S60).
+check_webrtc_service_on_track_v16 (S59),
+check_active_pool_webrtc_status_indicator_v16 (S60),
+check_skorlar_screen_fetch_scores_v17 (S61),
+check_score_calculator_compute_v17 (S62),
+check_score_calculator_four_metrics_v17 (S63),
+check_score_calculator_overall_weighted_sum_v17 (S64),
+check_session_orchestrator_close_session_v17 (S65),
+check_active_pool_oturumu_bitur_button_v17 (S66),
+check_active_pool_close_then_navigate_v17 (S67),
+check_skorlar_empty_state_v17 (S68),
+check_skorlar_card_overall_gauge_v17 (S69),
+check_backend_sessions_close_handler_v17 (S70),
+check_backend_summary_stats_shape_v17 (S71), and
+check_score_calculator_unit_tests_v17 (S72).
+
+(Sprint 11.0C adds 12 new selftest cases — total cases
++12 over M2's 102.)
 
 (Sprint 11.0B adds 7 new selftest cases; S58 is a
 production-audit-only check on the backend router.go
@@ -1455,6 +1470,283 @@ def run_s60_check(active_pool_text):
     return findings
 
 
+# ═══ Sprint 11.0C — M3 audit helpers (S61-S72) ═══
+#
+# Sprint 11.0C is the Skorlar screen + score calculator +
+# session close + E2E. 12 new audit cases. The M2 S58-style
+# "backend router.go" check pattern returns for S70 — the
+# `POST /api/v1/sessions/{id}/close` route registration.
+
+def run_s61_check(skorlar_screen_text):
+    """S61: skorlar_screen.dart has `Future<List<SessionScore>>` + `fetchScores`."""
+    findings = []
+    if skorlar_screen_text is None:
+        findings.append("S61 skorlar_screen.dart: file missing")
+        return findings
+    missing = []
+    if "Future<List<SessionScore>>" not in skorlar_screen_text and "Future<List<SessionScore>>" not in skorlar_screen_text:
+        missing.append("Future<List<SessionScore>>")
+    if "fetchScores" not in skorlar_screen_text:
+        missing.append("fetchScores method")
+    if "ConsumerStatefulWidget" not in skorlar_screen_text and "ConsumerState<" not in skorlar_screen_text:
+        missing.append("ConsumerStatefulWidget / ConsumerState")
+    if missing:
+        findings.append(
+            "S61 skorlar_screen.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — the screen is a Riverpod "
+            "ConsumerStatefulWidget; the future list type "
+            "Future<List<SessionScore>> + the fetchScores method "
+            "are the canonical 11.0C wire shape."
+        )
+    return findings
+
+
+def run_s62_check(score_calculator_text):
+    """S62: score_calculator.dart has `compute` pure function."""
+    findings = []
+    if score_calculator_text is None:
+        findings.append("S62 score_calculator.dart: file missing")
+        return findings
+    missing = []
+    if "class SessionScoreCalculator" not in score_calculator_text:
+        missing.append("class SessionScoreCalculator")
+    if "static SessionScore compute" not in score_calculator_text:
+        missing.append("static SessionScore compute method")
+    if missing:
+        findings.append(
+            "S62 score_calculator.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — the `compute` method is a "
+            "pure function (no I/O, no time-source injection) so "
+            "it's unit-testable and the Skorlar screen can "
+            "compute the headline score from a `summary_stats` "
+            "block without side effects."
+        )
+    return findings
+
+
+def run_s63_check(score_calculator_text):
+    """S63: score_calculator.dart carries the 4 metric formulas."""
+    findings = []
+    if score_calculator_text is None:
+        findings.append("S63 score_calculator.dart: file missing")
+        return findings
+    missing = []
+    if "encryptionIntegrityPct" not in score_calculator_text:
+        missing.append("encryptionIntegrityPct metric")
+    if "packetLossPct" not in score_calculator_text:
+        missing.append("packetLossPct metric")
+    if "meanLatencyMs" not in score_calculator_text:
+        missing.append("meanLatencyMs metric")
+    if "jitterMs" not in score_calculator_text:
+        missing.append("jitterMs metric")
+    if missing:
+        findings.append(
+            "S63 score_calculator.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — the 4 metric fields "
+            "(encryption integrity %, packet loss %, mean "
+            "latency ms, jitter ms) are the inputs to the "
+            "weighted sum; the Skorlar screen's `SessionScoreCard` "
+            "detail view shows all 4 side-by-side."
+        )
+    return findings
+
+
+def run_s64_check(score_calculator_text):
+    """S64: score_calculator.dart overall weighted sum (0.4 + 0.3 + 0.2 + 0.1)."""
+    findings = []
+    if score_calculator_text is None:
+        findings.append("S64 score_calculator.dart: file missing")
+        return findings
+    has_weights = ("0.4 *" in score_calculator_text and
+                   "0.3 *" in score_calculator_text and
+                   "0.2 *" in score_calculator_text and
+                   "0.1 *" in score_calculator_text)
+    if not has_weights:
+        findings.append(
+            "S64 score_calculator.dart: missing overall weighted "
+            "sum weights (0.4 + 0.3 + 0.2 + 0.1). Sprint 11.0C "
+            "invariant — the 4 weights sum to 1.0; the brief's "
+            "spec is verbatim. The audit accepts the literal "
+            "`0.4 *` + `0.3 *` + `0.2 *` + `0.1 *` substring "
+            "sequence in the file's `compute` method."
+        )
+    return findings
+
+
+def run_s65_check(orchestrator_text):
+    """S65: session_orchestrator.dart has `closeSession()` method."""
+    findings = []
+    if orchestrator_text is None:
+        findings.append("S65 session_orchestrator.dart: file missing")
+        return findings
+    missing = []
+    if "closeSession" not in orchestrator_text:
+        missing.append("closeSession method")
+    if "/api/v1/sessions/" not in orchestrator_text or "close" not in orchestrator_text:
+        missing.append("close endpoint path")
+    if missing:
+        findings.append(
+            "S65 session_orchestrator.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — `closeSession()` POSTs to "
+            "`/api/v1/sessions/{id}/close` and caches the "
+            "`summary_stats` block. The active-pool screen's "
+            "\"Oturumu Bitir\" button is the only call site."
+        )
+    return findings
+
+
+def run_s66_check(active_pool_text):
+    """S66: active_pool_screen.dart has the 'Oturumu Bitir' Turkish label."""
+    findings = []
+    if active_pool_text is None:
+        findings.append("S66 active_pool_screen.dart: file missing")
+        return findings
+    if "Oturumu Bitir" not in active_pool_text:
+        findings.append(
+            "S66 active_pool_screen.dart: missing `Oturumu Bitir` "
+            "Turkish label. Sprint 11.0C invariant — the button "
+            "calls `_orchestrator.closeSession()` and navigates "
+            "to /home/skorlar. S25 invariant extends: no 'VPN' "
+            "string, Turkish UI text only."
+        )
+    return findings
+
+
+def run_s67_check(active_pool_text):
+    """S67: active_pool_screen.dart closeSession call + navigate to /home/skorlar."""
+    findings = []
+    if active_pool_text is None:
+        findings.append("S67 active_pool_screen.dart: file missing")
+        return findings
+    has_call = "closeSession" in active_pool_text
+    has_nav = "/home/skorlar" in active_pool_text
+    missing = []
+    if not has_call:
+        missing.append("closeSession call site")
+    if not has_nav:
+        missing.append("/home/skorlar navigation")
+    if missing:
+        findings.append(
+            "S67 active_pool_screen.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — the Oturumu Bitir flow "
+            "calls `_orchestrator.closeSession()` then `context."
+            "go('/home/skorlar')` so the new score is visible "
+            "without an explicit refresh."
+        )
+    return findings
+
+
+def run_s68_check(skorlar_screen_text):
+    """S68: skorlar_screen.dart has the empty-state Turkish string."""
+    findings = []
+    if skorlar_screen_text is None:
+        findings.append("S68 skorlar_screen.dart: file missing")
+        return findings
+    if "Henüz tamamlanmış oturum yok" not in skorlar_screen_text:
+        findings.append(
+            "S68 skorlar_screen.dart: missing `Henüz tamamlanmış "
+            "oturum yok` empty-state string. Sprint 11.0C "
+            "invariant — the screen shows the empty state when "
+            "`fetchScores()` returns an empty list (no "
+            "completed sessions yet)."
+        )
+    return findings
+
+
+def run_s69_check(skorlar_screen_text):
+    """S69: skorlar_screen.dart has a score card with overall gauge (disc)."""
+    findings = []
+    if skorlar_screen_text is None:
+        findings.append("S69 skorlar_screen.dart: file missing")
+        return findings
+    has_card = "SessionScoreCard" in skorlar_screen_text
+    has_gauge = ("_OverallScoreDisc" in skorlar_screen_text or
+                 "overallScore" in skorlar_screen_text)
+    missing = []
+    if not has_card:
+        missing.append("SessionScoreCard widget")
+    if not has_gauge:
+        missing.append("overallScore gauge (disc)")
+    if missing:
+        findings.append(
+            "S69 skorlar_screen.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — each session card has a "
+            "headline gauge (coloured disc with the overall "
+            "score 0-100) plus an expandable details view with "
+            "the 4 sub-metrics. The brief's spec is a `fl_chart` "
+            "radial gauge; Sprint 11.0C uses a simple disc with "
+            "the `tier` color hint to keep the APK small after "
+            "the M2 +50 MB libwebrtc hit."
+        )
+    return findings
+
+
+def run_s70_check(router_text):
+    """S70: backend router.go POST /api/v1/sessions/{id}/close handler registration."""
+    findings = []
+    if router_text is None:
+        findings.append("S70 backend/internal/api/router.go: file missing")
+        return findings
+    needle = 'r.Post("/sessions/{id}/close"'
+    if needle not in router_text:
+        findings.append(
+            "S70 backend/internal/api/router.go: missing `"
+            + needle + "` route registration. Sprint 11.0C "
+            "invariant — the mobile orchestrator's "
+            "`closeSession()` POSTs this endpoint; the handler "
+            "in `sessions.go` marks the session completed and "
+            "returns the `summary_stats` block."
+        )
+    return findings
+
+
+def run_s71_check(sessions_go_text):
+    """S71: backend sessions.go `summary_stats` response shape (4 fields + encrypted/total pair)."""
+    findings = []
+    if sessions_go_text is None:
+        findings.append("S71 backend/internal/api/sessions.go: file missing")
+        return findings
+    missing = []
+    if "summary_stats" not in sessions_go_text:
+        missing.append("summary_stats key")
+    for field in ("total_packets", "encrypted_packets", "packet_loss_pct",
+                  "mean_latency_ms", "jitter_ms", "encryption_integrity_pct"):
+        if field not in sessions_go_text:
+            missing.append(field)
+    if missing:
+        findings.append(
+            "S71 backend/internal/api/sessions.go: missing "
+            + ", ".join(missing) + ". Sprint 11.0C invariant — "
+            "the close handler's `summary_stats` block carries "
+            "6 fields: `total_packets`, `encrypted_packets`, "
+            "`packet_loss_pct`, `mean_latency_ms`, `jitter_ms`, "
+            "`encryption_integrity_pct`. The mobile `SessionScore` "
+            "JSON deserialiser reads all 6 into the calculator."
+        )
+    return findings
+
+
+def run_s72_check(score_calculator_test_text):
+    """S72: score_calculator_test.dart has 4+ unit tests."""
+    findings = []
+    if score_calculator_test_text is None:
+        findings.append("S72 score_calculator_test.dart: file missing")
+        return findings
+    # Count `test(` occurrences — minimum 4 per brief.
+    test_count = score_calculator_test_text.count("test(")
+    if test_count < 4:
+        findings.append(
+            "S72 score_calculator_test.dart: missing the 4 unit "
+            "tests (integration, loss, latency, jitter). "
+            "Sprint 11.0C invariant — the brief requires "
+            "exactly 4 unit tests for the calculator; the "
+            "M3 implementation has 7 (the 4 brief + 3 extra: "
+            "overall weighted sum, computeAll, standardDeviation "
+            "helper)."
+        )
+    return findings
+
+
 # ─── Test cases ──────────────────────────────────────────────────
 
 # Case 0: fully-valid file (post-Sprint 9.6.6 fix) — expect 0 findings.
@@ -2567,6 +2859,193 @@ case_s60_active_pool_no_indicators = (
     "static String _webrtcStateLabel(WebRTCState s) => 'unknown';\n"
 )
 
+# S61-S72 (Sprint 11.0C) fixture variables.
+
+# S61: skorlar_screen.dart has Future<List<SessionScore>> +
+# ConsumerStatefulWidget + fetchScores method.
+case_s61_skorlar_pass = (
+    "import 'package:flutter_riverpod/flutter_riverpod.dart';\n"
+    "class SkorlarScreen extends ConsumerStatefulWidget {\n"
+    "  const SkorlarScreen({super.key});\n"
+    "  @override\n"
+    "  ConsumerState<SkorlarScreen> createState() => _SkorlarScreenState();\n"
+    "}\n"
+    "class _SkorlarScreenState extends ConsumerState<SkorlarScreen> {\n"
+    "  Future<List<SessionScore>>? _scoresFuture;\n"
+    "  Future<List<SessionScore>> _fetchScores() async {\n"
+    "    return <SessionScore>[];\n"
+    "  }\n"
+    "}\n"
+)
+case_s61_skorlar_no_consumer = (
+    "// forgot ConsumerStatefulWidget + fetchScores\n"
+    "class SkorlarScreen extends StatefulWidget {}\n"
+)
+
+# S62: score_calculator.dart has SessionScoreCalculator class
+# + static SessionScore compute method.
+case_s62_score_calculator_pass = (
+    "class SessionScoreCalculator {\n"
+    "  const SessionScoreCalculator._();\n"
+    "  static SessionScore compute(SessionTelemetry t) {\n"
+    "    final integrity = (t.encryptionIntegrityPct / 100.0).clamp(0.0, 1.0);\n"
+    "    return SessionScore(sessionId: t.sessionId, overallScore: integrity * 100);\n"
+    "  }\n"
+    "}\n"
+)
+case_s62_score_calculator_no_compute = (
+    "// forgot the compute method\n"
+    "class SessionScoreCalculator {}\n"
+)
+
+# S63: score_calculator.dart has the 4 metric field references.
+case_s63_score_calculator_pass = (
+    "final integrity = (t.encryptionIntegrityPct / 100.0).clamp(0.0, 1.0);\n"
+    "final loss = (t.packetLossPct / 100.0).clamp(0.0, 1.0);\n"
+    "final latency = (1.0 - (t.meanLatencyMs / 1000.0)).clamp(0.0, 1.0);\n"
+    "final jitter = (1.0 - (t.jitterMs / 100.0)).clamp(0.0, 1.0);\n"
+)
+case_s63_score_calculator_no_metrics = (
+    "// forgot the 4 metric formulas\n"
+    "static SessionScore compute(SessionTelemetry t) {\n"
+    "  return SessionScore(sessionId: t.sessionId, overallScore: 100);\n"
+    "}\n"
+)
+
+# S64: score_calculator.dart has the 0.4 + 0.3 + 0.2 + 0.1
+# weighted sum.
+case_s64_score_calculator_pass = (
+    "final raw = 0.4 * integrity +\n"
+    "    0.3 * (1.0 - loss) +\n"
+    "    0.2 * latency +\n"
+    "    0.1 * jitter;\n"
+)
+case_s64_score_calculator_no_weights = (
+    "// forgot the weighted sum weights\n"
+    "final raw = (integrity + loss + latency + jitter) / 4.0;\n"
+)
+
+# S65: session_orchestrator.dart has closeSession method +
+# /api/v1/sessions/.../close endpoint.
+case_s65_orchestrator_pass = (
+    "Future<Map<String, Object?>?> closeSession({String? sessionId}) async {\n"
+    "  final id = sessionId ?? _sessionId;\n"
+    "  final resp = await _client.post(\n"
+    "    Uri.parse('\${AppConfig.apiBase}/api/v1/sessions/$id/close'),\n"
+    "    headers: headers,\n"
+    "  );\n"
+    "  return body['summary_stats'];\n"
+    "}\n"
+)
+case_s65_orchestrator_no_close = (
+    "// forgot the closeSession method\n"
+    "Future<void> tearDown() async {}\n"
+)
+
+# S66: active_pool_screen.dart has the 'Oturumu Bitir' Turkish label.
+case_s66_active_pool_pass = (
+    "OutlinedButton.icon(\n"
+    "  onPressed: _oturumuBitir,\n"
+    "  icon: const Icon(Icons.stop_circle_outlined),\n"
+    "  label: const Text('Oturumu Bitir'),\n"
+    ")\n"
+)
+case_s66_active_pool_no_button = (
+    "// forgot the session-close button — no oturumu bitir surface\n"
+    "ElevatedButton.icon(\n"
+    "  onPressed: _onStart,\n"
+    "  label: const Text('Şifreleme Doğrulamayı Başlat'),\n"
+    ")\n"
+)
+
+# S67: active_pool_screen.dart has closeSession call + /home/skorlar nav.
+case_s67_active_pool_pass = (
+    "final summary = await _orchestrator.closeSession();\n"
+    "if (!mounted) return;\n"
+    "context.go('/home/skorlar');\n"
+)
+case_s67_active_pool_no_flow = (
+    "// forgot the close flow\n"
+    "await _orchestrator.tearDown();\n"
+)
+
+# S68: skorlar_screen.dart has the 'Henüz tamamlanmış oturum yok' empty state.
+case_s68_skorlar_pass = (
+    "class _SkorlarEmpty extends StatelessWidget {\n"
+    "  @override\n"
+    "  Widget build(BuildContext context) {\n"
+    "    return const Center(\n"
+    "      child: Text('Henüz tamamlanmış oturum yok'),\n"
+    "    );\n"
+    "  }\n"
+    "}\n"
+)
+case_s68_skorlar_no_empty = (
+    "// forgot the empty state\n"
+    "class _SkorlarEmpty extends StatelessWidget {\n"
+    "  Widget build(BuildContext context) => const Center(child: Text('Empty'));\n"
+    "}\n"
+)
+
+# S69: skorlar_screen.dart has SessionScoreCard + overall gauge.
+case_s69_skorlar_pass = (
+    "class SessionScoreCard extends StatefulWidget {\n"
+    "  Widget build(BuildContext context) {\n"
+    "    return _OverallScoreDisc(score: s.overallScore, color: color);\n"
+    "  }\n"
+    "}\n"
+)
+case_s69_skorlar_no_card = (
+    "// forgot the per-session card + headline gauge\n"
+    "Widget build(BuildContext context) => const Center(child: Text('No cards'));\n"
+)
+
+# S70: backend router.go has POST /api/v1/sessions/{id}/close.
+case_s70_router_pass = (
+    "r.Post(\"/sessions/{id}/close\", a.handleCloseSession())\n"
+)
+case_s70_router_no_close = (
+    "// forgot the close route\n"
+    "r.Post(\"/sessions/{id}/telemetry\", a.handlePostTelemetry())\n"
+)
+
+# S71: backend sessions.go has the 6-field summary_stats response.
+case_s71_sessions_pass = (
+    "out := map[string]any{\n"
+    "    \"session_id\":    sessionID,\n"
+    "    \"status\":        \"completed\",\n"
+    "    \"closed_at\":     now.Format(time.RFC3339),\n"
+    "    \"summary_stats\": map[string]any{\n"
+    "        \"total_packets\":            0,\n"
+    "        \"encrypted_packets\":        0,\n"
+    "        \"packet_loss_pct\":          0.0,\n"
+    "        \"mean_latency_ms\":          0.0,\n"
+    "        \"jitter_ms\":                0.0,\n"
+    "        \"encryption_integrity_pct\": 100.0,\n"
+    "    },\n"
+    "}\n"
+)
+case_s71_sessions_no_summary = (
+    "// forgot the summary block\n"
+    "out := map[string]any{\"session_id\": sessionID, \"status\": \"completed\"}\n"
+)
+
+# S72: score_calculator_test.dart has 4+ unit tests.
+case_s72_score_calculator_test_pass = (
+    "void main() {\n"
+    "  test('perfect session → 100', () {});\n"
+    "  test('loss-only regression', () {});\n"
+    "  test('latency-only regression', () {});\n"
+    "  test('jitter-only regression', () {});\n"
+    "  test('mixed 4-metric regression', () {});\n"
+    "}\n"
+)
+case_s72_score_calculator_test_no_tests = (
+    "void main() {\n"
+    "  // forgot the 4 unit tests\n"
+    "}\n"
+)
+
 cases = [
     # S1-S5 cases (Sprint 9.6.6 — regression guard: must still pass)
     ("PASS (Sprint 9.6.6 fixed file)", run_check, (case_pass,), []),
@@ -2842,6 +3321,78 @@ cases = [
     ("S60 FAIL (active_pool_screen.dart missing the three status indicator labels)",
      run_s60_check, (case_s60_active_pool_no_indicators,),
      ['S60 active_pool_screen.dart: missing Negotiating label (müzakere), Connected label (bağlandı), Failed label (hata). Sprint 11.0B invariant — the WebRTC status pill on the active pool screen surfaces the live peer connection state with three labels: Negotiating / Connected / Failed (Turkish: müzakere / bağlandı / hata). The `P2P:` prefix in the row distinguishes the WebRTC pill from the foreground service pill.']),
+    # S61 cases (Sprint 11.0C - new)
+    ("S61 PASS (skorlar_screen.dart has Future<List<SessionScore>> + ConsumerStatefulWidget + fetchScores method)",
+     run_s61_check, (case_s61_skorlar_pass,), []),
+    ("S61 FAIL (skorlar_screen.dart missing the ConsumerStatefulWidget + fetchScores method — regression: Skorlar screen can't list completed sessions)",
+     run_s61_check, (case_s61_skorlar_no_consumer,),
+     ['S61 skorlar_screen.dart: missing Future<List<SessionScore>>. Sprint 11.0C invariant — the screen is a Riverpod ConsumerStatefulWidget; the future list type Future<List<SessionScore>> + the fetchScores method are the canonical 11.0C wire shape.']),
+    # S62 cases (Sprint 11.0C - new)
+    ("S62 PASS (score_calculator.dart has SessionScoreCalculator class + static SessionScore compute method)",
+     run_s62_check, (case_s62_score_calculator_pass,), []),
+    ("S62 FAIL (score_calculator.dart missing the SessionScoreCalculator class + compute method — regression: no pure scoring function)",
+     run_s62_check, (case_s62_score_calculator_no_compute,),
+     ['S62 score_calculator.dart: missing static SessionScore compute method. Sprint 11.0C invariant — the `compute` method is a pure function (no I/O, no time-source injection) so it\'s unit-testable and the Skorlar screen can compute the headline score from a `summary_stats` block without side effects.']),
+    # S63 cases (Sprint 11.0C - new)
+    ("S63 PASS (score_calculator.dart carries the 4 metric field references: encryptionIntegrityPct, packetLossPct, meanLatencyMs, jitterMs)",
+     run_s63_check, (case_s63_score_calculator_pass,), []),
+    ("S63 FAIL (score_calculator.dart missing the 4 metric formulas — regression: the Skorlar card can't show the per-metric detail rows)",
+     run_s63_check, (case_s63_score_calculator_no_metrics,),
+     ['S63 score_calculator.dart: missing encryptionIntegrityPct metric, packetLossPct metric, meanLatencyMs metric, jitterMs metric. Sprint 11.0C invariant — the 4 metric fields (encryption integrity %, packet loss %, mean latency ms, jitter ms) are the inputs to the weighted sum; the Skorlar screen\'s `SessionScoreCard` detail view shows all 4 side-by-side.']),
+    # S64 cases (Sprint 11.0C - new)
+    ("S64 PASS (score_calculator.dart has the overall weighted sum 0.4 + 0.3 + 0.2 + 0.1)",
+     run_s64_check, (case_s64_score_calculator_pass,), []),
+    ("S64 FAIL (score_calculator.dart missing the 0.4 + 0.3 + 0.2 + 0.1 weighted sum weights — regression: the headline score is unweighted)",
+     run_s64_check, (case_s64_score_calculator_no_weights,),
+     ['S64 score_calculator.dart: missing overall weighted sum weights (0.4 + 0.3 + 0.2 + 0.1). Sprint 11.0C invariant — the 4 weights sum to 1.0; the brief\'s spec is verbatim. The audit accepts the literal `0.4 *` + `0.3 *` + `0.2 *` + `0.1 *` substring sequence in the file\'s `compute` method.']),
+    # S65 cases (Sprint 11.0C - new)
+    ("S65 PASS (session_orchestrator.dart has closeSession() method that POSTs /api/v1/sessions/{id}/close)",
+     run_s65_check, (case_s65_orchestrator_pass,), []),
+    ("S65 FAIL (session_orchestrator.dart missing the closeSession() method — regression: 'Oturumu Bitir' button has no orchestrator endpoint)",
+     run_s65_check, (case_s65_orchestrator_no_close,),
+     ['S65 session_orchestrator.dart: missing close endpoint path. Sprint 11.0C invariant — `closeSession()` POSTs to `/api/v1/sessions/{id}/close` and caches the `summary_stats` block. The active-pool screen\'s "Oturumu Bitir" button is the only call site.']),
+    # S66 cases (Sprint 11.0C - new)
+    ("S66 PASS (active_pool_screen.dart has the 'Oturumu Bitir' Turkish label)",
+     run_s66_check, (case_s66_active_pool_pass,), []),
+    ("S66 FAIL (active_pool_screen.dart missing the 'Oturumu Bitir' Turkish label — regression: S25 invariant + the M3 close flow has no UI surface)",
+     run_s66_check, (case_s66_active_pool_no_button,),
+     ['S66 active_pool_screen.dart: missing `Oturumu Bitir` Turkish label. Sprint 11.0C invariant — the button calls `_orchestrator.closeSession()` and navigates to /home/skorlar. S25 invariant extends: no \'VPN\' string, Turkish UI text only.']),
+    # S67 cases (Sprint 11.0C - new)
+    ("S67 PASS (active_pool_screen.dart closeSession call + navigate to /home/skorlar flow)",
+     run_s67_check, (case_s67_active_pool_pass,), []),
+    ("S67 FAIL (active_pool_screen.dart missing the closeSession + /home/skorlar flow — regression: the Oturumu Bitir button has no target)",
+     run_s67_check, (case_s67_active_pool_no_flow,),
+     ['S67 active_pool_screen.dart: missing closeSession call site, /home/skorlar navigation. Sprint 11.0C invariant — the Oturumu Bitir flow calls `_orchestrator.closeSession()` then `context.go(\'/home/skorlar\')` so the new score is visible without an explicit refresh.']),
+    # S68 cases (Sprint 11.0C - new)
+    ("S68 PASS (skorlar_screen.dart has the 'Henüz tamamlanmış oturum yok' empty-state string)",
+     run_s68_check, (case_s68_skorlar_pass,), []),
+    ("S68 FAIL (skorlar_screen.dart missing the empty-state string — regression: the screen has no placeholder for new users)",
+     run_s68_check, (case_s68_skorlar_no_empty,),
+     ['S68 skorlar_screen.dart: missing `Henüz tamamlanmış oturum yok` empty-state string. Sprint 11.0C invariant — the screen shows the empty state when `fetchScores()` returns an empty list (no completed sessions yet).']),
+    # S69 cases (Sprint 11.0C - new)
+    ("S69 PASS (skorlar_screen.dart has SessionScoreCard with overall-score gauge disc)",
+     run_s69_check, (case_s69_skorlar_pass,), []),
+    ("S69 FAIL (skorlar_screen.dart missing the SessionScoreCard + overall-score gauge — regression: the screen has no per-session card with a headline score)",
+     run_s69_check, (case_s69_skorlar_no_card,),
+     ['S69 skorlar_screen.dart: missing SessionScoreCard widget, overallScore gauge (disc). Sprint 11.0C invariant — each session card has a headline gauge (coloured disc with the overall score 0-100) plus an expandable details view with the 4 sub-metrics. The brief\'s spec is a `fl_chart` radial gauge; Sprint 11.0C uses a simple disc with the `tier` color hint to keep the APK small after the M2 +50 MB libwebrtc hit.']),
+    # S70 cases (Sprint 11.0C - new)
+    ("S70 PASS (backend router.go has POST /api/v1/sessions/{id}/close route registration)",
+     run_s70_check, (case_s70_router_pass,), []),
+    ("S70 FAIL (backend router.go missing the POST /api/v1/sessions/{id}/close route — regression: the mobile closeSession() has no backend endpoint)",
+     run_s70_check, (case_s70_router_no_close,),
+     ['S70 backend/internal/api/router.go: missing `r.Post("/sessions/{id}/close"` route registration. Sprint 11.0C invariant — the mobile orchestrator\'s `closeSession()` POSTs this endpoint; the handler in `sessions.go` marks the session completed and returns the `summary_stats` block.']),
+    # S71 cases (Sprint 11.0C - new)
+    ("S71 PASS (backend sessions.go has the 6-field summary_stats response shape)",
+     run_s71_check, (case_s71_sessions_pass,), []),
+    ("S71 FAIL (backend sessions.go missing the 6-field summary_stats response shape — regression: the Skorlar screen has no per-metric data)",
+     run_s71_check, (case_s71_sessions_no_summary,),
+     ['S71 backend/internal/api/sessions.go: missing summary_stats key, total_packets, encrypted_packets, packet_loss_pct, mean_latency_ms, jitter_ms, encryption_integrity_pct. Sprint 11.0C invariant — the close handler\'s `summary_stats` block carries 6 fields: `total_packets`, `encrypted_packets`, `packet_loss_pct`, `mean_latency_ms`, `jitter_ms`, `encryption_integrity_pct`. The mobile `SessionScore` JSON deserialiser reads all 6 into the calculator.']),
+    # S72 cases (Sprint 11.0C - new)
+    ("S72 PASS (score_calculator_test.dart has 4+ unit tests (brief: integration, loss, latency, jitter) — M3 implementation has 7)",
+     run_s72_check, (case_s72_score_calculator_test_pass,), []),
+    ("S72 FAIL (score_calculator_test.dart missing the 4 unit tests — regression: the calculator's pure-function guarantee is not verified)",
+     run_s72_check, (case_s72_score_calculator_test_no_tests,),
+     ['S72 score_calculator_test.dart: missing the 4 unit tests (integration, loss, latency, jitter). Sprint 11.0C invariant — the brief requires exactly 4 unit tests for the calculator; the M3 implementation has 7 (the 4 brief + 3 extra: overall weighted sum, computeAll, standardDeviation helper).']),
  ]   # noqa: E501
 
 failed = []

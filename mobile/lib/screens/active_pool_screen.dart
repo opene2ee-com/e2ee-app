@@ -174,6 +174,64 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
     }
   }
 
+  /// "Oturumu Bitir" button handler (Sprint 11.0C S66 + S67).
+  /// Calls `_orchestrator.closeSession()` which POSTs
+  /// `/api/v1/sessions/{id}/close` and caches the
+  /// `summary_stats` block. On success, navigates to
+  /// `/home/skorlar` with a snackbar that shows the new
+  /// score (parsed from the `summary_stats` block). On
+  /// failure, surfaces a red snackbar and stays on the
+  /// active pool screen so the user can retry.
+  Future<void> _oturumuBitir() async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    if (_orchestrator.sessionId == null) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Aktif bir oturum yok — önce şifreleme '
+              'doğrulamayı başlatın.'),
+          backgroundColor: AppTheme.danger,
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+    try {
+      final summary = await _orchestrator.closeSession();
+      if (!mounted) return;
+      // S67 invariant: navigate to /home/skorlar. The Skorlar
+      // screen fetches the latest session list on init, so
+      // the new score is visible without an explicit refresh.
+      context.go('/home/skorlar');
+      if (summary != null) {
+        final overall = (summary['overall_score'] as num?)?.toDouble();
+        if (overall != null) {
+          messenger.showSnackBar(
+            SnackBar(
+              content: Text(
+                'Oturum tamamlandı, skor '
+                '${overall.toStringAsFixed(0)}/100',
+              ),
+              backgroundColor: AppTheme.primary,
+              duration: const Duration(seconds: 3),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Oturum kapatılamadı: $e'),
+          backgroundColor: AppTheme.danger,
+          duration: const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
   void _onAliciOlToggle() {
     final eskiAlici = ref.read(poolProvider).isAlici;
     ref.read(poolProvider.notifier).toggleAlici();
@@ -382,6 +440,31 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
                   ),
                 ),
               ],
+            ),
+          ),
+          // Sprint 11.0C — "Oturumu Bitir" button. S66 invariant:
+          // Turkish label. Calls `_orchestrator.closeSession()`
+          // (S65), then navigates to /home/skorlar with a
+          // snackbar showing the new score. S67 invariant: the
+          // navigate-to-skorlar call + `closeSession` call
+          // both happen on the same user action.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _oturumuBitir,
+                icon: const Icon(Icons.stop_circle_outlined),
+                label: const Text('Oturumu Bitir'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.danger,
+                  side: const BorderSide(color: AppTheme.danger),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
             ),
           ),
           // Toggle card.

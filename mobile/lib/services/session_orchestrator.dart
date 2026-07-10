@@ -76,12 +76,20 @@ class SessionOrchestrator {
   /// in-flight long-poll + createOffer paths.
   bool _tornDown = false;
 
+  /// Sprint 11.0C — `summary_stats` cache. Populated by
+  /// [closeSession] when the backend returns the canonical
+  /// `{summary_stats: {...}}` block. The Skorlar screen reads
+  /// this on the next frame so the user sees the new score
+  /// immediately after "Oturumu Bitir" returns.
+  Map<String, Object?>? _lastSummaryStats;
+
   String? get sessionId => _sessionId;
   String? get receiverSessionId => _receiverSessionId;
   WebRTCService get webrtc => _webrtc;
   WebRTCState get webrtcState => _webrtc.state;
   Map<String, Object?>? get remoteOffer => _remoteOffer;
   Map<String, Object?>? get remoteAnswer => _remoteAnswer;
+  Map<String, Object?>? get lastSummaryStats => _lastSummaryStats;
 
   /// POST /api/v1/sessions → returns `{ session_id, ... }`.
   ///
@@ -310,6 +318,57 @@ class SessionOrchestrator {
     _receiverSessionId = null;
     _remoteOffer = null;
     _remoteAnswer = null;
+    _lastSummaryStats = null;
+  }
+
+  /// Sprint 11.0C — close the active session and capture the
+  /// backend's `summary_stats` block. Returns the canonical
+  /// summary shape (or `null` if the session had no packets).
+  /// The Skorlar screen reads [lastSummaryStats] on the next
+  /// frame to render the new score card.
+  ///
+  /// S65 invariant: the method exists on the orchestrator and
+  /// POSTs to the canonical `/api/v1/sessions/{id}/close`
+  /// endpoint (Sprint 11.0C v16 audit — the backend
+  /// `sessions.go` handler). The summary is cached on the
+  /// orchestrator so the active-pool screen's
+  /// "Oturumu Bitir" → navigate-to-Skorlar flow can surface
+  /// the new score without an extra GET round-trip.
+  Future<Map<String, Object?>?> closeSession({String? sessionId}) async {
+    final id = sessionId ?? _sessionId;
+    if (id == null) {
+      throw const OrchestratorException(
+        'closeSession: no session_id (call startSession first)',
+      );
+    }
+    final headers = await _auth.authHeaders();
+    headers['Content-Type'] = 'application/json';
+    final resp = await _client
+        .post(
+          Uri.parse('${AppConfig.apiBase}/api/v1/sessions/$id/close'),
+          headers: headers,
+          body: jsonEncode({
+            'closed_at': DateTime.now().toUtc().toIso8601String(),
+          }),
+        )
+        .timeout(const Duration(seconds: 10));
+    if (resp.statusCode != 200 && resp.statusCode != 201) {
+      throw OrchestratorException(
+        'closeSession failed (${resp.statusCode}): ${resp.body}',
+        statusCode: resp.statusCode,
+      );
+    }
+    final body = jsonDecode(resp.body) as Map<String, Object?>;
+    _lastSummaryStats = body['summary_stats'] as Map<String, Object?>?;
+    // Tear down the local WebRTC + state — the session is
+    // "completed" on the backend; we no longer need the
+    // peer connection.
+    await _webrtc.close();
+    _tornDown = true;
+    _sessionId = null;
+    _remoteOffer = null;
+    _remoteAnswer = null;
+    return _lastSummaryStats;
   }
 
   /// Release the underlying [http.Client].

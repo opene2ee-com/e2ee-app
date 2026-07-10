@@ -3873,6 +3873,340 @@ def check_telemetry_service_summary_upload_v15() -> list[str]:
     return findings
 
 
+# ═══ Sprint 11.0C — M3 production audit (S61-S72) ═══
+#
+# The Skorlar screen + score calculator + session close + E2E.
+# 12 new audit functions. S70 (backend router.go close route)
+# + S71 (backend sessions.go summary_stats shape) are the only
+# two that touch the backend; the rest are Dart-side.
+
+
+def check_skorlar_screen_fetch_scores_v17() -> list[str]:
+    """Sprint 11.0C: skorlar_screen.dart has Future<List<SessionScore>> + ConsumerStatefulWidget (S61)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "screens" / "skorlar_screen.dart"
+    if not target.exists():
+        findings.append("S61 skorlar_screen.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S61 skorlar_screen.dart: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    if "Future<List<SessionScore>>" not in text:
+        missing.append("Future<List<SessionScore>>")
+    if "ConsumerStatefulWidget" not in text and "ConsumerState<" not in text:
+        missing.append("ConsumerStatefulWidget / ConsumerState")
+    if "fetchScores" not in text:
+        missing.append("fetchScores method")
+    if missing:
+        findings.append(
+            "S61 skorlar_screen.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — the screen is a Riverpod "
+            "ConsumerStatefulWidget; the future list type "
+            "Future<List<SessionScore>> + the fetchScores method "
+            "are the canonical 11.0C wire shape."
+        )
+    return findings
+
+
+def check_score_calculator_compute_v17() -> list[str]:
+    """Sprint 11.0C: score_calculator.dart has SessionScoreCalculator class + static compute (S62)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "services" / "score_calculator.dart"
+    if not target.exists():
+        findings.append("S62 score_calculator.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S62 score_calculator.dart: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    if "class SessionScoreCalculator" not in text:
+        missing.append("class SessionScoreCalculator")
+    if "static SessionScore compute" not in text:
+        missing.append("static SessionScore compute method")
+    if missing:
+        findings.append(
+            "S62 score_calculator.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — the `compute` method is "
+            "a pure function (no I/O, no time-source injection) "
+            "so it's unit-testable and the Skorlar screen can "
+            "compute the headline score from a `summary_stats` "
+            "block without side effects."
+        )
+    return findings
+
+
+def check_score_calculator_four_metrics_v17() -> list[str]:
+    """Sprint 11.0C: score_calculator.dart carries the 4 metric field references (S63)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "services" / "score_calculator.dart"
+    if not target.exists():
+        findings.append("S63 score_calculator.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S63 score_calculator.dart: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    for field in ("encryptionIntegrityPct", "packetLossPct",
+                  "meanLatencyMs", "jitterMs"):
+        if field not in text:
+            missing.append(field + " metric")
+    if missing:
+        findings.append(
+            "S63 score_calculator.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — the 4 metric fields "
+            "(encryption integrity %, packet loss %, mean "
+            "latency ms, jitter ms) are the inputs to the "
+            "weighted sum; the Skorlar screen's `SessionScoreCard` "
+            "detail view shows all 4 side-by-side."
+        )
+    return findings
+
+
+def check_score_calculator_overall_weighted_sum_v17() -> list[str]:
+    """Sprint 11.0C: score_calculator.dart has the 0.4 + 0.3 + 0.2 + 0.1 weighted sum (S64)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "services" / "score_calculator.dart"
+    if not target.exists():
+        findings.append("S64 score_calculator.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S64 score_calculator.dart: read failed (" + str(e) + ").")
+        return findings
+    has_weights = ("0.4 *" in text and
+                   "0.3 *" in text and
+                   "0.2 *" in text and
+                   "0.1 *" in text)
+    if not has_weights:
+        findings.append(
+            "S64 score_calculator.dart: missing overall weighted "
+            "sum weights (0.4 + 0.3 + 0.2 + 0.1). Sprint 11.0C "
+            "invariant — the 4 weights sum to 1.0; the brief's "
+            "spec is verbatim."
+        )
+    return findings
+
+
+def check_session_orchestrator_close_session_v17() -> list[str]:
+    """Sprint 11.0C: session_orchestrator.dart has closeSession() method (S65)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "services" / "session_orchestrator.dart"
+    if not target.exists():
+        findings.append("S65 session_orchestrator.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S65 session_orchestrator.dart: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    if "closeSession" not in text:
+        missing.append("closeSession method")
+    has_close_endpoint = ("/api/v1/sessions/" in text and
+                         "close" in text and
+                         ".post(" in text)
+    if not has_close_endpoint:
+        missing.append("close endpoint path")
+    if missing:
+        findings.append(
+            "S65 session_orchestrator.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — `closeSession()` POSTs to "
+            "`/api/v1/sessions/{id}/close` and caches the "
+            "`summary_stats` block. The active-pool screen's "
+            "\"Oturumu Bitir\" button is the only call site."
+        )
+    return findings
+
+
+def check_active_pool_oturumu_bitur_button_v17() -> list[str]:
+    """Sprint 11.0C: active_pool_screen.dart has the 'Oturumu Bitir' Turkish label (S66)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "screens" / "active_pool_screen.dart"
+    if not target.exists():
+        findings.append("S66 active_pool_screen.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S66 active_pool_screen.dart: read failed (" + str(e) + ").")
+        return findings
+    if "Oturumu Bitir" not in text:
+        findings.append(
+            "S66 active_pool_screen.dart: missing `Oturumu Bitir` "
+            "Turkish label. Sprint 11.0C invariant — the button "
+            "calls `_orchestrator.closeSession()` and navigates "
+            "to /home/skorlar."
+        )
+    return findings
+
+
+def check_active_pool_close_then_navigate_v17() -> list[str]:
+    """Sprint 11.0C: active_pool_screen.dart closeSession + /home/skorlar flow (S67)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "screens" / "active_pool_screen.dart"
+    if not target.exists():
+        findings.append("S67 active_pool_screen.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S67 active_pool_screen.dart: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    if "closeSession" not in text:
+        missing.append("closeSession call site")
+    if "/home/skorlar" not in text:
+        missing.append("/home/skorlar navigation")
+    if missing:
+        findings.append(
+            "S67 active_pool_screen.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — the Oturumu Bitir flow "
+            "calls `_orchestrator.closeSession()` then `context."
+            "go('/home/skorlar')` so the new score is visible "
+            "without an explicit refresh."
+        )
+    return findings
+
+
+def check_skorlar_empty_state_v17() -> list[str]:
+    """Sprint 11.0C: skorlar_screen.dart has the empty-state Turkish string (S68)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "screens" / "skorlar_screen.dart"
+    if not target.exists():
+        findings.append("S68 skorlar_screen.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S68 skorlar_screen.dart: read failed (" + str(e) + ").")
+        return findings
+    if "Henüz tamamlanmış oturum yok" not in text:
+        findings.append(
+            "S68 skorlar_screen.dart: missing `Henüz tamamlanmış "
+            "oturum yok` empty-state string. Sprint 11.0C "
+            "invariant — the screen shows the empty state when "
+            "`fetchScores()` returns an empty list."
+        )
+    return findings
+
+
+def check_skorlar_card_overall_gauge_v17() -> list[str]:
+    """Sprint 11.0C: skorlar_screen.dart has SessionScoreCard + overall-score gauge (S69)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "screens" / "skorlar_screen.dart"
+    if not target.exists():
+        findings.append("S69 skorlar_screen.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S69 skorlar_screen.dart: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    if "SessionScoreCard" not in text:
+        missing.append("SessionScoreCard widget")
+    has_gauge = ("_OverallScoreDisc" in text or "overallScore" in text)
+    if not has_gauge:
+        missing.append("overallScore gauge (disc)")
+    if missing:
+        findings.append(
+            "S69 skorlar_screen.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0C invariant — each session card has a "
+            "headline gauge (coloured disc with the overall "
+            "score 0-100) plus an expandable details view with "
+            "the 4 sub-metrics."
+        )
+    return findings
+
+
+def check_backend_sessions_close_handler_v17() -> list[str]:
+    """Sprint 11.0C: backend router.go POST /api/v1/sessions/{id}/close handler (S70)."""
+    findings = []
+    router_path = REPO_ROOT / "backend" / "internal" / "api" / "router.go"
+    if not router_path.exists():
+        findings.append("S70 backend/internal/api/router.go: file missing.")
+        return findings
+    try:
+        text = router_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S70 backend/internal/api/router.go: read failed (" + str(e) + ").")
+        return findings
+    needle = 'r.Post("/sessions/{id}/close"'
+    if needle not in text:
+        findings.append(
+            "S70 backend/internal/api/router.go: missing `"
+            + needle + "` route registration. Sprint 11.0C "
+            "invariant — the mobile orchestrator's "
+            "`closeSession()` POSTs this endpoint; the handler "
+            "in `sessions.go` marks the session completed and "
+            "returns the `summary_stats` block."
+        )
+    return findings
+
+
+def check_backend_summary_stats_shape_v17() -> list[str]:
+    """Sprint 11.0C: backend sessions.go `summary_stats` response shape (S71)."""
+    findings = []
+    sessions_path = REPO_ROOT / "backend" / "internal" / "api" / "sessions.go"
+    if not sessions_path.exists():
+        findings.append("S71 backend/internal/api/sessions.go: file missing.")
+        return findings
+    try:
+        text = sessions_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S71 backend/internal/api/sessions.go: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    if "summary_stats" not in text:
+        missing.append("summary_stats key")
+    for field in ("total_packets", "encrypted_packets", "packet_loss_pct",
+                  "mean_latency_ms", "jitter_ms", "encryption_integrity_pct"):
+        if field not in text:
+            missing.append(field)
+    if missing:
+        findings.append(
+            "S71 backend/internal/api/sessions.go: missing "
+            + ", ".join(missing) + ". Sprint 11.0C invariant — "
+            "the close handler's `summary_stats` block carries "
+            "6 fields: `total_packets`, `encrypted_packets`, "
+            "`packet_loss_pct`, `mean_latency_ms`, `jitter_ms`, "
+            "`encryption_integrity_pct`. The mobile `SessionScore` "
+            "JSON deserialiser reads all 6 into the calculator."
+        )
+    return findings
+
+
+def check_score_calculator_unit_tests_v17() -> list[str]:
+    """Sprint 11.0C: score_calculator_test.dart has 4+ unit tests (S72)."""
+    findings = []
+    target = REPO_ROOT / "mobile" / "test" / "score_calculator_test.dart"
+    if not target.exists():
+        findings.append("S72 score_calculator_test.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S72 score_calculator_test.dart: read failed (" + str(e) + ").")
+        return findings
+    test_count = text.count("test(")
+    if test_count < 4:
+        findings.append(
+            "S72 score_calculator_test.dart: missing the 4 unit "
+            "tests (integration, loss, latency, jitter). "
+            "Sprint 11.0C invariant — the brief requires "
+            "exactly 4 unit tests for the calculator."
+        )
+    return findings
+
+
 # ═══ Sprint 11.0B — M2 production audit (S53-S60) ═══
 #
 # The M2 brief specifies `webrtc: ^0.13.0+` as the dep. The
@@ -4490,12 +4824,85 @@ def main() -> int:
     else:
         print("PASS: active_pool_screen.dart WebRTC status indicator (Negotiating / Connected / Failed — Turkish: müzakere / bağlandı / hata) - Sprint 11.0B S60")
 
+    # Sprint 11.0C: Skorlar screen + score calculator + session close + E2E (M3).
+    s61_findings = check_skorlar_screen_fetch_scores_v17()
+    if s61_findings:
+        all_findings.extend(s61_findings)
+    else:
+        print("PASS: skorlar_screen.dart has Future<List<SessionScore>> + ConsumerStatefulWidget + fetchScores - Sprint 11.0C S61")
+
+    s62_findings = check_score_calculator_compute_v17()
+    if s62_findings:
+        all_findings.extend(s62_findings)
+    else:
+        print("PASS: score_calculator.dart has SessionScoreCalculator class + static SessionScore compute - Sprint 11.0C S62")
+
+    s63_findings = check_score_calculator_four_metrics_v17()
+    if s63_findings:
+        all_findings.extend(s63_findings)
+    else:
+        print("PASS: score_calculator.dart carries the 4 metric field references - Sprint 11.0C S63")
+
+    s64_findings = check_score_calculator_overall_weighted_sum_v17()
+    if s64_findings:
+        all_findings.extend(s64_findings)
+    else:
+        print("PASS: score_calculator.dart has the overall weighted sum 0.4 + 0.3 + 0.2 + 0.1 - Sprint 11.0C S64")
+
+    s65_findings = check_session_orchestrator_close_session_v17()
+    if s65_findings:
+        all_findings.extend(s65_findings)
+    else:
+        print("PASS: session_orchestrator.dart has closeSession() method that POSTs /api/v1/sessions/{id}/close - Sprint 11.0C S65")
+
+    s66_findings = check_active_pool_oturumu_bitur_button_v17()
+    if s66_findings:
+        all_findings.extend(s66_findings)
+    else:
+        print("PASS: active_pool_screen.dart has the 'Oturumu Bitir' Turkish label - Sprint 11.0C S66")
+
+    s67_findings = check_active_pool_close_then_navigate_v17()
+    if s67_findings:
+        all_findings.extend(s67_findings)
+    else:
+        print("PASS: active_pool_screen.dart closeSession + /home/skorlar flow - Sprint 11.0C S67")
+
+    s68_findings = check_skorlar_empty_state_v17()
+    if s68_findings:
+        all_findings.extend(s68_findings)
+    else:
+        print("PASS: skorlar_screen.dart has the 'Henüz tamamlanmış oturum yok' empty-state string - Sprint 11.0C S68")
+
+    s69_findings = check_skorlar_card_overall_gauge_v17()
+    if s69_findings:
+        all_findings.extend(s69_findings)
+    else:
+        print("PASS: skorlar_screen.dart has SessionScoreCard with overall-score gauge - Sprint 11.0C S69")
+
+    s70_findings = check_backend_sessions_close_handler_v17()
+    if s70_findings:
+        all_findings.extend(s70_findings)
+    else:
+        print("PASS: backend router.go has POST /api/v1/sessions/{id}/close route registration - Sprint 11.0C S70")
+
+    s71_findings = check_backend_summary_stats_shape_v17()
+    if s71_findings:
+        all_findings.extend(s71_findings)
+    else:
+        print("PASS: backend sessions.go has the 6-field summary_stats response shape - Sprint 11.0C S71")
+
+    s72_findings = check_score_calculator_unit_tests_v17()
+    if s72_findings:
+        all_findings.extend(s72_findings)
+    else:
+        print("PASS: score_calculator_test.dart has 4+ unit tests - Sprint 11.0C S72")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps + S13 Flutter storage Maven repo declared in settings.gradle.kts + S17 gradle wrapper force-include + S18 fresh flutter create preservation + S19 fresh create local metadata tracked + S20 pubspec.yaml baseline shape + S25 no `vpn` string in mobile/lib/main.dart + screens + S26 intent://send?text= literal in WhatsApp task detail (10.0 + 10.1E) + S27 LineChart literal in active pool screen + S28 Timer.periodic literal in pool provider + S29 HapticFeedback/SystemSound literal in active pool screen + S33 PoolState debug fields (lastError + lastSuccess) + S34 ScaffoldMessenger.of(context).showSnackBar in active pool screen + S35 String.fromEnvironment('API_KEY' in telemetry_service or p2p_matcher + S36 auth_service.dart POST /api/v1/auth + user_id + S37 authHeaders() in telemetry_service or p2p_matcher + S38 _tokenExpiresAt field in auth_service + S39 invalidate() method in auth_service + S40 whatsapp_deeplink_provider.dart carries BOTH `intent://send?` and `#Intent;scheme=whatsapp;package=com.whatsapp;end` + S41 p2p_matcher.dart uses /api/v1/sessions (not /api/v1/matches) + S42 AndroidManifest <queries> WhatsApp package visibility + S43 MainActivity.kt OR OpenE2eeVpnService.kt getSampledPackets method-channel handler + S44 whatsapp_deeplink_provider.dart carries BOTH `intent://send?text=` AND `https://wa.me/?text=` + whatsapp_task_detail_screen.dart calls `tryOpenWithReason` (10.1G OnePlus 9 Pro Magisk fix) + S45 OpenE2eeVpnService.kt PacketDrain pushes 'onPacketsSampled' literal + S46 MainActivity.kt calls OpenE2eeVpnService.snapshot() (no mock packet) + S47 vpn_service.dart 'packetStream' getter + 'MethodChannel' import + S48 active_pool_screen.dart packetStream.listen + S49 packet_parser.dart SampledPacket class with fromBytes + toJson + S50 OpenE2eeVpnService.kt foreground notification text 'OpenE2EE Şifreleme Doğrulama' (no VPN) + S51 active_pool_screen.dart continuous chart (no 30-call loop) + S52 telemetry_service.dart sendSummary POSTs to /api/v1/sessions/{id}/telemetry (11.0A real VpnService packet drain + 5-second scheduled drain) + S53 pubspec.yaml 'webrtc:' dep line + S54 webrtc_service.dart imports flutter_webrtc + references RTCPeerConnection + calls createPeerConnection + S55 webrtc_service.dart onIceCandidate callback wires candidate + sdpMid + sdpMLineIndex + S56 session_orchestrator.dart startSession() + JWT authHeaders() + /api/v1/sessions + S57 session_orchestrator.dart long-poll GET (pollForOffer) with Duration(seconds: 30) + S58 backend router.go GET /api/v1/webrtc/{offer,answer} long-poll handlers + S59 webrtc_service.dart onTrack stream exposed + S60 active_pool_screen.dart WebRTC status indicator (Negotiating / Connected / Failed) (11.0B WebRTC P2P + flutter_webrtc 1.5.2 native + compileSdk 36) PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps + S13 Flutter storage Maven repo declared in settings.gradle.kts + S17 gradle wrapper force-include + S18 fresh flutter create preservation + S19 fresh create local metadata tracked + S20 pubspec.yaml baseline shape + S25 no `vpn` string in mobile/lib/main.dart + screens + S26 intent://send?text= literal in WhatsApp task detail (10.0 + 10.1E) + S27 LineChart literal in active pool screen + S28 Timer.periodic literal in pool provider + S29 HapticFeedback/SystemSound literal in active pool screen + S33 PoolState debug fields (lastError + lastSuccess) + S34 ScaffoldMessenger.of(context).showSnackBar in active pool screen + S35 String.fromEnvironment('API_KEY' in telemetry_service or p2p_matcher + S36 auth_service.dart POST /api/v1/auth + user_id + S37 authHeaders() in telemetry_service or p2p_matcher + S38 _tokenExpiresAt field in auth_service + S39 invalidate() method in auth_service + S40 whatsapp_deeplink_provider.dart carries BOTH `intent://send?` and `#Intent;scheme=whatsapp;package=com.whatsapp;end` + S41 p2p_matcher.dart uses /api/v1/sessions (not /api/v1/matches) + S42 AndroidManifest <queries> WhatsApp package visibility + S43 MainActivity.kt OR OpenE2eeVpnService.kt getSampledPackets method-channel handler + S44 whatsapp_deeplink_provider.dart carries BOTH `intent://send?text=` AND `https://wa.me/?text=` + whatsapp_task_detail_screen.dart calls `tryOpenWithReason` (10.1G OnePlus 9 Pro Magisk fix) + S45 OpenE2eeVpnService.kt PacketDrain pushes 'onPacketsSampled' literal + S46 MainActivity.kt calls OpenE2eeVpnService.snapshot() (no mock packet) + S47 vpn_service.dart 'packetStream' getter + 'MethodChannel' import + S48 active_pool_screen.dart packetStream.listen + S49 packet_parser.dart SampledPacket class with fromBytes + toJson + S50 OpenE2eeVpnService.kt foreground notification text 'OpenE2EE Şifreleme Doğrulama' (no VPN) + S51 active_pool_screen.dart continuous chart (no 30-call loop) + S52 telemetry_service.dart sendSummary POSTs to /api/v1/sessions/{id}/telemetry (11.0A real VpnService packet drain + 5-second scheduled drain) + S53 pubspec.yaml 'webrtc:' dep line + S54 webrtc_service.dart imports flutter_webrtc + references RTCPeerConnection + calls createPeerConnection + S55 webrtc_service.dart onIceCandidate callback wires candidate + sdpMid + sdpMLineIndex + S56 session_orchestrator.dart startSession() + JWT authHeaders() + /api/v1/sessions + S57 session_orchestrator.dart long-poll GET (pollForOffer) with Duration(seconds: 30) + S58 backend router.go GET /api/v1/webrtc/{offer,answer} long-poll handlers + S59 webrtc_service.dart onTrack stream exposed + S60 active_pool_screen.dart WebRTC status indicator (Negotiating / Connected / Failed) (11.0B WebRTC P2P + flutter_webrtc 1.5.2 native + compileSdk 36) + S61 skorlar_screen.dart has Future<List<SessionScore>> + ConsumerStatefulWidget + fetchScores + S62 score_calculator.dart SessionScoreCalculator class + static SessionScore compute + S63 score_calculator.dart 4 metric field references + S64 score_calculator.dart overall weighted sum 0.4+0.3+0.2+0.1 + S65 session_orchestrator.dart closeSession() method + close endpoint + S66 active_pool_screen.dart 'Oturumu Bitir' Turkish label + S67 active_pool_screen.dart closeSession + /home/skorlar flow + S68 skorlar_screen.dart 'Henüz tamamlanmış oturum yok' empty-state + S69 skorlar_screen.dart SessionScoreCard + overall-score gauge + S70 backend router.go POST /api/v1/sessions/{id}/close + S71 backend sessions.go 6-field summary_stats response shape + S72 score_calculator_test.dart 4+ unit tests (11.0C Skorlar screen + score calculator + session close + E2E) PASS PyYAML AUDIT.")
     return 0
 
 
