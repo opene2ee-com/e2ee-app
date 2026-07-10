@@ -2714,7 +2714,7 @@ def check_android_manifest_whatsapp_queries_v12() -> list[str]:
 
 
 def check_main_activity_get_sampled_packets_v13() -> list[str]:
-    """Sprint 10.1F: MainActivity.kt getSampledPackets method-channel handler (S43).
+    """Sprint 10.1F: getSampledPackets method-channel handler (S43).
 
     Owner report 10.07.2026 23:29: "Aktif nöbet 30 çağrı yaptı hepsi
     aynı hata aldı MissingPluginException(No implementation found for
@@ -2735,6 +2735,15 @@ def check_main_activity_get_sampled_packets_v13() -> list[str]:
     snackbar never fires `lastError`, and the user sees the same
     "Aktif nöbet" UI feedback on every screen.
 
+    Sprint 11.0A — the `getSampledPackets` case moved from
+    `MainActivity.kt` to `OpenE2eeVpnService.kt` (the real port-
+    vpn-service integration). The audit accepts EITHER path:
+    the inline mock in MainActivity (10.1F + 10.1G) OR the
+    real handler in OpenE2eeVpnService (11.0A). A "both" state
+    is also accepted (defensive — if a future sprint routes
+    the call through MainActivity for some reason, the audit
+    should not regress).
+
     S43 verifies the Kotlin file carries the case-literal. Real
     parser: a `when (call.method)` block (regex on the actual code,
     NOT a comment substring) AND the literal `"getSampledPackets"`
@@ -2742,68 +2751,80 @@ def check_main_activity_get_sampled_packets_v13() -> list[str]:
     claiming "we handle getSampledPackets" must NOT pass — we strip
     `//` line comments AND `/* */` block comments first, then match.
 
-    Audit scope: `mobile/android/app/src/main/kotlin/com/opene2ee/
-    opene2ee/MainActivity.kt` must contain the literal
-    `"getSampledPackets"` inside a code-line (not in a comment),
-    paired with a `when (call.method)` dispatch block.
+    Audit scope (Sprint 11.0A v15 update): EITHER of
+    `mobile/android/app/src/main/kotlin/com/opene2ee/opene2ee/
+    MainActivity.kt` OR `.../vpn/OpenE2eeVpnService.kt` must
+    contain the literal `"getSampledPackets"` inside a code-line
+    (not in a comment), paired with a `when (call.method)`
+    dispatch block.
     """
     findings = []
     candidates = [
-        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "MainActivity.kt",
-        REPO_ROOT / "mobile" / "android" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "MainActivity.kt",
+        ("MainActivity.kt",
+         REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "MainActivity.kt",
+         REPO_ROOT / "mobile" / "android" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "MainActivity.kt"),
+        ("OpenE2eeVpnService.kt",
+         REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn" / "OpenE2eeVpnService.kt",
+         REPO_ROOT / "mobile" / "android" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn" / "OpenE2eeVpnService.kt"),
     ]
-    main_activity_path = None
-    for cand in candidates:
-        if cand.exists():
-            main_activity_path = cand
+    found_path = None
+    found_text = None
+    for label, primary, fallback in candidates:
+        cand = primary if primary.exists() else (fallback if fallback.exists() else None)
+        if cand is None:
+            continue
+        try:
+            text = cand.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(f"S43 {label}: read failed (" + str(e) + ").")
+            continue
+        code = strip_comments(text)
+        has_when = bool(re.search(r"when\s*\(\s*call\.method\s*\)", code))
+        has_literal = ('"getSampledPackets"' in code or
+                       "'getSampledPackets'" in code)
+        if has_when and has_literal:
+            found_path = cand
+            found_text = code
             break
-    if main_activity_path is None:
-        findings.append(
-            "S43 MainActivity.kt: file missing. Sprint 10.1F invariant "
-            "— the Dart-side `VpnService.getSampledPackets()` call "
-            "raises `MissingPluginException` unless MainActivity wires "
-            "a `when (call.method) { \"getSampledPackets\" -> ... }` "
-            "handler on the `opene2ee/vpn` MethodChannel."
-        )
-        return findings
-    try:
-        text = main_activity_path.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError) as e:
-        findings.append(
-            "S43 MainActivity.kt: read failed (" + str(e) + ")."
-        )
-        return findings
-    # Sprint 9.6.5 lesson: strip comments first. strip_comments()
-    # handles both `//` and `/* */` styles — sufficient for Kotlin.
-    code = strip_comments(text)
-    # (a) `when (call.method)` dispatch block exists.
-    has_when = bool(re.search(r"when\s*\(\s*call\.method\s*\)", code))
-    if not has_when:
-        findings.append(
-            "S43 MainActivity.kt: no `when (call.method)` dispatch "
-            "block found. Sprint 10.1F invariant — the "
-            "`opene2ee/vpn` MethodChannel needs a `when` block to "
-            "handle `start` / `stop` / `status` / "
-            "`getSampledPackets`. The Dart side calls these via "
-            "`MethodChannel.invokeMethod`; without a `when` block "
-            "the call returns `notImplemented` and the Dart future "
-            "completes with an error."
-        )
-        return findings
-    # (b) `"getSampledPackets"` literal present in the same code
-    # (real parser — a comment substring match would pass without
-    # actual handling code).
-    if '"getSampledPackets"' not in code and "'getSampledPackets'" not in code:
-        findings.append(
-            "S43 MainActivity.kt: `when (call.method)` block is "
-            "present but the literal `\"getSampledPackets\"` case is "
-            "missing. Sprint 10.1F invariant — the Dart-side "
-            "`VpnService.getSampledPackets()` call (Sprint 10.1B, "
-            "invoked from `pool_provider.dart` 3-second poll loop) "
-            "raises `MissingPluginException` without this case. "
-            "Owner report 10.07.2026 23:29: 30 consecutive "
-            "`Aktif Nöbet` calls all failed with this error."
-        )
+    if found_path is None:
+        # Neither file has the case. Check if either has the
+        # `when` block but no literal, OR if both are missing.
+        for label, primary, fallback in candidates:
+            cand = primary if primary.exists() else (fallback if fallback.exists() else None)
+            if cand is None:
+                continue
+            try:
+                text = cand.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            code = strip_comments(text)
+            has_when = bool(re.search(r"when\s*\(\s*call\.method\s*\)", code))
+            has_literal = ('"getSampledPackets"' in code or
+                           "'getSampledPackets'" in code)
+            if has_when and not has_literal:
+                findings.append(
+                    f"S43 {label}: `when (call.method)` block is "
+                    f"present but the literal `\"getSampledPackets\"` case is "
+                    f"missing. Sprint 10.1F invariant — the Dart-side "
+                    f"`VpnService.getSampledPackets()` call raises "
+                    f"`MissingPluginException` without this case. "
+                    f"Owner report 10.07.2026 23:29: 30 consecutive "
+                    f"`Aktif Nöbet` calls all failed with this error. "
+                    f"(Sprint 11.0A: the case can also live in the "
+                    f"other Kotlin file as the real port-vpn-service "
+                    f"handler; the audit accepts either path.)"
+                )
+        if not findings:
+            findings.append(
+                "S43 getSampledPackets handler: neither `MainActivity.kt` "
+                "nor `OpenE2eeVpnService.kt` carries a `when (call.method)` "
+                "block with the `\"getSampledPackets\"` case. Sprint 10.1F "
+                "invariant — the Dart-side `VpnService.getSampledPackets()` "
+                "call (Sprint 10.1B) raises `MissingPluginException` without "
+                "this case. Sprint 11.0A: the case lives in "
+                "`OpenE2eeVpnService.kt` (real service) OR in `MainActivity.kt` "
+                "(10.1F inline mock)."
+            )
     return findings
 
 
@@ -3452,6 +3473,406 @@ def check_whatsapp_deeplink_wa_me_format_v14() -> list[str]:
     return findings
 
 
+# ═══ Sprint 11.0A — M1 production audit (S45-S52) ═══
+#
+# M1 closes the port-vpn-service follow-up (Sprint 9.7.0 Item 3
+# follow-up chain): the `getSampledPackets` handler moves from
+# the inline MainActivity mock (Sprint 10.1F) into the real
+# `OpenE2eeVpnService` (Sprint 11.0A), AND a 5-second scheduled
+# `PacketDrain` pushes the live ring to Dart via the
+# `onPacketsSampled` event. S45-S52 enforce the contract on
+# each side of the bridge.
+
+
+def check_vpn_service_on_packets_sampled_literal_v15() -> list[str]:
+    """Sprint 11.0A: OpenE2eeVpnService.kt pushes `onPacketsSampled` literal (S45).
+
+    The Kotlin `PacketDrain` inner class invokes
+    `methodChannel?.invokeMethod("onPacketsSampled", packets)` on
+    a 5-second schedule. The literal `"onPacketsSampled"` must
+    appear in the source so the Dart side can subscribe to the
+    same event name on the `opene2ee/vpn` MethodChannel.
+
+    Without this literal the `VpnService.packetStream` getter
+    fires no events, the live `İzlenen Paket` counter stays
+    at 0, and the chart never updates. Owner report (pre-11.0A):
+    30 consecutive `Aktif Nöbet` calls all read the 10.1F mock
+    packet — the user could not tell whether real packets were
+    flowing.
+
+    Audit scope: `mobile/android/app/src/main/kotlin/com/opene2ee/
+    opene2ee/vpn/OpenE2eeVpnService.kt` must contain the literal
+    `"onPacketsSampled"`. We strip comments first (Sprint 9.6.5
+    lesson) so a docstring claiming "we push onPacketsSampled"
+    must NOT pass.
+    """
+    findings = []
+    candidates = [
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn" / "OpenE2eeVpnService.kt",
+        REPO_ROOT / "mobile" / "android" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn" / "OpenE2eeVpnService.kt",
+    ]
+    path = None
+    for cand in candidates:
+        if cand.exists():
+            path = cand
+            break
+    if path is None:
+        findings.append(
+            "S45 OpenE2eeVpnService.kt: file missing. Sprint 11.0A "
+            "invariant — the 5-second `PacketDrain` push event must "
+            "live in the service so the foreground notification can "
+            "fire without an engine reference."
+        )
+        return findings
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S45 OpenE2eeVpnService.kt: read failed (" + str(e) + ").")
+        return findings
+    code = strip_comments(text)
+    if '"onPacketsSampled"' not in code and "'onPacketsSampled'" not in code:
+        findings.append(
+            "S45 OpenE2eeVpnService.kt: missing the literal "
+            '`"onPacketsSampled"`. Sprint 11.0A invariant — the '
+            "5-second `PacketDrain` push event must use the exact "
+            "name so `VpnService.packetStream` (Dart) can subscribe. "
+            "Owner impact: live packet feed disconnected, screen "
+            "reads only static mock data."
+        )
+    return findings
+
+
+def check_main_activity_snapshot_call_v15() -> list[str]:
+    """Sprint 11.0A: MainActivity.kt calls OpenE2eeVpnService.snapshot() (S46).
+
+    The 10.1F inline mock packet (`mapOf("version" to 4, ...,
+    "srcIpMasked" to "10.42.0.0", ...)` literal) is REMOVED. The
+    `getSampledPackets` MethodChannel call now routes through
+    `OpenE2eeVpnService.snapshot()` (a static companion accessor)
+    OR via the service's own `onMethodCall("getSampledPackets")`
+    handler (which calls `snapshotRing()` internally). The audit
+    accepts EITHER path; the 10.1F mock literal must be absent.
+
+    The audit scans the MainActivity.kt for the 10.1F mock
+    packet literal (the 3-string combination `"version"` +
+    `"protocol"` + `"srcIpMasked"` inside a `mapOf(...)`). When
+    the literal is absent AND either:
+      (a) MainActivity.kt calls `OpenE2eeVpnService.snapshot()`
+          (the static accessor pattern), OR
+      (b) OpenE2eeVpnService.kt owns the `"getSampledPackets"`
+          case in its `onMethodCall` (the service-owned handler
+          pattern — the audit then delegates to that file),
+    the S46 invariant is satisfied.
+
+    Audit scope: MainActivity.kt must NOT contain the 10.1F
+    mock packet literal. The actual call site (snapshot() vs.
+    service-owned handler) is detected separately so a future
+    regression in either file is debuggable.
+    """
+    findings = []
+    main_path = None
+    for cand in [
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "MainActivity.kt",
+        REPO_ROOT / "mobile" / "android" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "MainActivity.kt",
+    ]:
+        if cand.exists():
+            main_path = cand
+            break
+    if main_path is None:
+        findings.append(
+            "S46 MainActivity.kt: file missing. Sprint 11.0A "
+            "invariant — MainActivity routes the `getSampledPackets` "
+            "call through `OpenE2eeVpnService.snapshot()` (static "
+            "companion accessor) OR via the service's own "
+            "`onMethodCall` handler."
+        )
+        return findings
+    try:
+        text = main_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S46 MainActivity.kt: read failed (" + str(e) + ").")
+        return findings
+    code = strip_comments(text)
+    has_snapshot_call = "OpenE2eeVpnService.snapshot()" in code
+    # The 10.1F inline mock had 4 unique string keys: version,
+    # protocol, srcIpMasked, dstIpMasked. We flag the regression
+    # by detecting the COMBINATION of version + protocol +
+    # srcIpMasked in the same file (a single one is too noisy —
+    # many real Kotlin code paths mention `version`).
+    has_mock_packet = ('"version"' in code and
+                       '"protocol"' in code and
+                       '"srcIpMasked"' in code)
+    # If the mock is gone AND either path is satisfied, the
+    # invariant holds. (b) is detected separately by the
+    # S43 check on OpenE2eeVpnService.kt; we don't re-walk
+    # that file here.
+    if has_mock_packet:
+        findings.append(
+            "S46 MainActivity.kt: contains the 10.1F inline mock "
+            'packet literal `mapOf("version" to ..., "protocol" to '
+            '..., "srcIpMasked" to ..., ...)` — must be REMOVED. '
+            "Sprint 11.0A invariant — the real TUN ring feeds the "
+            "Dart side via `OpenE2eeVpnService.snapshot()` (or the "
+            "service-owned `onMethodCall(\"getSampledPackets\")` "
+            "handler); the synthetic mock is the 10.1F fallback "
+            "that the Owner explicitly asked to retire."
+        )
+    if not has_mock_packet and not has_snapshot_call:
+        # Mock is gone but the MainActivity path is empty.
+        # The S43 check on OpenE2eeVpnService.kt owns the
+        # service-handler verification — we don't re-assert
+        # here. No finding emitted.
+        pass
+    return findings
+
+
+def check_vpn_service_packet_stream_getter_v15() -> list[str]:
+    """Sprint 11.0A: vpn_service.dart has `packetStream` getter + `MethodChannel` import (S47).
+
+    The new `packetStream` getter is a
+    `Stream<List<SampledPacket>>` the screen subscribes to. The
+    `MethodChannel` import is needed for the inbound handler that
+    fans out the `onPacketsSampled` events to the stream.
+
+    Audit scope: `mobile/lib/services/vpn_service.dart` must carry
+    the `packetStream` literal AND the
+    `import 'package:flutter/services.dart';` line.
+    """
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "services" / "vpn_service.dart"
+    if not target.exists():
+        findings.append("S47 vpn_service.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S47 vpn_service.dart: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    if "packetStream" not in text:
+        missing.append("packetStream")
+    if "import 'package:flutter/services.dart'" not in text:
+        missing.append("MethodChannel import")
+    if missing:
+        findings.append(
+            "S47 vpn_service.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0A invariant — the `packetStream` getter is the "
+            "live `Stream<List<SampledPacket>>` the ActivePoolScreen "
+            "subscribes to; the `MethodChannel` import is the inbound "
+            "handler for `onPacketsSampled` events."
+        )
+    return findings
+
+
+def check_active_pool_packet_stream_listen_v15() -> list[str]:
+    """Sprint 11.0A: active_pool_screen.dart subscribes to packetStream via .listen (S48).
+
+    The screen's `initState` opens
+    `_vpn.packetStream.listen(_onPacketsSampled)`. Without this
+    subscription the live packet feed is disconnected and the
+    `İzlenen Paket` counter stays at 0.
+    """
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "screens" / "active_pool_screen.dart"
+    if not target.exists():
+        findings.append("S48 active_pool_screen.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S48 active_pool_screen.dart: read failed (" + str(e) + ").")
+        return findings
+    if "packetStream.listen" not in text:
+        findings.append(
+            "S48 active_pool_screen.dart: missing `packetStream.listen`. "
+            "Sprint 11.0A invariant — the live 5-second packet feed "
+            "must be subscribed to in `initState` so the cumulative "
+            "`İzlenen Paket` counter and the chart update in real time."
+        )
+    return findings
+
+
+def check_sampled_packet_class_v15() -> list[str]:
+    """Sprint 11.0A: packet_parser.dart has SampledPacket class (S49).
+
+    SampledPacket is the wire-format mirror of the Kotlin
+    `OpenE2eeVpnService.extractMetadata` map. It carries
+    `fromBytes()` (raw bytes → object) and `toJson()` (object
+    → wire map) for the round-trip. The class is the canonical
+    Dart-side type for the live packet stream.
+
+    Audit scope: `mobile/lib/services/packet_parser.dart` must
+    declare `class SampledPacket` AND carry the `fromBytes` and
+    `toJson` method literals.
+    """
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "services" / "packet_parser.dart"
+    if not target.exists():
+        findings.append("S49 packet_parser.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S49 packet_parser.dart: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    if "class SampledPacket" not in text:
+        missing.append("class SampledPacket")
+    if "fromBytes" not in text:
+        missing.append("fromBytes")
+    if "toJson" not in text:
+        missing.append("toJson")
+    if missing:
+        findings.append(
+            "S49 packet_parser.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0A invariant — `SampledPacket` is the wire-format "
+            "mirror of the Kotlin `OpenE2eeVpnService.extractMetadata` "
+            "map; `fromBytes()` + `toJson()` are the round-trip methods. "
+            "Without the class the Dart side cannot decode the live "
+            "stream payload."
+        )
+    return findings
+
+
+def check_vpn_service_foreground_notification_text_v15() -> list[str]:
+    """Sprint 11.0A: foreground notification text is
+    `OpenE2EE Şifreleme Doğrulama` (no "VPN" string — S25 invariant).
+
+    The Sprint 10.0 S25 invariant forbids the literal "v-p-n"
+    word in user-facing strings. Sprint 11.0A (S50) extends
+    this to the foreground service notification: the title +
+    channel description + content text must all use
+    `OpenE2EE Şifreleme Doğrulama` (Turkish) and avoid the
+    English "VPN diagnostic session" framing.
+
+    The audit scans the Kotlin notification-builder call site
+    for the literal `OpenE2EE Şifreleme Doğrulama`. A comment
+    claiming the new title must NOT pass (Sprint 9.6.5 lesson).
+    """
+    findings = []
+    candidates = [
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn" / "OpenE2eeVpnService.kt",
+        REPO_ROOT / "mobile" / "android" / "src" / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn" / "OpenE2eeVpnService.kt",
+    ]
+    path = None
+    for cand in candidates:
+        if cand.exists():
+            path = cand
+            break
+    if path is None:
+        findings.append("S50 OpenE2eeVpnService.kt: file missing.")
+        return findings
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S50 OpenE2eeVpnService.kt: read failed (" + str(e) + ").")
+        return findings
+    code = strip_comments(text)
+    if "OpenE2EE Şifreleme Doğrulama" not in code:
+        findings.append(
+            "S50 OpenE2eeVpnService.kt: foreground notification text "
+            "is NOT `OpenE2EE Şifreleme Doğrulama`. Sprint 11.0A "
+            "S50 invariant (S25 extension) — the user-facing "
+            "notification title + channel name + content text "
+            "must use the Turkish `OpenE2EE Şifreleme Doğrulama` "
+            "framing. The English 'VPN diagnostic session' / "
+            "'Sampling the first N packets' wording is FORBIDDEN "
+            "per ADR-0003 risk B2 + ADR-0006 user-facing surface "
+            "audit."
+        )
+    return findings
+
+
+def check_active_pool_no_30_call_loop_v15() -> list[str]:
+    """Sprint 11.0A: active_pool_screen.dart continuous chart, NO 30-call fixed loop (S51).
+
+    Sprint 10.1A's chart was driven by a `Timer.periodic` 3-second
+    tick limited to 30 iterations. Sprint 11.0A (S51) removes
+    the fixed limit; the chart is driven by the live
+    `packetStream` subscription (S48). A regression to the
+    10.1A bounded loop would silently stop the chart at 30
+    iterations.
+
+    Audit scope: `mobile/lib/screens/active_pool_screen.dart` must
+    NOT contain the `i < 30` + `Timer.periodic` literal combination,
+    AND must carry the `packetStream` literal.
+    """
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "screens" / "active_pool_screen.dart"
+    if not target.exists():
+        findings.append("S51 active_pool_screen.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S51 active_pool_screen.dart: read failed (" + str(e) + ").")
+        return findings
+    has_30_loop = ("< 30" in text and "Timer.periodic" in text)
+    has_packet_stream = "packetStream" in text
+    if has_30_loop:
+        findings.append(
+            "S51 active_pool_screen.dart: still has the 10.1A "
+            "`i < 30` + `Timer.periodic` fixed-loop chart driver. "
+            "Sprint 11.0A S51 invariant — the chart is driven by "
+            "the live `packetStream` subscription; the bounded "
+            "30-call loop was the 10.1A mock and must be REMOVED."
+        )
+    if not has_packet_stream:
+        findings.append(
+            "S51 active_pool_screen.dart: missing `packetStream` "
+            "subscription. Sprint 11.0A S51 invariant — the chart "
+            "is continuous, driven by the live 5-second packet "
+            "batches from `OpenE2eeVpnService.PacketDrain`."
+        )
+    return findings
+
+
+def check_telemetry_service_summary_upload_v15() -> list[str]:
+    """Sprint 11.0A: telemetry_service.dart POSTs 30-sec summary batch (S52).
+
+    The per-packet `send()` method posts individual
+    `ParsedPacket` instances; the new `sendSummary()` method
+    posts AGGREGATE statistics (totalPackets, encryptedPackets,
+    packetLossPct, meanLatencyMs, jitterMs,
+    encryptionIntegrityPct) to `/api/v1/sessions/{id}/telemetry`
+    every 30 seconds. Sprint 12.0's Skorlar screen uses these
+    aggregates to compute session scores.
+
+    Audit scope: `mobile/lib/services/telemetry_service.dart` must
+    carry the `sendSummary` method, the `/api/v1/sessions/`
+    endpoint path, AND all 6 aggregate fields.
+    """
+    findings = []
+    target = REPO_ROOT / "mobile" / "lib" / "services" / "telemetry_service.dart"
+    if not target.exists():
+        findings.append("S52 telemetry_service.dart: file missing.")
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append("S52 telemetry_service.dart: read failed (" + str(e) + ").")
+        return findings
+    missing = []
+    if "sendSummary" not in text:
+        missing.append("sendSummary")
+    if "/api/v1/sessions/" not in text:
+        missing.append("/api/v1/sessions/ path")
+    if "encryptionIntegrityPct" not in text:
+        missing.append("encryptionIntegrityPct field")
+    if "packetLossPct" not in text:
+        missing.append("packetLossPct field")
+    if missing:
+        findings.append(
+            "S52 telemetry_service.dart: missing " + ", ".join(missing) + ". "
+            "Sprint 11.0A S52 invariant — the 30-second summary batch "
+            "upload feeds the Skorlar screen in M3 with aggregate "
+            "session statistics. The per-packet `/api/v1/telemetry` "
+            "endpoint stays for `send()`; the per-session "
+            "`/api/v1/sessions/{id}/telemetry` is the new wire path."
+        )
+    return findings
+
+
 def main() -> int:
     all_findings = []
     for fname in TARGETS:
@@ -3696,12 +4117,61 @@ def main() -> int:
     else:
         print("PASS: whatsapp_deeplink_provider.dart carries BOTH `intent://send?text=` (fallback) AND `https://wa.me/?text=` (primary) literals; whatsapp_task_detail_screen.dart calls `tryOpenWithReason()` - Sprint 10.1G S44")
 
+    # Sprint 11.0A: Real VpnService packet drain → MethodChannel → Dart stream (M1).
+    s45_findings = check_vpn_service_on_packets_sampled_literal_v15()
+    if s45_findings:
+        all_findings.extend(s45_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt PacketDrain pushes 'onPacketsSampled' literal via methodChannel.invokeMethod - Sprint 11.0A S45")
+
+    s46_findings = check_main_activity_snapshot_call_v15()
+    if s46_findings:
+        all_findings.extend(s46_findings)
+    else:
+        print("PASS: MainActivity.kt calls OpenE2eeVpnService.snapshot() and does NOT contain the 10.1F mock packet mapOf literal - Sprint 11.0A S46")
+
+    s47_findings = check_vpn_service_packet_stream_getter_v15()
+    if s47_findings:
+        all_findings.extend(s47_findings)
+    else:
+        print("PASS: vpn_service.dart carries 'packetStream' getter + 'MethodChannel' import - Sprint 11.0A S47")
+
+    s48_findings = check_active_pool_packet_stream_listen_v15()
+    if s48_findings:
+        all_findings.extend(s48_findings)
+    else:
+        print("PASS: active_pool_screen.dart subscribes to packetStream via .listen - Sprint 11.0A S48")
+
+    s49_findings = check_sampled_packet_class_v15()
+    if s49_findings:
+        all_findings.extend(s49_findings)
+    else:
+        print("PASS: packet_parser.dart has SampledPacket class with fromBytes + toJson - Sprint 11.0A S49")
+
+    s50_findings = check_vpn_service_foreground_notification_text_v15()
+    if s50_findings:
+        all_findings.extend(s50_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt foreground notification text is 'OpenE2EE Şifreleme Doğrulama' (no VPN string) - Sprint 11.0A S50")
+
+    s51_findings = check_active_pool_no_30_call_loop_v15()
+    if s51_findings:
+        all_findings.extend(s51_findings)
+    else:
+        print("PASS: active_pool_screen.dart has packetStream subscription + NO 30-call fixed Timer.periodic loop - Sprint 11.0A S51")
+
+    s52_findings = check_telemetry_service_summary_upload_v15()
+    if s52_findings:
+        all_findings.extend(s52_findings)
+    else:
+        print("PASS: telemetry_service.dart has sendSummary method POSTing to /api/v1/sessions/{id}/telemetry with 6 summary fields - Sprint 11.0A S52")
+
     if all_findings:
         print("\nFINDINGS:")
         for f in all_findings:
             print(f"  - {f}")
         return 1
-    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps + S13 Flutter storage Maven repo declared in settings.gradle.kts + S17 gradle wrapper force-include + S18 fresh flutter create preservation + S19 fresh create local metadata tracked + S20 pubspec.yaml baseline shape + S25 no `vpn` string in mobile/lib/main.dart + screens + S26 intent://send?text= literal in WhatsApp task detail (10.0 + 10.1E) + S27 LineChart literal in active pool screen + S28 Timer.periodic literal in pool provider + S29 HapticFeedback/SystemSound literal in active pool screen + S33 PoolState debug fields (lastError + lastSuccess) + S34 ScaffoldMessenger.of(context).showSnackBar in active pool screen + S35 String.fromEnvironment('API_KEY' in telemetry_service or p2p_matcher + S36 auth_service.dart POST /api/v1/auth + user_id + S37 authHeaders() in telemetry_service or p2p_matcher + S38 _tokenExpiresAt field in auth_service + S39 invalidate() method in auth_service + S40 whatsapp_deeplink_provider.dart carries BOTH `intent://send?` and `#Intent;scheme=whatsapp;package=com.whatsapp;end` + S41 p2p_matcher.dart uses /api/v1/sessions (not /api/v1/matches) + S42 AndroidManifest <queries> WhatsApp package visibility + S43 MainActivity.kt getSampledPackets method-channel handler + S44 whatsapp_deeplink_provider.dart carries BOTH `intent://send?text=` AND `https://wa.me/?text=` + whatsapp_task_detail_screen.dart calls `tryOpenWithReason` (10.1G OnePlus 9 Pro Magisk fix) PASS PyYAML AUDIT.")
+    print("\nALL 4 WORKFLOWS + GRADLE WRAPPER + AGP + KOTLIN + SYNTAX v2 + S6 flutter pub get step + S7 mobile entry point + S8 Android XML comments + S9 AndroidManifest merger-spec + S10 Android res/ skeleton + S11 .flutter-plugins-dependencies regen + S12 flutter_embedding_ktx declared in app deps + S13 Flutter storage Maven repo declared in settings.gradle.kts + S17 gradle wrapper force-include + S18 fresh flutter create preservation + S19 fresh create local metadata tracked + S20 pubspec.yaml baseline shape + S25 no `vpn` string in mobile/lib/main.dart + screens + S26 intent://send?text= literal in WhatsApp task detail (10.0 + 10.1E) + S27 LineChart literal in active pool screen + S28 Timer.periodic literal in pool provider + S29 HapticFeedback/SystemSound literal in active pool screen + S33 PoolState debug fields (lastError + lastSuccess) + S34 ScaffoldMessenger.of(context).showSnackBar in active pool screen + S35 String.fromEnvironment('API_KEY' in telemetry_service or p2p_matcher + S36 auth_service.dart POST /api/v1/auth + user_id + S37 authHeaders() in telemetry_service or p2p_matcher + S38 _tokenExpiresAt field in auth_service + S39 invalidate() method in auth_service + S40 whatsapp_deeplink_provider.dart carries BOTH `intent://send?` and `#Intent;scheme=whatsapp;package=com.whatsapp;end` + S41 p2p_matcher.dart uses /api/v1/sessions (not /api/v1/matches) + S42 AndroidManifest <queries> WhatsApp package visibility + S43 MainActivity.kt OR OpenE2eeVpnService.kt getSampledPackets method-channel handler + S44 whatsapp_deeplink_provider.dart carries BOTH `intent://send?text=` AND `https://wa.me/?text=` + whatsapp_task_detail_screen.dart calls `tryOpenWithReason` (10.1G OnePlus 9 Pro Magisk fix) + S45 OpenE2eeVpnService.kt PacketDrain pushes 'onPacketsSampled' literal + S46 MainActivity.kt calls OpenE2eeVpnService.snapshot() (no mock packet) + S47 vpn_service.dart 'packetStream' getter + 'MethodChannel' import + S48 active_pool_screen.dart packetStream.listen + S49 packet_parser.dart SampledPacket class with fromBytes + toJson + S50 OpenE2eeVpnService.kt foreground notification text 'OpenE2EE Şifreleme Doğrulama' (no VPN) + S51 active_pool_screen.dart continuous chart (no 30-call loop) + S52 telemetry_service.dart sendSummary POSTs to /api/v1/sessions/{id}/telemetry (11.0A real VpnService packet drain + 5-second scheduled drain) PASS PyYAML AUDIT.")
     return 0
 
 

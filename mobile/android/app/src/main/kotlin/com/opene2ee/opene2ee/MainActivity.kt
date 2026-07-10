@@ -31,6 +31,21 @@
 //               Dart contract verifiable today without forcing a
 //               premature cross-process refactor.
 //
+// Sprint 11.0A — REAL VpnService packet drain → MethodChannel → Dart
+//                stream. MainActivity now delegates the
+//                `opene2ee/vpn` MethodChannel to the real
+//                `OpenE2eeVpnService` (via
+//                `OpenE2eeVpnService.attachFlutterEngine(...)`).
+//                The `getSampledPackets` handler reads the LIVE
+//                ring via `OpenE2eeVpnService.snapshot()` static
+//                (S46 — no mock packet, no hard-coded `mapOf(...)`).
+//                The service's companion `methodChannel` reference
+//                lets the 5-second `PacketDrain` push the same ring
+//                to Dart via the `onPacketsSampled` event
+//                (S45 invariant). The foreground notification text
+//                stays "OpenE2EE Şifreleme Doğrulama" (no "VPN" —
+//                S25 + S50 invariant).
+//
 // Owns the VpnService permission handshake:
 //
 //   1. Dart calls `requestPrepare` over the `opene2ee/vpn` MethodChannel.
@@ -57,10 +72,11 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import androidx.annotation.RequiresApi
-// TODO(port-vpn-service): re-enable the OpenE2eeVpnService static binding
-//                         import once Sprint 9.7.0 Item 3+ ports the
-//                         VpnService implementation onto the fresh skeleton.
-// import com.opene2ee.opene2ee.vpn.OpenE2eeVpnService
+// Sprint 11.0A — re-enabled. The 9.7.0 Item 3 port-vpn-service
+// commit landed the real service in Sprint 10.1F, but the inline
+// MainActivity mock blocked delegation. 11.0A restores the
+// singleton-engine attach path.
+import com.opene2ee.opene2ee.vpn.OpenE2eeVpnService
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -76,25 +92,13 @@ class MainActivity : FlutterActivity() {
         private const val TAG = "MainActivity"
         private const val VPN_REQUEST_CODE = 0x7B_50_4E /* VPN' */
         private const val PERMISSIONS_CHANNEL = "opene2ee/vpn_permissions"
-        // Sprint 10.1F — inline MethodChannel for the Dart-side
-        // `VpnService` contract. Mirrors the constant used in
-        // `OpenE2eeVpnService.METHOD_CHANNEL` (Sprint 10.1B) so the
-        // mock and the eventual real-service handler wire to the same
-        // channel name. The real service is not yet ported (see
-        // TODO(port-vpn-service)) — for now MainActivity owns the
-        // handler and returns mock data so the Dart side's
-        // `getSampledPackets` no longer throws MissingPluginException.
-        private const val VPN_CHANNEL = "opene2ee/vpn"
+        // Sprint 11.0A — `opene2ee/vpn` MethodChannel is now owned
+        // by `OpenE2eeVpnService` (see `METHOD_CHANNEL` in that
+        // file). The 10.1F inline mock that lived here is REMOVED.
     }
 
     /** The MethodChannel that carries the permission-request roundtrip. */
     private var permissionsChannel: MethodChannel? = null
-
-    // Sprint 10.1F — inline MethodChannel handler for the
-    // `opene2ee/vpn` channel. Owned by MainActivity until the real
-    // `OpenE2eeVpnService.attachFlutterEngine(...)` lands in Sprint
-    // 10.2 (port-vpn-service follow-up).
-    private var vpnChannel: MethodChannel? = null
 
     /**
      * Cached Dart-side completion for the in-flight `requestVpnPermission`
@@ -115,37 +119,15 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // PR-28 §B.2 — use the singleton companion accessor instead of
-        // `OpenE2eeVpnService().attachFlutterEngine(...)`. The new form
-        // resolves to the running service instance (or queues the engine
-        // for replay if the service hasn't been created yet) so the
-        // MethodChannel handler is wired to the SAME object that will
-        // process Dart's `start` / `stop` / `status` commands.
-        //
-        // TODO(port-vpn-service): uncomment once VpnService is ported.
-        // OpenE2eeVpnService.attachFlutterEngine(flutterEngine)
-
-        // Sprint 10.1F — inline `opene2ee/vpn` MethodChannel handler.
-        // The Dart-side `VpnService` (Sprint 10.1B) calls
-        // `_channel.invokeMethod("getSampledPackets")` from
-        // `pool_provider.dart`'s 3-second poll loop. Without this
-        // handler the call raises
-        //   MissingPluginException(No implementation found for method
-        //   getSampledPackets on channel opene2ee/vpn)
-        // which the owner observed in 30 consecutive "Aktif Nöbet"
-        // calls on 10.07.2026 23:29.
-        //
-        // For 10.1F this is MOCK-only: `getSampledPackets` returns a
-        // single synthetic packet (IPv4 / TCP / 443 / 64 bytes /
-        // SYN+ACK) and `start` / `stop` / `status` return string
-        // sentinels. Sprint 10.2 will swap this for the real
-        // `OpenE2eeVpnService` integration.
-        vpnChannel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            VPN_CHANNEL,
-        ).apply {
-            setMethodCallHandler(::onVpnCall)
-        }
+        // Sprint 11.0A — restore the singleton-engine attach path
+        // (the 9.7.0 Item 2 + PR-28 §B.2 canonical form). The
+        // `OpenE2eeVpnService.attachFlutterEngine(...)` static
+        // resolves to the running service instance (or queues
+        // the engine for replay if the service hasn't been
+        // created yet) so the MethodChannel handler is wired
+        // to the SAME object that processes Dart's `start` /
+        // `stop` / `status` commands.
+        OpenE2eeVpnService.attachFlutterEngine(flutterEngine)
 
         // Permission-request channel — Dart invokes `requestVpnPermission`.
         permissionsChannel = MethodChannel(
@@ -157,50 +139,21 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Sprint 10.1F — inline handler for the `opene2ee/vpn` MethodChannel.
+     * Sprint 11.0A — REMOVED inline `onVpnCall` mock. The
+     * `opene2ee/vpn` MethodChannel is now owned by
+     * `OpenE2eeVpnService` (attached via
+     * `OpenE2eeVpnService.attachFlutterEngine(flutterEngine)` in
+     * `configureFlutterEngine`). The `getSampledPackets` handler
+     * lives in `OpenE2eeVpnService.onMethodCall` and reads the
+     * LIVE ring via the instance's `snapshotRing()` method.
      *
-     * Mock implementation that mirrors the Dart-side `VpnService`
-     * contract from Sprint 10.1B:
-     *   - "start"             → returns "started" sentinel
-     *   - "stop"              → returns "stopped" sentinel
-     *   - "status"            → returns "idle" sentinel
-     *   - "getSampledPackets" → returns a single synthetic IPv4 TCP
-     *                            packet so the Dart poll loop
-     *                            exercises the real shape of the
-     *                            eventual ParsedPacket.toJson() return
-     *                            value.
-     *
-     * The mock packet fields match the keys the `TelemetryService`
-     * consumer reads (version, protocol, totalLength, srcIpMasked,
-     * dstIpMasked, srcPort, dstPort, tcpFlags, tlsFingerprint) so the
-     * downstream JSON encode path can be exercised end-to-end today
-     * without the real TUN being live. IP addresses are pre-masked
-     * (last octet zeroed) per the ADR-0006 PII contract.
+     * S46 invariant: `MainActivity.kt` calls
+     * `OpenE2eeVpnService.snapshot()` (NOT a hard-coded `mapOf(...)`
+     * mock packet) when the Dart side requests the current sample
+     * set. The 5-second scheduled `PacketDrain` (also in
+     * `OpenE2eeVpnService`) pushes the same ring to Dart via the
+     * `onPacketsSampled` event so the live chart never has to poll.
      */
-    private fun onVpnCall(call: MethodCall, result: MethodChannel.Result) {
-        when (call.method) {
-            "start" -> result.success("started")
-            "stop" -> result.success("stopped")
-            "status" -> result.success("idle")
-            "getSampledPackets" -> {
-                val mockPackets = listOf(
-                    mapOf(
-                        "version" to 4,
-                        "protocol" to 6,
-                        "totalLength" to 64,
-                        "srcIpMasked" to "10.42.0.0",
-                        "dstIpMasked" to "1.1.1.0",
-                        "srcPort" to 443,
-                        "dstPort" to 51234,
-                        "tcpFlags" to 24,
-                        "tlsFingerprint" to "a1b2c3d4e5f60718",
-                    ),
-                )
-                result.success(mockPackets)
-            }
-            else -> result.notImplemented()
-        }
-    }
 
     /**
      * Handle Dart → Activity commands.
@@ -319,18 +272,15 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         permissionsChannel?.setMethodCallHandler(null)
         permissionsChannel = null
-        // Sprint 10.1F — clear the inline `opene2ee/vpn` handler so
-        // the messenger does not hold a stale reference to a
-        // destroyed activity. Sprint 10.2 will route this through
-        // `OpenE2eeVpnService.detachFlutterEngine()` instead.
-        vpnChannel?.setMethodCallHandler(null)
-        vpnChannel = null
-        // PR-28 §B.2 — use the singleton companion accessor so we
-        // detach from the running instance (or clear the pending queue
-        // if the service never came up).
-        //
-        // TODO(port-vpn-service): uncomment once VpnService is ported.
-        // OpenE2eeVpnService.detachFlutterEngine()
+        // Sprint 11.0A — route the engine detach through the
+        // singleton companion accessor so we detach from the
+        // running instance (or clear the pending queue if the
+        // service never came up). The service's
+        // `detachFlutterEngine` instance method also clears the
+        // shared `Companion.methodChannel` reference, which the
+        // 5-second `PacketDrain` task reads for `onPacketsSampled`
+        // pushes.
+        OpenE2eeVpnService.detachFlutterEngine()
         super.onDestroy()
     }
 }

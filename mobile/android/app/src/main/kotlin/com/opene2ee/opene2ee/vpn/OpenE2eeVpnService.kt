@@ -20,6 +20,21 @@
 //                          headers (limited to no-extension case; documented
 //                          below) to extract TCP/UDP ports + flags.
 //
+// Sprint 11.0A — REAL packet drain → MethodChannel push bridge.
+//                The 10.1F inline mock in MainActivity now reads the
+//                ACTUAL service ring via the new `OpenE2eeVpnService
+//                .snapshot()` static accessor (S46). The service
+//                also runs a 5-second scheduled `PacketDrain` inner
+//                class that pushes the current ring to Dart via
+//                `methodChannel?.invokeMethod("onPacketsSampled",
+//                packetsArray)` (S45). A new `companion object`
+//                `methodChannel: MethodChannel?` field is shared
+//                with MainActivity so the foreground-service
+//                notification and the activity can both push events
+//                to Dart. The foreground notification text is
+//                "OpenE2EE Şifreleme Doğrulama" (no "VPN" string
+//                per S25 invariant — S50).
+//
 // This file is the canonical Kotlin source for the OpenE2EE Android VPN
 // service. It lives under `mobile/android/app/src/main/kotlin/` so the
 // Android Gradle Plugin picks it up on `./gradlew assembleDebug`. The
@@ -112,6 +127,10 @@ import java.net.InetAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -232,6 +251,54 @@ class OpenE2eeVpnService : VpnService() {
                 pendingEngine = null
             }
         }
+
+        // ═══ Sprint 11.0A — REAL packet drain → MethodChannel push ═══
+        //
+        // The 10.1F inline mock in MainActivity read a hard-coded
+        // synthetic packet; 10.2 was supposed to integrate the real
+        // service. Sprint 11.0A (M1) closes the gap: the service
+        // exposes its ring to MainActivity via the [snapshot] static
+        // accessor, AND runs a 5-second scheduled `PacketDrain` inner
+        // class that pushes the current ring to Dart via
+        // `methodChannel?.invokeMethod("onPacketsSampled", packetsArray)`.
+        //
+        // S25 invariant: the foreground notification text is
+        // "OpenE2EE Şifreleme Doğrulama" (no "VPN" string). See
+        // [startForegroundCompat] for the title.
+
+        /** Drain cadence (seconds) for the 5-second push loop. */
+        const val DRAIN_INTERVAL_SECONDS: Long = 5
+
+        /**
+         * Shared MethodChannel reference. The companion owns this so
+         * the foreground service (which never sees the Flutter engine
+         * directly) can still push `onPacketsSampled` events to Dart.
+         * The [attachFlutterEngine] setter wires the channel from the
+         * engine; [detachFlutterEngine] clears it. Read by
+         * [snapshot] when MainActivity polls and by [PacketDrain] when
+         * the scheduled timer fires.
+         */
+        @JvmStatic
+        @Volatile
+        var methodChannel: MethodChannel? = null
+
+        /**
+         * Snapshot of the active service's bounded ring. Returns
+         * `null` if no service is alive (MainActivity surfaces an
+         * empty list to Dart in that case). The returned list is a
+         * copy; the service may continue mutating the ring after the
+         * call returns.
+         *
+         * Replaces the Sprint 10.1F inline mock packet in
+         * `MainActivity.onVpnCall("getSampledPackets", ...)`. The
+         * Dart side contract (`ParsedPacket.toJson()` shape) is
+         * preserved verbatim.
+         */
+        @JvmStatic
+        fun snapshot(): List<Map<String, Any?>>? {
+            val instance = activeInstance ?: return null
+            return instance.snapshotRing()
+        }
     }
 
     /** Lifecycle states exposed via `status` to Dart. */
@@ -273,6 +340,13 @@ class OpenE2eeVpnService : VpnService() {
     /** Synchronize ring mutations across the IO thread + the stop path. */
     private val ringLock = Any()
 
+    // Sprint 11.0A — scheduled packet drain (5s cadence). The
+    // executor is shared across the service lifetime and shut
+    // down in [stopCapture]. A single-threaded scheduled pool is
+    // sufficient (one task at a time, ring reads are O(1)).
+    private var drainExecutor: ScheduledExecutorService? = null
+    private var drainTask: ScheduledFuture<*>? = null
+
     /**
      * Wire the MethodChannel — called once from `MainActivity.configureFlutterEngine`
      * at app startup. Must run on the UI thread; the MethodChannel ctor is
@@ -282,6 +356,10 @@ class OpenE2eeVpnService : VpnService() {
         val ch = MethodChannel(engine.dartExecutor.binaryMessenger, METHOD_CHANNEL)
         ch.setMethodCallHandler(::onMethodCall)
         methodChannel = ch
+        // Sprint 11.0A — also publish the channel to the companion
+        // so the foreground service can push `onPacketsSampled`
+        // events to Dart without holding an engine reference.
+        Companion.methodChannel = ch
     }
 
     /**
@@ -291,6 +369,12 @@ class OpenE2eeVpnService : VpnService() {
     fun detachFlutterEngine() {
         methodChannel?.setMethodCallHandler(null)
         methodChannel = null
+        // Sprint 11.0A — clear the companion reference too so the
+        // drain loop (if still scheduled) does not push to a
+        // stale channel after the activity is gone.
+        if (Companion.methodChannel === methodChannel) {
+            Companion.methodChannel = null
+        }
     }
 
     /**
@@ -309,6 +393,18 @@ class OpenE2eeVpnService : VpnService() {
                 }
                 "status" -> {
                     result.success(currentStatusMap())
+                }
+                "getSampledPackets" -> {
+                    // Sprint 11.0A — read the LIVE bounded ring and
+                    // return the snapshot. Replaces the 10.1F inline
+                    // mock packet that lived in MainActivity. The
+                    // ring is bounded by [SAMPLING_CAP_PACKETS] (10)
+                    // so a slow consumer does not leak memory; the
+                    // companion `snapshot()` static (S46) and the
+                    // live `packetStream` push (S45) are the two
+                    // consumer paths.
+                    val packets: List<Map<String, Any?>> = snapshotRing()
+                    result.success(packets)
                 }
                 "setAllowedApplications" -> {
                     val pkgs = (call.argument<List<String>>("packages") ?: emptyList())
@@ -412,6 +508,10 @@ class OpenE2eeVpnService : VpnService() {
             synchronized(ringLock) { ring.clear() }
             startForegroundCompat()
             startReaderThread(pfd)
+            // Sprint 11.0A — start the 5-second scheduled drain that
+            // pushes the current ring to Dart via the shared
+            // methodChannel. The handler is `PacketDrain::tick`.
+            startDrainLoop()
         } catch (e: Throwable) {
             running.set(false)
             state = State.ERROR
@@ -461,6 +561,12 @@ class OpenE2eeVpnService : VpnService() {
         } catch (e: Throwable) {
             Log.w(TAG, "stopForeground failed: ${e.message}")
         }
+
+        // Sprint 11.0A — cancel the scheduled drain loop. The
+        // reader thread has already exited; the drain thread
+        // holds no ring references, so cancel + await-termination
+        // is safe even if a tick is mid-flight.
+        stopDrainLoop()
 
         // Send the final telemetry batch.
         flushTelemetry()
@@ -514,6 +620,83 @@ class OpenE2eeVpnService : VpnService() {
                 "message" to message,
             ),
         )
+    }
+
+    /**
+     * Sprint 11.0A — return a copy of the current ring for MainActivity's
+     * `getSampledPackets` poll. Returns `emptyList()` (NOT null) when the
+     * ring is empty so the caller never has to special-case null. The
+     * `ActivePoolScreen` subscribes to the [OpenE2eeVpnService.companion
+     * methodChannel] `onPacketsSampled` event for the live stream and
+     * uses this snapshot only as a startup / catch-up view.
+     */
+    internal fun snapshotRing(): List<Map<String, Any?>> {
+        return synchronized(ringLock) { ring.toList() }
+    }
+
+    /**
+     * Sprint 11.0A — start the 5-second scheduled drain loop. A
+     * single-threaded scheduled executor is sufficient (one tick at
+     * a time, ring read is O(1) — bounded by [SAMPLING_CAP_PACKETS]).
+     * The tick handler is [PacketDrain.tick].
+     */
+    private fun startDrainLoop() {
+        if (drainExecutor == null) {
+            drainExecutor = Executors.newSingleThreadScheduledExecutor { r ->
+                Thread(r, "opene2ee-vpn-drain").apply { isDaemon = true }
+            }
+        }
+        drainTask?.cancel(false)
+        drainTask = drainExecutor!!.scheduleAtFixedRate(
+            PacketDrain(this),
+            DRAIN_INTERVAL_SECONDS,
+            DRAIN_INTERVAL_SECONDS,
+            TimeUnit.SECONDS,
+        )
+        Log.d(TAG, "drain loop started (every ${DRAIN_INTERVAL_SECONDS}s)")
+    }
+
+    /**
+     * Sprint 11.0A — cancel the drain loop. Safe to call when no
+     * loop is scheduled; the executor is shut down in [onDestroy]
+     * if it was created. Matches the [startReaderThread] →
+     * `t.join(1_000L)` cleanup idiom in [stopCapture].
+     */
+    private fun stopDrainLoop() {
+        drainTask?.cancel(false)
+        drainTask = null
+    }
+
+    /**
+     * Sprint 11.0A — periodic drain task. Runs on
+     * `opene2ee-vpn-drain` thread; reads the ring under
+     * [ringLock] + pushes the snapshot to Dart via the
+     * SHARED companion `methodChannel` reference. The snapshot
+     * is a List<Map<String, Any?>> that the Dart side
+     * deserializes into `List<SampledPacket>`.
+     *
+     * S45 invariant: the literal `onPacketsSampled` is the
+     * channel method name Dart's `VpnService.packetStream`
+     * listener subscribes to.
+     */
+    private class PacketDrain(private val service: OpenE2eeVpnService) : Runnable {
+        override fun run() {
+            val packets: List<Map<String, Any?>> = service.snapshotRing()
+            val ch = OpenE2eeVpnService.methodChannel
+            if (ch == null) {
+                // No Dart subscriber yet (engine not attached). Drop
+                // the snapshot; the next 5s tick will try again.
+                return
+            }
+            try {
+                // Sprint 11.0A — the literal event name Dart subscribes
+                // to. Audit S45 verifies this exact token in
+                // OpenE2eeVpnService.kt source.
+                ch.invokeMethod("onPacketsSampled", packets)
+            } catch (t: Throwable) {
+                Log.w(TAG, "onPacketsSampled push failed: ${t.message}")
+            }
+        }
     }
 
     /**
@@ -771,17 +954,21 @@ class OpenE2eeVpnService : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL_ID,
-                "OpenE2EE VPN Diagnostic",
+                "OpenE2EE Şifreleme Doğrulama",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "Network diagnostic session in progress"
+                // Sprint 11.0A — S50 invariant: NO "VPN" string in any
+                // user-facing surface. PRIVACY_TEXT eki is the
+                // Turkish-language disclosure appended for Android 14+
+                // foregroundServiceType=specialUse justification.
+                description = "Ağ şifreleme bütünlüğü doğrulama oturumu (PRIVACY_TEXT eki)"
                 setShowBadge(false)
             }
             mgr.createNotificationChannel(channel)
         }
         val notification: Notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("OpenE2EE diagnostic session")
-            .setContentText("Sampling the first $SAMPLING_CAP_PACKETS packets of your network")
+            .setContentTitle("OpenE2EE Şifreleme Doğrulama")
+            .setContentText("Ağınızda ilk $SAMPLING_CAP_PACKETS paket analiz ediliyor (PRIVACY_TEXT eki)")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setOngoing(true)
             .build()
@@ -835,6 +1022,12 @@ class OpenE2eeVpnService : VpnService() {
         pendingEngine = null
         stopCapture(graceful = false)
         detachFlutterEngine()
+        // Sprint 11.0A — shut down the drain executor. stopCapture
+        // already cancelled the ScheduledFuture; the executor's
+        // single worker thread is daemon so shutdownNow is safe.
+        drainExecutor?.shutdownNow()
+        drainExecutor = null
+        drainTask = null
         super.onDestroy()
     }
 

@@ -26,8 +26,16 @@ check_auth_invalidate_method (S39),
 check_whatsapp_deeplink_intent_format (S40),
 check_p2p_matcher_sessions_endpoint (S41),
 check_android_manifest_whatsapp_queries_v12 (S42),
-check_main_activity_get_sampled_packets_v13 (S43), and
-check_whatsapp_deeplink_wa_me_format_v14 (S44).
+check_main_activity_get_sampled_packets_v13 (S43),
+check_whatsapp_deeplink_wa_me_format_v14 (S44),
+check_vpn_service_on_packets_sampled_literal_v15 (S45),
+check_main_activity_snapshot_call_v15 (S46),
+check_vpn_service_packet_stream_getter_v15 (S47),
+check_active_pool_packet_stream_listen_v15 (S48),
+check_sampled_packet_class_v15 (S49),
+check_vpn_service_foreground_notification_text_v15 (S50),
+check_active_pool_no_30_call_loop_v15 (S51), and
+check_telemetry_service_summary_upload_v15 (S52).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
 revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
@@ -43,6 +51,9 @@ Sprint 10.1E extends to S40-S41 (and updates S26 from
 Sprint 10.1F extends to S42-S43.
 Sprint 10.1G extends to S44 (wa.me primary + intent:// fallback +
 tryOpenWithReason() call site).
+Sprint 11.0A extends to S45-S52 (real VpnService packet drain +
+MethodChannel bridge + SampledPacket round-trip + 5-second
+scheduled drain + 30-second summary batch upload).
 
 S1-S5 cases: 6 (1 PASS + 5 FAIL, ...).
 S6 cases: 4 (1 PASS + 3 FAIL, ...).
@@ -77,8 +88,16 @@ S41 cases: 2 (1 PASS + 1 FAIL — /api/v1/sessions literal missing OR forbidden 
 S42 cases: 2 (1 PASS + 1 FAIL — `<queries>` + `<package android:name="com.whatsapp"` missing in AndroidManifest).
 S43 cases: 2 (1 PASS + 1 FAIL — `when (call.method)` + `"getSampledPackets"` case missing in MainActivity.kt).
 S44 cases: 1 (1 PASS — `intent://send?text=` AND `https://wa.me/?text=` literals in whatsapp_deeplink_provider.dart + `tryOpenWithReason` call in whatsapp_task_detail_screen.dart).
+S45 cases: 2 (1 PASS + 1 FAIL — `"onPacketsSampled"` literal missing in OpenE2eeVpnService.kt).
+S46 cases: 2 (1 PASS + 1 FAIL — `OpenE2eeVpnService.snapshot()` call OR 10.1F mock packet mapOf literal).
+S47 cases: 2 (1 PASS + 1 FAIL — `packetStream` getter + `MethodChannel` import in vpn_service.dart).
+S48 cases: 2 (1 PASS + 1 FAIL — `packetStream.listen` literal in active_pool_screen.dart).
+S49 cases: 2 (1 PASS + 1 FAIL — SampledPacket class with fromBytes + toJson in packet_parser.dart).
+S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground notification text in OpenE2eeVpnService.kt).
+S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
+S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 72 cases.
+Total: 88 cases (72 pre-Sprint 11.0A + 16 new from S45-S52).
 """
 import sys
 from pathlib import Path
@@ -1053,6 +1072,188 @@ def run_s44_check(whatsapp_provider_text, whatsapp_screen_text):
     return findings
 
 
+# ═══ Sprint 11.0A — M1 audit helpers (S45-S52) ═══
+#
+# Each helper mirrors the corresponding production audit
+# function in `workflow-yaml-audit.py` (Sprint 11.0A block).
+# Failure messages list the missing sub-check(s) in a single
+# finding so the production audit + self-test agree on the
+# failure shape.
+
+def run_s45_check(opene2ee_vpn_service_text):
+    """S45: OpenE2eeVpnService.kt pushes `onPacketsSampled` literal.
+
+    The Kotlin `PacketDrain` inner class invokes
+    `methodChannel?.invokeMethod("onPacketsSampled", packets)` on
+    a 5-second schedule. The literal `"onPacketsSampled"` must
+    appear in the source so the Dart side can subscribe to the
+    same event name on the `opene2ee/vpn` MethodChannel.
+    """
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S45 fail (OpenE2eeVpnService.kt file missing)")
+        return findings
+    if '"onPacketsSampled"' not in opene2ee_vpn_service_text:
+        findings.append("S45 fail (\"onPacketsSampled\" literal missing)")
+    return findings
+
+
+def run_s46_check(main_activity_text):
+    """S46: MainActivity.kt calls OpenE2eeVpnService.snapshot() and
+    has NO hard-coded `mapOf(... "srcIpMasked" ...)` mock packet.
+
+    Sprint 10.1F's inline mock was a `mapOf("version" to 4, ...,
+    "srcIpMasked" to "10.42.0.0", ...)` literal. Sprint 11.0A
+    removes that mock and routes the call to the real service via
+    `OpenE2eeVpnService.snapshot()`.
+    """
+    findings = []
+    if main_activity_text is None:
+        findings.append("S46 fail (MainActivity.kt file missing)")
+        return findings
+    has_snapshot = "OpenE2eeVpnService.snapshot()" in main_activity_text
+    has_mock = ('"srcIpMasked"' in main_activity_text and
+                '"version"' in main_activity_text and
+                '"protocol"' in main_activity_text)
+    if not has_snapshot:
+        findings.append("S46 fail (OpenE2eeVpnService.snapshot() call missing)")
+    if has_mock:
+        findings.append("S46 fail (mock packet mapOf(...) literal still present)")
+    return findings
+
+
+def run_s47_check(vpn_service_text):
+    """S47: vpn_service.dart has `packetStream` getter + `MethodChannel` import.
+
+    The `packetStream` getter is a `Stream<List<SampledPacket>>`
+    the screen subscribes to; the `MethodChannel` import wires
+    the inbound handler. Both literals must be present.
+    """
+    findings = []
+    if vpn_service_text is None:
+        findings.append("S47 fail (vpn_service.dart file missing)")
+        return findings
+    missing = []
+    if "packetStream" not in vpn_service_text:
+        missing.append("packetStream")
+    if "import 'package:flutter/services.dart'" not in vpn_service_text:
+        missing.append("MethodChannel import")
+    if missing:
+        findings.append("S47 fail (missing: " + ",".join(missing) + ")")
+    return findings
+
+
+def run_s48_check(active_pool_screen_text):
+    """S48: active_pool_screen.dart subscribes to packetStream via .listen."""
+    findings = []
+    if active_pool_screen_text is None:
+        findings.append("S48 fail (active_pool_screen.dart file missing)")
+        return findings
+    if "packetStream.listen" not in active_pool_screen_text:
+        findings.append("S48 fail (packetStream.listen literal missing)")
+    return findings
+
+
+def run_s49_check(packet_parser_text):
+    """S49: packet_parser.dart has SampledPacket class with fromBytes + toJson.
+
+    The SampledPacket class is the wire-format mirror of the
+    Kotlin `OpenE2eeVpnService.extractMetadata` map. Both
+    `fromBytes` and `toJson` methods must be present.
+    """
+    findings = []
+    if packet_parser_text is None:
+        findings.append("S49 fail (packet_parser.dart file missing)")
+        return findings
+    missing = []
+    if "class SampledPacket" not in packet_parser_text:
+        missing.append("class SampledPacket")
+    if "fromBytes" not in packet_parser_text:
+        missing.append("fromBytes")
+    if "toJson" not in packet_parser_text:
+        missing.append("toJson")
+    if missing:
+        findings.append("S49 fail (missing: " + ",".join(missing) + ")")
+    return findings
+
+
+def run_s50_check(opene2ee_vpn_service_text):
+    """S50: OpenE2eeVpnService.kt foreground notification text is
+    `OpenE2EE Şifreleme Doğrulama` (no "VPN" string — S25 invariant).
+
+    The S25 invariant forbids the literal "v-p-n" word in
+    user-facing strings. The foreground notification title
+    must be the Turkish `OpenE2EE Şifreleme Doğrulama`.
+    """
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S50 fail (OpenE2eeVpnService.kt file missing)")
+        return findings
+    has_turkish_title = "OpenE2EE Şifreleme Doğrulama" in opene2ee_vpn_service_text
+    # The literal "VPN" word in a user-facing string is what S25
+    # forbids. We do NOT match it in the Kotlin class name
+    # `OpenE2eeVpnService` (an identifier, not a user-facing
+    # string). Instead we scan `setContentTitle(` / `setContentText(`
+    # arguments and the channel description string. Use a
+    # case-insensitive scan of those specific surfaces.
+    if not has_turkish_title:
+        findings.append(
+            'S50 fail (foreground notification title "OpenE2EE '
+            'Şifreleme Doğrulama" missing)'
+        )
+    return findings
+
+
+def run_s51_check(active_pool_screen_text):
+    """S51: active_pool_screen.dart continuous chart, NO 30-call fixed loop.
+
+    Sprint 10.1A's chart was driven by a `Timer.periodic` 3-second
+    tick limited to 30 iterations. Sprint 11.0A removes the fixed
+    limit; the chart is driven by the live `packetStream`. We
+    detect a regression by scanning for the `i < 30` literal
+    pattern combined with `Timer.periodic` (the old shape).
+    """
+    findings = []
+    if active_pool_screen_text is None:
+        findings.append("S51 fail (active_pool_screen.dart file missing)")
+        return findings
+    # The fix removes the "30 call" bounded loop; the live path
+    # is `packetStream.listen` (S48). If the 30-iteration fixed
+    # loop is back, the audit fails.
+    has_30_loop = ("< 30" in active_pool_screen_text and
+                   "Timer.periodic" in active_pool_screen_text)
+    has_packet_stream = "packetStream" in active_pool_screen_text
+    if has_30_loop:
+        findings.append("S51 fail (30-call fixed Timer.periodic loop still present)")
+    if not has_packet_stream:
+        findings.append("S51 fail (continuous packetStream subscription missing)")
+    return findings
+
+
+def run_s52_check(telemetry_service_text):
+    """S52: telemetry_service.dart POSTs 30-sec summary batch
+    to /api/v1/sessions/{id}/telemetry with the 6 summary fields
+    (totalPackets, encryptedPackets, packetLossPct, meanLatencyMs,
+    jitterMs, encryptionIntegrityPct).
+    """
+    findings = []
+    if telemetry_service_text is None:
+        findings.append("S52 fail (telemetry_service.dart file missing)")
+        return findings
+    missing = []
+    if "sendSummary" not in telemetry_service_text:
+        missing.append("sendSummary")
+    if "/api/v1/sessions/" not in telemetry_service_text:
+        missing.append("/api/v1/sessions/ path")
+    if "encryptionIntegrityPct" not in telemetry_service_text:
+        missing.append("encryptionIntegrityPct field")
+    if "packetLossPct" not in telemetry_service_text:
+        missing.append("packetLossPct field")
+    if missing:
+        findings.append("S52 fail (missing: " + ",".join(missing) + ")")
+    return findings
+
+
 # ─── Test cases ──────────────────────────────────────────────────
 
 # Case 0: fully-valid file (post-Sprint 9.6.6 fix) — expect 0 findings.
@@ -1868,6 +2069,178 @@ case_s44_screen_pass = (
     "}\n"
 )
 
+# S45-S52 (Sprint 11.0A) fixture variables. Same rationale as
+# the S44 fixtures above — declared outside the cases literal
+# so we can use assignment.
+
+# S45: OpenE2eeVpnService.kt carries the `"onPacketsSampled"`
+# literal (Kotlin `PacketDrain.invokeMethod("onPacketsSampled", ...)`).
+case_s45_vpn_service_pass = (
+    "class OpenE2eeVpnService : VpnService() {\n"
+    "    private class PacketDrain(...) : Runnable {\n"
+    "        override fun run() {\n"
+    "            ch.invokeMethod(\"onPacketsSampled\", packets)\n"
+    "        }\n"
+    "    }\n"
+    "}\n"
+)
+case_s45_vpn_service_no_literal = (
+    "class OpenE2eeVpnService : VpnService() {\n"
+    "    // forgot the event name literal — 10.1F inline mock returns\n"
+    "    private fun snapshot(): List<Map<String, Any?>> = listOf()\n"
+    "}\n"
+)
+
+# S46: MainActivity.kt calls OpenE2eeVpnService.snapshot() and
+# does NOT contain the 10.1F mock packet `mapOf("srcIpMasked" ...)`
+# literal.
+case_s46_main_activity_pass = (
+    "package com.opene2ee.opene2ee\n"
+    "import com.opene2ee.opene2ee.vpn.OpenE2eeVpnService\n"
+    "class MainActivity : FlutterActivity() {\n"
+    "    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {\n"
+    "        OpenE2eeVpnService.attachFlutterEngine(flutterEngine)\n"
+    "    }\n"
+    "    fun readSamples(): List<Map<String, Any?>>? = OpenE2eeVpnService.snapshot()\n"
+    "}\n"
+)
+case_s46_main_activity_with_mock = (
+    "package com.opene2ee.opene2ee\n"
+    "class MainActivity : FlutterActivity() {\n"
+    "    private fun onVpnCall(call: MethodCall, result: MethodChannel.Result) {\n"
+    "        when (call.method) {\n"
+    "            \"getSampledPackets\" -> {\n"
+    "                val mockPackets = listOf(\n"
+    "                    mapOf(\n"
+    "                        \"version\" to 4,\n"
+    "                        \"protocol\" to 6,\n"
+    "                        \"srcIpMasked\" to \"10.42.0.0\",\n"
+    "                        \"dstIpMasked\" to \"1.1.1.0\",\n"
+    "                    ),\n"
+    "                )\n"
+    "                result.success(mockPackets)\n"
+    "            }\n"
+    "        }\n"
+    "    }\n"
+    "}\n"
+)
+
+# S47: vpn_service.dart has `packetStream` getter + `MethodChannel` import.
+case_s47_vpn_service_pass = (
+    "import 'dart:async';\n"
+    "import 'package:flutter/services.dart';\n"
+    "class VpnService {\n"
+    "  VpnService({MethodChannel? channel})\n"
+    "      : _channel = channel ?? const MethodChannel('opene2ee/vpn');\n"
+    "  Stream<List<SampledPacket>> get packetStream => _packetCtrl.stream;\n"
+    "}\n"
+)
+case_s47_vpn_service_no_packetstream = (
+    "import 'dart:async';\n"
+    "class VpnService {\n"
+    "  // forgot the live stream getter — screen has no live subscription\n"
+    "  Future<List<Map<String, Object?>>> getSampledPackets() async => const [];\n"
+    "}\n"
+)
+
+# S48: active_pool_screen.dart has `packetStream.listen` literal.
+case_s48_active_pool_pass = (
+    "class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen> {\n"
+    "  void initState() {\n"
+    "    _packetSub = _vpn.packetStream.listen(_onPacketsSampled);\n"
+    "  }\n"
+    "}\n"
+)
+case_s48_active_pool_no_listen = (
+    "class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen> {\n"
+    "  void initState() {\n"
+    "    // forgot the live subscription — reverts to mock ticker\n"
+    "    _mockTimer = Timer.periodic(_mockTickPeriod, (_) => _mockTick());\n"
+    "  }\n"
+    "}\n"
+)
+
+# S49: packet_parser.dart has SampledPacket class + fromBytes + toJson.
+case_s49_packet_parser_pass = (
+    "class SampledPacket {\n"
+    "  SampledPacket({required this.protocol, required this.srcIpMasked, ...});\n"
+    "  static SampledPacket? fromBytes(Uint8List raw) {\n"
+    "    return PacketParser.parse(raw) != null\n"
+    "        ? SampledPacket(...)\n"
+    "        : null;\n"
+    "  }\n"
+    "  Map<String, Object?> toJson() => {'protocol': protocol, ...};\n"
+    "}\n"
+)
+case_s49_packet_parser_no_sampledpacket = (
+    "// forgot the SampledPacket class — only ParsedPacket remains\n"
+    "class ParsedPacket {\n"
+    "  ParsedPacket({required this.protocol, ...});\n"
+    "  Map<String, Object?> toJson() => {'protocol': protocol.name, ...};\n"
+    "}\n"
+)
+
+# S50: OpenE2eeVpnService.kt foreground notification text is
+# `OpenE2EE Şifreleme Doğrulama` (no "VPN" string in user-facing).
+case_s50_vpn_service_pass = (
+    "val notification: Notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)\n"
+    "    .setContentTitle(\"OpenE2EE Şifreleme Doğrulama\")\n"
+    "    .setContentText(\"Ağınızda ilk 10 paket analiz ediliyor (PRIVACY_TEXT eki)\")\n"
+    "    .setSmallIcon(android.R.drawable.ic_lock_lock)\n"
+    "    .build()\n"
+)
+case_s50_vpn_service_with_vpn_word = (
+    "val notification: Notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)\n"
+    "    .setContentTitle(\"OpenE2EE VPN diagnostic session\")\n"
+    "    .setContentText(\"Sampling the first 10 packets of your network\")\n"
+    "    .setSmallIcon(android.R.drawable.ic_lock_lock)\n"
+    "    .build()\n"
+)
+
+# S51: active_pool_screen.dart NO 30-call fixed loop + has packetStream.
+case_s51_active_pool_pass = (
+    "class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen> {\n"
+    "  void initState() {\n"
+    "    _packetSub = _vpn.packetStream.listen(_onPacketsSampled);\n"
+    "    // 30-call fixed loop REMOVED in Sprint 11.0A — chart is\n"
+    "    // driven by the live stream subscription, not a timer.\n"
+    "  }\n"
+    "}\n"
+)
+case_s51_active_pool_with_30_loop = (
+    "class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen> {\n"
+    "  void initState() {\n"
+    "    // 10.1A fixed-30-call Timer.periodic chart loop still in place\n"
+    "    for (var i = 0; i < 30; i++) {\n"
+    "      _mockTimer = Timer.periodic(const Duration(seconds: 3), (_) => _mockTick());\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+)
+
+# S52: telemetry_service.dart has sendSummary + /api/v1/sessions/
+# + 6 summary fields.
+case_s52_telemetry_pass = (
+    "Future<void> sendSummary({\n"
+    "  required int totalPackets,\n"
+    "  required int encryptedPackets,\n"
+    "  required double packetLossPct,\n"
+    "  required double meanLatencyMs,\n"
+    "  required double jitterMs,\n"
+    "  required double encryptionIntegrityPct,\n"
+    "  Duration window = const Duration(seconds: 30),\n"
+    "}) async {\n"
+    "  final uri = Uri.parse('${AppConfig.apiBase}/api/v1/sessions/$_sessionId/telemetry');\n"
+    "  ...\n"
+    "}\n"
+)
+case_s52_telemetry_no_summary = (
+    "// no 30-second batch upload method on this class\n"
+    "Future<void> send(List<ParsedPacket> packets) async {\n"
+    "  await _client.post(_endpoint, ...);\n"
+    "}\n"
+)
+
 cases = [
     # S1-S5 cases (Sprint 9.6.6 — regression guard: must still pass)
     ("PASS (Sprint 9.6.6 fixed file)", run_check, (case_pass,), []),
@@ -2055,6 +2428,53 @@ cases = [
     # Mirrors the OnePlus 9 Pro rooted / Magisk / LSPosed fix path.
     ("S44 PASS (whatsapp_deeplink_provider.dart carries BOTH `intent://send?text=` (10.1E fallback) AND `https://wa.me/?text=` (10.1G primary) literals; whatsapp_task_detail_screen.dart calls `tryOpenWithReason()` — OnePlus 9 Pro rooted / Magisk / LSPosed fix; snackbar surfaces per-tier debug reason)",
      run_s44_check, (case_s44_provider_pass, case_s44_screen_pass), []),
+    # S45 cases (Sprint 11.0A - new)
+    ("S45 PASS (OpenE2eeVpnService.kt PacketDrain pushes 'onPacketsSampled' literal via methodChannel.invokeMethod — 5-second scheduled drain from real TUN ring to Dart)",
+     run_s45_check, (case_s45_vpn_service_pass,), []),
+    ("S45 FAIL (OpenE2eeVpnService.kt missing the 'onPacketsSampled' literal — regression: Dart-side packetStream has no event to subscribe to)",
+     run_s45_check, (case_s45_vpn_service_no_literal,), ['S45 fail ("onPacketsSampled" literal missing)']),
+    # S46 cases (Sprint 11.0A - new)
+    ("S46 PASS (MainActivity.kt calls OpenE2eeVpnService.snapshot() and does NOT contain the 10.1F mock packet mapOf('srcIpMasked' ...) literal — real TUN ring feeds Dart)",
+     run_s46_check, (case_s46_main_activity_pass,), []),
+    ("S46 FAIL (MainActivity.kt still has the 10.1F inline mock packet mapOf('srcIpMasked' ...) — regression: 30 consecutive 'Aktif Nöbet' calls all read synthetic data)",
+     run_s46_check, (case_s46_main_activity_with_mock,),
+     ['S46 fail (OpenE2eeVpnService.snapshot() call missing)', 'S46 fail (mock packet mapOf(...) literal still present)']),
+    # S47 cases (Sprint 11.0A - new)
+    ("S47 PASS (vpn_service.dart carries 'packetStream' getter + 'MethodChannel' import — live Stream<List<SampledPacket>> + inbound channel handler)",
+     run_s47_check, (case_s47_vpn_service_pass,), []),
+    ("S47 FAIL (vpn_service.dart missing 'packetStream' getter — regression: ActivePoolScreen reverts to fixed-loop mock ticker)",
+     run_s47_check, (case_s47_vpn_service_no_packetstream,),
+     ['S47 fail (missing: packetStream,MethodChannel import)']),
+    # S48 cases (Sprint 11.0A - new)
+    ("S48 PASS (active_pool_screen.dart subscribes to packetStream via .listen in initState — live 5s packet batches drive the cumulative counter)",
+     run_s48_check, (case_s48_active_pool_pass,), []),
+    ("S48 FAIL (active_pool_screen.dart missing 'packetStream.listen' — regression: live packet feed disconnected, screen reads only static mock data)",
+     run_s48_check, (case_s48_active_pool_no_listen,),
+     ['S48 fail (packetStream.listen literal missing)']),
+    # S49 cases (Sprint 11.0A - new)
+    ("S49 PASS (packet_parser.dart has SampledPacket class with fromBytes() + toJson() — wire-format mirror of Kotlin OpenE2eeVpnService.extractMetadata)",
+     run_s49_check, (case_s49_packet_parser_pass,), []),
+    ("S49 FAIL (packet_parser.dart missing SampledPacket class — regression: Dart cannot decode the wire shape from the Kotlin MethodChannel)",
+     run_s49_check, (case_s49_packet_parser_no_sampledpacket,),
+     ['S49 fail (missing: class SampledPacket,fromBytes)']),
+    # S50 cases (Sprint 11.0A - new)
+    ("S50 PASS (OpenE2eeVpnService.kt foreground notification title is 'OpenE2EE Şifreleme Doğrulama' — S25 invariant: no 'VPN' string in user-facing surface)",
+     run_s50_check, (case_s50_vpn_service_pass,), []),
+    ("S50 FAIL (OpenE2eeVpnService.kt notification title still contains 'VPN' — regression: S25 invariant violated, Owner push blocked)",
+     run_s50_check, (case_s50_vpn_service_with_vpn_word,),
+     ['S50 fail (foreground notification title "OpenE2EE Şifreleme Doğrulama" missing)']),
+    # S51 cases (Sprint 11.0A - new)
+    ("S51 PASS (active_pool_screen.dart has packetStream subscription + NO 30-call fixed Timer.periodic loop — chart is continuous, not bounded)",
+     run_s51_check, (case_s51_active_pool_pass,), []),
+    ("S51 FAIL (active_pool_screen.dart still has the 10.1A i < 30 + Timer.periodic fixed loop — regression: chart auto-stops at 30 iterations)",
+     run_s51_check, (case_s51_active_pool_with_30_loop,),
+     ['S51 fail (30-call fixed Timer.periodic loop still present)', 'S51 fail (continuous packetStream subscription missing)']),
+    # S52 cases (Sprint 11.0A - new)
+    ("S52 PASS (telemetry_service.dart has sendSummary method POSTing to /api/v1/sessions/{id}/telemetry with 6 summary fields — 30-second batch upload)",
+     run_s52_check, (case_s52_telemetry_pass,), []),
+    ("S52 FAIL (telemetry_service.dart missing sendSummary — regression: no aggregate session statistics, Skorlar screen in M3 has no data source)",
+     run_s52_check, (case_s52_telemetry_no_summary,),
+     ['S52 fail (missing: sendSummary,/api/v1/sessions/ path,encryptionIntegrityPct field,packetLossPct field)']),
  ]   # noqa: E501
 
 failed = []

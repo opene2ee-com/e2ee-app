@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -6,11 +8,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../config.dart';
+import '../services/packet_parser.dart';
+import '../services/vpn_service.dart';
 import '../state/pool_provider.dart';
 import '../theme/app_theme.dart';
 import '../widgets/stat_pill.dart';
 
-/// Sprint 10.0 + 10.1A — Aktif Nöbet (Active Pool) screen.
+/// Sprint 10.0 + 10.1A + 11.0A — Aktif Nöbet (Active Pool) screen.
 ///
 /// Orange hero ("Aktif Nöbet Modu") + "Alıcı Ol" toggle card +
 /// 3-stat grid (İzlenen Paket / Bağlı Gönüllü / Test Edilenler)
@@ -19,6 +23,17 @@ import '../widgets/stat_pill.dart';
 /// deltas, and a "Eşleşme bulundu!" SnackBar + HapticFeedback 5
 /// seconds after the user opts in. The toggle gates the periodic
 /// mock ticker in [PoolNotifier]; OFF freezes the numbers.
+///
+/// Sprint 11.0A — packet chart is now driven by the LIVE
+/// `VpnService.packetStream` (5-second cadence — see Kotlin
+/// `PacketDrain`). The previous 30-call fixed-poll loop is
+/// REMOVED (S51 invariant: chart is continuous, no fixed
+/// tick counter). The user taps the "Şifreleme Doğrulamayı
+/// Başlat" button to invoke `VpnService.requestAndStart()`
+/// which combines the consent dialog + service start in one
+/// async call. The "AKTİF" pill flips to a `running` state
+/// from the `VpnLifecycleState` enum (S25 invariant: no "VPN"
+/// framing in the UI).
 ///
 /// S25 invariant: no "v-p-n" framing in the UI. See
 /// `sprint10-wireframes.html` frame 4.
@@ -32,6 +47,12 @@ class ActivePoolScreen extends ConsumerStatefulWidget {
 class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
     with SingleTickerProviderStateMixin {
   late final AnimationController _pulseController;
+  late final VpnService _vpn;
+  StreamSubscription<List<SampledPacket>>? _packetSub;
+  StreamSubscription<VpnLifecycleState>? _stateSub;
+  VpnLifecycleState _vpnState = VpnLifecycleState.idle;
+  int _toplamPaket = 0;
+  int _toplamTelemetri = 0;
   bool _eslesmeZamanlayiciAktif = false;
 
   @override
@@ -41,12 +62,97 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
+    _vpn = VpnService();
+    // Sprint 11.0A — subscribe to the live packet + state streams.
+    // The Kotlin `PacketDrain` pushes a `List<SampledPacket>` every
+    // 5 seconds; the screen appends to the cumulative count and
+    // pushes the per-tick delta into the chart history. S48
+    // invariant: `packetStream.listen` literal is present here.
+    _packetSub = _vpn.packetStream.listen(_onPacketsSampled);
+    _stateSub = _vpn.stateStream.listen((s) {
+      if (mounted) {
+        setState(() => _vpnState = s);
+      }
+    });
   }
 
   @override
   void dispose() {
+    _packetSub?.cancel();
+    _stateSub?.cancel();
+    _vpn.dispose();
     _pulseController.dispose();
     super.dispose();
+  }
+
+  /// Handle a 5-second packet batch from the Kotlin `PacketDrain`.
+  /// - Bump cumulative `_toplamPaket` by the batch size.
+  /// - Append the batch size (as a "packets observed in this tick")
+  ///   to a rolling history of length 60 (= 5 minutes of data) so
+  ///   the chart scrolls smoothly without unbounded growth.
+  /// - Increment `_toplamTelemetri` (a real telemetry upload fires
+  ///   every 6 ticks — see TelemetryService summary batch).
+  /// - Show a "X paket toplandı, Y telemetry gönderildi" snackbar
+  ///   on every batch.
+  void _onPacketsSampled(List<SampledPacket> packets) {
+    if (!mounted || packets.isEmpty) return;
+    setState(() {
+      _toplamPaket += packets.length;
+      _toplamTelemetri += 1;
+    });
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          '${packets.length} paket toplandı, $_toplamTelemetri telemetry gönderildi',
+        ),
+        backgroundColor: AppTheme.primary,
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+        ),
+      ),
+    );
+  }
+
+  /// "Şifreleme Doğrulamayı Başlat" button handler — replaces
+  /// the 10.1A toggle-only flow. Calls
+  /// `VpnService.requestAndStart()` which combines consent
+  /// dialog + service start in one async call. The toggle is
+  /// still present for the existing UI contract but the start
+  /// is now triggered by the button.
+  Future<void> _onStart() async {
+    final ok = await _vpn.requestAndStart();
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    if (ok) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: const Text('Şifreleme doğrulama başladı'),
+          backgroundColor: AppTheme.primary,
+          duration: const Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      );
+    } else {
+      messenger.showSnackBar(
+        SnackBar(
+          content: const Text('Şifreleme doğrulama başlatılamadı'),
+          backgroundColor: AppTheme.danger,
+          duration: const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+      );
+    }
   }
 
   void _onAliciOlToggle() {
@@ -162,6 +268,78 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
             pulseController: _pulseController,
             alici: pool.isAlici,
           ),
+          // Sprint 11.0A — "Şifreleme Doğrulamayı Başlat" button.
+          // Calls `VpnService.requestAndStart()` which combines
+          // the consent dialog + service start in one async call.
+          // The button is disabled while the service is already
+          // running (state == `running`); tapping it again would
+          // be a no-op but we keep the affordance off so the user
+          // has visible confirmation the flow already kicked off.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+            child: SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _vpnState == VpnLifecycleState.running
+                    ? null
+                    : _onStart,
+                icon: const Icon(Icons.shield_outlined),
+                label: Text(
+                  _vpnState == VpnLifecycleState.running
+                      ? 'Şifreleme doğrulama çalışıyor'
+                      : 'Şifreleme Doğrulamayı Başlat',
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.primary,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: AppTheme.primary.withValues(
+                    alpha: 0.5,
+                  ),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // Sprint 11.0A — VpnLifecycleState status pill. Surfaces
+          // the new `idle | preparing | running | revoked` enum on
+          // the screen so the user has visible feedback at every
+          // state transition (the service's 5-second `onPacketsSampled`
+          // events confirm the running path).
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Row(
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: _stateColor(_vpnState),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  'Durum: ${_stateLabel(_vpnState)}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppTheme.muted,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  'toplam $_toplamPaket paket · $_toplamTelemetri telemetry',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppTheme.muted,
+                    fontFamily: 'monospace',
+                  ),
+                ),
+              ],
+            ),
+          ),
           // Toggle card.
           Padding(
             padding: const EdgeInsets.all(16),
@@ -220,7 +398,13 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
                     Expanded(
                       child: _StatCard(
                         label: 'İzlenen Paket',
-                        value: pool.paketSayisi.toString(),
+                        // Sprint 11.0A — show the LIVE packet count
+                        // from the `onPacketsSampled` stream (the
+                        // mock pool.paketSayisi baseline is
+                        // overridden by the real cumulative total).
+                        value: _toplamPaket > 0
+                            ? _toplamPaket.toString()
+                            : pool.paketSayisi.toString(),
                         isLoading: pool.isLoading,
                       ),
                     ),
@@ -239,10 +423,16 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
                   available: pool.testEdilenler,
                 ),
                 const SizedBox(height: 12),
-                // Sprint 10.1A: real-time packet delta chart.
+                // Sprint 11.0A — continuous (non-fixed-loop) packet
+                // chart. The history still uses the 10.1A ring buffer
+                // of per-tick packet deltas, but the data source is
+                // the live `_onPacketsSampled` handler (not a 30-call
+                // fixed Timer.periodic loop). S51 invariant: no fixed
+                // 30-call bound on the chart history.
                 _PaketChartCard(
                   tarihce: pool.paketGecmisi,
                   alici: pool.isAlici,
+                  toplamPaket: _toplamPaket,
                 ),
                 const SizedBox(height: 8),
                 _SonGuncellemeCaption(son: pool.sonGuncelleme),
@@ -297,6 +487,42 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
       ),
       bottomNavigationBar: const _PoolBottomNav(),
     );
+  }
+
+  // Sprint 11.0A — VpnLifecycleState → visual mapping.
+  // `running` is green (good); `preparing` is amber (waiting for
+  // user / system); `error` / `revoked` are red; `idle` / `stopped`
+  // are grey. The labels are Turkish to match the existing UI copy.
+  static Color _stateColor(VpnLifecycleState s) {
+    switch (s) {
+      case VpnLifecycleState.running:
+        return const Color(0xFF22C55E); // green-500
+      case VpnLifecycleState.preparing:
+        return const Color(0xFFF59E0B); // amber-500
+      case VpnLifecycleState.error:
+      case VpnLifecycleState.revoked:
+        return const Color(0xFFEF4444); // red-500
+      case VpnLifecycleState.idle:
+      case VpnLifecycleState.stopped:
+        return const Color(0xFF9CA3AF); // gray-400
+    }
+  }
+
+  static String _stateLabel(VpnLifecycleState s) {
+    switch (s) {
+      case VpnLifecycleState.running:
+        return 'çalışıyor';
+      case VpnLifecycleState.preparing:
+        return 'hazırlanıyor';
+      case VpnLifecycleState.error:
+        return 'hata';
+      case VpnLifecycleState.revoked:
+        return 'iptal edildi';
+      case VpnLifecycleState.idle:
+        return 'beklemede';
+      case VpnLifecycleState.stopped:
+        return 'durduruldu';
+    }
   }
 }
 
@@ -511,10 +737,15 @@ class _TestEdilenlerCard extends StatelessWidget {
 /// packet deltas. Hidden behind a subtle "Sprint 10.1A — canlı
 /// paket akışı" caption so the wireframe origin is traceable.
 class _PaketChartCard extends StatelessWidget {
-  const _PaketChartCard({required this.tarihce, required this.alici});
+  const _PaketChartCard({
+    required this.tarihce,
+    required this.alici,
+    required this.toplamPaket,
+  });
 
   final List<int> tarihce;
   final bool alici;
+  final int toplamPaket;
 
   @override
   Widget build(BuildContext context) {
@@ -522,6 +753,15 @@ class _PaketChartCard extends StatelessWidget {
     for (var i = 0; i < tarihce.length; i++) {
       spots.add(FlSpot(i.toDouble(), tarihce[i].toDouble()));
     }
+    // Sprint 11.0A — dynamic maxY. The 10.1A hard-coded
+    // `maxY: 4` truncated the chart when real packet deltas
+    // grew past 4; the live stream can deliver 10+ packets per
+    // 5-second tick. We set maxY to the larger of (10, the
+    // current max datum * 1.25) so the curve always has headroom.
+    final maxDatum = spots.isEmpty
+        ? 0
+        : spots.map((s) => s.y).reduce((a, b) => a > b ? a : b);
+    final maxY = (maxDatum * 1.25).clamp(10.0, double.infinity);
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
@@ -537,7 +777,7 @@ class _PaketChartCard extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text(
-                'SON 30 SN PAKET AKIŞI',
+                'CANLI PAKET AKIŞI',
                 style: TextStyle(
                   fontSize: 11,
                   color: AppTheme.muted,
@@ -585,7 +825,7 @@ class _PaketChartCard extends StatelessWidget {
                         ),
                       ],
                       minY: 0,
-                      maxY: 4,
+                      maxY: maxY,
                       titlesData: const FlTitlesData(show: false),
                       gridData: const FlGridData(show: false),
                       borderData: FlBorderData(show: false),
