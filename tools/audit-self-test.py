@@ -14,8 +14,11 @@ check_pubspec_baseline_shape (S20),
 check_no_vpn_string_in_sprint10_ui (S25),
 check_whatsapp_deeplink_literal_present (S26),
 check_active_pool_linechart_literal_present (S27),
-check_pool_provider_timer_periodic_literal_present (S28), and
-check_active_pool_haptic_feedback_literal_present (S29).
+check_pool_provider_timer_periodic_literal_present (S28),
+check_active_pool_haptic_feedback_literal_present (S29),
+check_pool_provider_debug_state_fields (S33),
+check_active_pool_scaffold_messenger_snackbar (S34), and
+check_service_api_key_from_environment (S35).
 
 Per Architect brief (Sprint 9.6.6): "self-checks (negative test:
 revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
@@ -24,6 +27,7 @@ revert + audit finds 4 FAIL)". Sprint 9.6.7 extends to S6.
 9.6.14 extends to S13. 9.7.0 Item 5 extends to S17-S20.
 Sprint 10.0 extends to S25-S26.
 Sprint 10.1A extends to S27-S29.
+Sprint 10.1C extends to S33-S35.
 
 S1-S5 cases: 6 (1 PASS + 5 FAIL, ...).
 S6 cases: 4 (1 PASS + 3 FAIL, ...).
@@ -46,8 +50,11 @@ S26 cases: 2 (1 PASS + 1 FAIL — `whatsapp://send?text=` missing).
 S27 cases: 2 (1 PASS + 1 FAIL — `LineChart` literal missing in active pool screen).
 S28 cases: 2 (1 PASS + 1 FAIL — `Timer.periodic` literal missing in pool provider).
 S29 cases: 2 (1 PASS + 1 FAIL — `HapticFeedback`/`SystemSound` literal missing in active pool screen).
+S33 cases: 2 (1 PASS + 1 FAIL — lastError/lastSuccess literal missing in pool provider).
+S34 cases: 2 (1 PASS + 1 FAIL — ScaffoldMessenger.of(context).showSnackBar literal missing in active pool screen).
+S35 cases: 2 (1 PASS + 1 FAIL — String.fromEnvironment('API_KEY' literal missing in telemetry/p2p services).
 
-Total: 49 cases.
+Total: 55 cases.
 """
 import sys
 from pathlib import Path
@@ -719,6 +726,67 @@ def run_s29_check(active_pool_text):
         return findings
     if ("HapticFeedback" not in active_pool_text) and ("SystemSound" not in active_pool_text):
         findings.append("S29 fail (no haptic / system-sound literal)")
+    return findings
+
+
+def run_s33_check(pool_provider_text):
+    """Sprint 10.1C: PoolState debug-state fields (S33).
+
+    Mirrors check_pool_provider_debug_state_fields. The file
+    `mobile/lib/state/pool_provider.dart` must contain BOTH the
+    `lastError` AND `lastSuccess` literals (the two CORE fields
+    the active pool screen consumes in its `ref.listen` snackbar
+    handler).
+    """
+    findings = []
+    if pool_provider_text is None:
+        findings.append("S33 fail (file missing)")
+        return findings
+    missing = [n for n in ("lastError", "lastSuccess") if n not in pool_provider_text]
+    if missing:
+        findings.append("S33 fail (missing: " + ",".join(missing) + ")")
+    return findings
+
+
+def run_s34_check(active_pool_text):
+    """Sprint 10.1C: ScaffoldMessenger.of(context).showSnackBar in active pool (S34).
+
+    Mirrors check_active_pool_scaffold_messenger_snackbar. The
+    file `mobile/lib/screens/active_pool_screen.dart` must contain
+    the literal `ScaffoldMessenger.of(context).showSnackBar` (the
+    ref.listen<PoolState> snackbar handler MUST call it on every
+    lastError / lastSuccess change).
+    """
+    findings = []
+    if active_pool_text is None:
+        findings.append("S34 fail (file missing)")
+        return findings
+    if "ScaffoldMessenger.of(context).showSnackBar" not in active_pool_text:
+        findings.append("S34 fail (literal missing)")
+    return findings
+
+
+def run_s35_check(telemetry_text, p2p_matcher_text):
+    """Sprint 10.1C: build-time API key (S35).
+
+    Mirrors check_service_api_key_from_environment. At least one
+    of `mobile/lib/services/telemetry_service.dart` OR
+    `mobile/lib/services/p2p_matcher.dart` must contain the literal
+    `String.fromEnvironment('API_KEY'` (substring search — Dart's
+    `String.fromEnvironment` is a compiler intrinsic and any other
+    spelling is a real regression).
+    """
+    findings = []
+    needle = "String.fromEnvironment('API_KEY'"
+    hit = False
+    for label, text in (("telemetry", telemetry_text), ("p2p_matcher", p2p_matcher_text)):
+        if text is None:
+            continue
+        if needle in text:
+            hit = True
+            break
+    if not hit:
+        findings.append("S35 fail (literal missing in both services)")
     return findings
 
 
@@ -1509,6 +1577,21 @@ cases = [
      run_s29_check, ("HapticFeedback.lightImpact();\n",), []),
     ("S29 FAIL (active_pool_screen.dart missing both `HapticFeedback` and `SystemSound` - regression: eşleşme is silent)",
      run_s29_check, ("// haptic removed; visual only\nScaffoldMessenger.showSnackBar(...)\n",), ["S29 fail (no haptic / system-sound literal)"]),
+    # S33 cases (Sprint 10.1C - new)
+    ("S33 PASS (pool_provider.dart contains both `lastError` and `lastSuccess` debug-state fields on PoolState)",
+     run_s33_check, ("final String? lastError;\nfinal String? lastSuccess;\n",), []),
+    ("S33 FAIL (pool_provider.dart missing `lastError` literal - regression: silent-failure mode returns)",
+     run_s33_check, ("// error-tracking field removed\nfinal String? lastSuccess;\n",), ["S33 fail (missing: lastError)"]),
+    # S34 cases (Sprint 10.1C - new)
+    ("S34 PASS (active_pool_screen.dart contains the literal `ScaffoldMessenger.of(context).showSnackBar` for ref.listen<PoolState> snackbar handler)",
+     run_s34_check, ("ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Hata')));\n",), []),
+    ("S34 FAIL (active_pool_screen.dart missing the literal `ScaffoldMessenger.of(context).showSnackBar` - regression: ref.listen compiles to no-op)",
+     run_s34_check, ("final messenger = ScaffoldMessenger.of(context);\nmessenger.showSnackBar(...);\n",), ["S34 fail (literal missing)"]),
+    # S35 cases (Sprint 10.1C - new)
+    ("S35 PASS (telemetry_service.dart contains `String.fromEnvironment('API_KEY'` for build-time API key injection)",
+     run_s35_check, ("const String _kApiKey = String.fromEnvironment('API_KEY', defaultValue: 'test_key_placeholder');\n", None), []),
+    ("S35 FAIL (neither telemetry_service.dart nor p2p_matcher.dart contains the literal - regression: --dart-define API_KEY=... silently ignored)",
+     run_s35_check, ("// literal removed in 10.1C rebase; using constructor param instead\n", "// p2p uses constructor param too\n"), ["S35 fail (literal missing in both services)"]),
 ]   # noqa: E501
 
 failed = []
