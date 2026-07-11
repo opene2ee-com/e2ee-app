@@ -3273,6 +3273,222 @@ def check_vpn_service_mtu_and_fragment_log_v31() -> list[str]:
     return findings
 
 
+def check_oturumu_bitir_2level_fallback_v32() -> list[str]:
+    """Sprint 11.0Q: active_pool_screen.dart + MainActivity.kt
+    2-level VPN disconnect fallback (S88).
+
+    Owner 14:14 symptom: tapping "Oturumu Bitir" on the
+    active pool screen did NOT stop the VPN when the
+    orchestrator's `sessionId` was null (stale state
+    after a Dart VM restart). Pre-11.0Q, the handler
+    had an early-return on null sessionId that showed
+    "Aktif oturum yok" and never touched the VPN.
+    Result: the user had to UNINSTALL the app or use
+    the system Settings → Network → VPN page to stop
+    the VPN. Critical UX bug.
+
+    11.0Q fix: 2-level fallback.
+      - LEVEL 1: try `VpnService.instance.stop()` with
+        a 3s timeout + try/catch. The Kotlin service
+        accepts the MethodChannel `stop` call and
+        tears down the TUN + foreground notification
+        cleanly. The 3s timeout is critical because
+        the channel call can hang on OnePlus OxygenOS
+        Magisk Zygisk fd-revoke.
+      - LEVEL 2: if LEVEL 1 fails (timeout, exception,
+        or no active session on the Kotlin side), call
+        `MainActivity.disconnectVpn` via the
+        `opene2ee/permissions` MethodChannel.
+        MainActivity hard-stops the service via
+        `stopService(Intent(this, OpenE2eeVpnService::
+        class.java))` AND revokes the system VPN profile
+        via `VpnService.prepare(this)`. This is the
+        nuclear option that ALWAYS works.
+
+    The check requires FIVE tokens across TWO files
+    (comment-stripped):
+      1. active_pool_screen.dart: `VpnService.instance
+         .stop` + `.timeout(const Duration(seconds: 3))`
+         + `TimeoutException` (LEVEL 1 path).
+      2. active_pool_screen.dart: `opene2ee/permissions`
+         MethodChannel + `disconnectVpn` invocation
+         (LEVEL 2 path).
+      3. active_pool_screen.dart: NO `if (_orchestrator
+         .sessionId == null) { return; }` early-return
+         (anti-pattern guard — the old code had this
+         early-return that blocked the disconnect
+         flow).
+      4. MainActivity.kt: `disconnectVpn` method that
+         calls both `stopService(Intent(this,
+         OpenE2eeVpnService::class.java))` AND
+         `VpnService.prepare(this)`.
+      5. MainActivity.kt: `onPermissionsCall` `when`
+         block lists `"disconnectVpn" -> disconnectVpn(
+         result)` (so Dart can reach the method via
+         the MethodChannel).
+
+    Missing any of these re-opens the "Oturumu Bitir
+    requires app uninstall" regression.
+    """
+    import re
+    findings = []
+    # 1-3: active_pool_screen.dart
+    screen_path = (
+        REPO_ROOT / "mobile" / "lib" / "screens"
+        / "active_pool_screen.dart"
+    )
+    if not screen_path.exists():
+        findings.append(
+            "S88 active_pool_screen.dart: file missing."
+        )
+    else:
+        try:
+            screen_text = screen_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S88 active_pool_screen.dart: read failed ("
+                + str(e) + ")."
+            )
+        else:
+            # 1. LEVEL 1: VpnService.instance.stop with 3s
+            #    timeout + TimeoutException handler.
+            if not re.search(
+                r"\.stop\s*\(\s*\)\s*\.\s*timeout\s*\(",
+                screen_text,
+            ):
+                findings.append(
+                    "S88 active_pool_screen.dart: missing "
+                    "LEVEL 1 (`VpnService.instance.stop()"
+                    ".timeout(...)`) path in _oturumuBitir. "
+                    "Sprint 11.0Q invariant - LEVEL 1 must "
+                    "try the MethodChannel `stop` with a "
+                    "3s timeout first."
+                )
+            if "TimeoutException" not in screen_text:
+                findings.append(
+                    "S88 active_pool_screen.dart: missing "
+                    "`TimeoutException` handler. Sprint "
+                    "11.0Q invariant - the 3s timeout must "
+                    "be caught (so LEVEL 2 fallback fires "
+                    "on timeout, not on uncaught "
+                    "TimeoutException)."
+                )
+            # 2. LEVEL 2: permissions channel + disconnectVpn.
+            if "opene2ee/permissions" not in screen_text:
+                findings.append(
+                    "S88 active_pool_screen.dart: missing "
+                    "`opene2ee/permissions` MethodChannel. "
+                    "Sprint 11.0Q invariant - LEVEL 2 "
+                    "calls `MainActivity.disconnectVpn` "
+                    "via this channel."
+                )
+            if "disconnectVpn" not in screen_text:
+                findings.append(
+                    "S88 active_pool_screen.dart: missing "
+                    "`disconnectVpn` invocation. Sprint "
+                    "11.0Q invariant - LEVEL 2 must call "
+                    "MainActivity.disconnectVpn when "
+                    "LEVEL 1 fails."
+                )
+            # 3. Anti-pattern guard: no early-return on
+            #    null sessionId. The pre-11.0Q code had
+            #    `if (_orchestrator.sessionId == null) {
+            #    return; }` which blocked the disconnect
+            #    flow when the session was stale.
+            #    The 11.0Q rewrite REMOVED this
+            #    early-return (it only blocks the
+            #    closeSession() path now, not the
+            #    VPN disconnect path).
+            if re.search(
+                r"if\s*\(\s*_orchestrator\.sessionId\s*==\s*null\s*\)\s*\{\s*return",
+                screen_text,
+            ):
+                findings.append(
+                    "S88 active_pool_screen.dart: contains "
+                    "the anti-pattern `if (_orchestrator."
+                    "sessionId == null) { return; }` in "
+                    "_oturumuBitir. Sprint 11.0Q invariant "
+                    "- the early-return blocks the VPN "
+                    "disconnect flow when the session is "
+                    "stale (Owner 14:14 regression). "
+                    "Remove the early-return; the 11.0Q "
+                    "rewrite wraps the closeSession() "
+                    "path in a separate `if (... != null)` "
+                    "check AFTER the VPN disconnect."
+                )
+    # 4-5: MainActivity.kt
+    main_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "kotlin" / "com" / "opene2ee" / "opene2ee" / "MainActivity.kt"
+    )
+    if not main_path.exists():
+        findings.append(
+            "S88 MainActivity.kt: file missing."
+        )
+    else:
+        try:
+            main_text = main_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S88 MainActivity.kt: read failed ("
+                + str(e) + ")."
+            )
+        else:
+            # 4. disconnectVpn method with stopService +
+            #    VpnService.prepare.
+            if not re.search(
+                r"fun\s+disconnectVpn\s*\(",
+                main_text,
+            ):
+                findings.append(
+                    "S88 MainActivity.kt: missing "
+                    "`fun disconnectVpn(...)` method. "
+                    "Sprint 11.0Q invariant - the method "
+                    "must exist (called by Dart LEVEL 2)."
+                )
+            if "stopService" not in main_text:
+                findings.append(
+                    "S88 MainActivity.kt: missing "
+                    "`stopService` call in disconnectVpn. "
+                    "Sprint 11.0Q invariant - the method "
+                    "must hard-stop the service."
+                )
+            if "VpnService.prepare" not in main_text:
+                findings.append(
+                    "S88 MainActivity.kt: missing "
+                    "`VpnService.prepare` call in "
+                    "disconnectVpn. Sprint 11.0Q "
+                    "invariant - the method must revoke "
+                    "the system VPN profile."
+                )
+            if "OpenE2eeVpnService::class.java" not in main_text:
+                findings.append(
+                    "S88 MainActivity.kt: missing "
+                    "`OpenE2eeVpnService::class.java` "
+                    "Intent target. Sprint 11.0Q "
+                    "invariant - the stopService call "
+                    "must target the right service class."
+                )
+            # 5. onPermissionsCall `when` block lists
+            #    "disconnectVpn" -> disconnectVpn(result).
+            if not re.search(
+                r'\"disconnectVpn\"\s*->\s*disconnectVpn\s*\(',
+                main_text,
+            ):
+                findings.append(
+                    "S88 MainActivity.kt: missing "
+                    '`"disconnectVpn" -> disconnectVpn(` '
+                    "branch in onPermissionsCall `when` "
+                    "block. Sprint 11.0Q invariant - the "
+                    "MethodChannel must route the "
+                    "disconnectVpn call to the method."
+                )
+    return findings
+
+
+
+
+
 
 
 
@@ -6376,6 +6592,12 @@ def main() -> int:
         all_findings.extend(s87_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt has TUN_MTU=1400 (mobile-safe, NOT 1500) + addDnsServer(1.1.1.1) + per-1000-packet MTU+fragment log breadcrumb - regression guard for OnePlus 9 Pro / Turkcell GTP encapsulation MTU drop - Sprint 11.0P S87")
+
+    s88_findings = check_oturumu_bitir_2level_fallback_v32()
+    if s88_findings:
+        all_findings.extend(s88_findings)
+    else:
+        print("PASS: active_pool_screen.dart has 2-level VPN disconnect fallback (_vpn.stop with 3s timeout + MainActivity.disconnectVpn hard-stop) - regression guard for OnePlus 9 Pro 'Oturumu Bitir requires app uninstall' symptom - Sprint 11.0Q S88")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()

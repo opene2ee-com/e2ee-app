@@ -16,6 +16,7 @@ check_whatsapp_deeplink_literal_present (S26),
 check_active_pool_linechart_literal_present (S27),
 check_pool_provider_timer_periodic_literal_present (S28 - INVERTED in 11.0O),
 check_vpn_service_mtu_and_fragment_log_v31 (S87),
+check_oturumu_bitir_2level_fallback_v32 (S88),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -165,16 +166,18 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 137 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 138 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
-1 from S82 + 1 from S84 + 1 from S86 + 1 from S87).
-Sprint 11.0P adds 1 new selftest case for S87 (MTU 1400
-+ per-1000-packet fragment log breadcrumb) — the
-OnePlus 9 Pro / Turkcell 4G/5G GTP encapsulation MTU
-drop regression guard (Owner 13:50: 1247 packets
-confirmed passthrough, but MTU 1500 was the remaining
-issue).
+1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
+1 from S88).
+Sprint 11.0Q adds 1 new selftest case for S88 (2-level
+VPN disconnect fallback: .stop with 3s timeout +
+MainActivity.disconnectVpn hard-stop) — the
+OnePlus 9 Pro "Oturumu Bitir requires app uninstall"
+regression guard (Owner 14:14: pre-11.0Q the
+handler had an early-return on null sessionId that
+blocked the disconnect flow).
 Sprint 11.0J adds 1 new selftest case for S80 (TUN
 passthrough — `output.write(buf, 0, n)` after
 `input.read(buf)`) — the OnePlus 9 Pro "VPN active,
@@ -871,6 +874,63 @@ def run_s28_check(pool_provider_text):
         is_mock = cb_name in ("_mockTick", "_tick", "advance", "fakeTick")
         if is_mock or (not is_real_api and cb_name != "?"):
             findings.append("S28 fail (mock Timer.periodic callback " + cb_name + ")")
+    return findings
+
+
+def run_s88_check(active_pool_text, main_activity_text):
+    """Sprint 11.0Q: 2-level VPN disconnect fallback (S88).
+
+    Owner 14:14 symptom: tapping "Oturumu Bitir" did
+    NOT stop the VPN when the orchestrator's
+    `sessionId` was null. Pre-11.0Q, the handler
+    had an early-return on null sessionId that
+    blocked the disconnect flow. The user had to
+    UNINSTALL the app to stop the VPN.
+
+    11.0Q fix: 2-level fallback.
+      - LEVEL 1: VpnService.instance.stop with 3s
+        timeout + try/catch (TimeoutException).
+      - LEVEL 2: MainActivity.disconnectVpn via
+        `opene2ee/permissions` MethodChannel.
+
+    This check asserts the S88 invariants on the
+    two source files (active_pool_screen.dart +
+    MainActivity.kt).
+    """
+    import re
+    findings = []
+    if active_pool_text is None:
+        findings.append("S88 fail (active_pool_screen.dart missing)")
+    else:
+        if not re.search(r"\.stop\s*\(\s*\)\s*\.\s*timeout\s*\(", active_pool_text):
+            findings.append("S88 fail (LEVEL 1 .stop().timeout missing)")
+        if "TimeoutException" not in active_pool_text:
+            findings.append("S88 fail (TimeoutException handler missing)")
+        if "opene2ee/permissions" not in active_pool_text:
+            findings.append("S88 fail (opene2ee/permissions channel missing)")
+        if "disconnectVpn" not in active_pool_text:
+            findings.append("S88 fail (disconnectVpn call missing)")
+        if re.search(
+            r"if\s*\(\s*_orchestrator\.sessionId\s*==\s*null\s*\)\s*\{\s*return",
+            active_pool_text,
+        ):
+            findings.append("S88 fail (anti-pattern early-return on null sessionId)")
+    if main_activity_text is None:
+        findings.append("S88 fail (MainActivity.kt missing)")
+    else:
+        if not re.search(r"fun\s+disconnectVpn\s*\(", main_activity_text):
+            findings.append("S88 fail (MainActivity.disconnectVpn method missing)")
+        if "stopService" not in main_activity_text:
+            findings.append("S88 fail (stopService call missing)")
+        if "VpnService.prepare" not in main_activity_text:
+            findings.append("S88 fail (VpnService.prepare call missing)")
+        if "OpenE2eeVpnService::class.java" not in main_activity_text:
+            findings.append("S88 fail (OpenE2eeVpnService class target missing)")
+        if not re.search(
+            r'\"disconnectVpn\"\s*->\s*disconnectVpn\s*\(',
+            main_activity_text,
+        ):
+            findings.append("S88 fail (onPermissionsCall disconnectVpn branch missing)")
     return findings
 
 
@@ -4781,10 +4841,53 @@ cases = [
          "    }\n"
          "    private fun buildVpnBuilder(b: android.net.VpnService.Builder) {\n"
          "        b.addDnsServer(PRIMARY_DNS)\n"
-         "        b.setMtu(TUN_MTU)\n"
+          "        b.setMtu(TUN_MTU)\n"
+          "    }\n"
+          "}\n",
+      ), []),
+    # S88 case (Sprint 11.0Q - new) - active_pool_screen
+    # .dart has 2-level VPN disconnect fallback (.stop
+    # with 3s timeout + MainActivity.disconnectVpn) AND
+    # MainActivity.kt has disconnectVpn method (stopService
+    # + VpnService.prepare). Regression guard for the
+    # Owner 14:14 "Oturumu Bitir requires app uninstall"
+    # symptom. Total selftest: 137 + 1 = 138.
+    ("S88 PASS (active_pool_screen.dart has 2-level VPN disconnect fallback + MainActivity.disconnectVpn hard-stop - regression guard for OnePlus 9 Pro 'Oturumu Bitir requires app uninstall')",
+     run_s88_check,
+     (
+         "import 'package:flutter/services.dart';\n"
+         "import 'dart:async';\n"
+         "class _S {\n"
+         "  Future<void> _oturumuBitir() async {\n"
+         "    final _permissions = MethodChannel('opene2ee/permissions');\n"
+         "    try {\n"
+         "      await _vpn.stop().timeout(const Duration(seconds: 3));\n"
+         "    } on TimeoutException {\n"
+         "      await _permissions.invokeMethod('disconnectVpn');\n"
+         "    } catch (e) {\n"
+         "      await _permissions.invokeMethod('disconnectVpn');\n"
          "    }\n"
+         "  }\n"
          "}\n",
-     ), []),
+         "package com.opene2ee.opene2ee\n"
+         "import android.content.Intent\n"
+         "import android.net.VpnService\n"
+         "import com.opene2ee.opene2ee.vpn.OpenE2eeVpnService\n"
+         "class MainActivity {\n"
+         "  private fun onPermissionsCall(call: MethodCall, result: MethodChannel.Result) {\n"
+         "    when (call.method) {\n"
+         "      \"disconnectVpn\" -> disconnectVpn(result)\n"
+         "    }\n"
+         "  }\n"
+         "  private fun disconnectVpn(result: MethodChannel.Result) {\n"
+         "    val stopIntent = Intent(this, OpenE2eeVpnService::class.java)\n"
+         "    stopService(stopIntent)\n"
+         "    VpnService.prepare(this)\n"
+         "    result.success(true)\n"
+         "  }\n"
+         "}\n",
+     ),
+     []),
     # S29 cases (Sprint 10.1A - new)
     ("S29 PASS (active_pool_screen.dart contains the literal `HapticFeedback` for eşleşme feedback)",
      run_s29_check, ("HapticFeedback.lightImpact();\n",), []),

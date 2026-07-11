@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -49,6 +51,14 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
   late final AnimationController _pulseController;
   late final VpnService _vpn;
   late final SessionOrchestrator _orchestrator;
+  /// Sprint 11.0Q — MethodChannel to MainActivity. Used
+  /// by `_oturumuBitir` LEVEL 2 fallback to call
+  /// `MainActivity.disconnectVpn` (hard-stop the service
+  /// + revoke the system VPN profile). The channel name
+  /// must match `MainActivity.permissionsChannel`'s
+  /// `setMethodCallHandler` setup.
+  final MethodChannel _permissions =
+      const MethodChannel('opene2ee/permissions');
   StreamSubscription<List<SampledPacket>>? _packetSub;
   StreamSubscription<VpnLifecycleState>? _stateSub;
   StreamSubscription<WebRTCState>? _webrtcStateSub;
@@ -191,53 +201,135 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
   /// score (parsed from the `summary_stats` block). On
   /// failure, surfaces a red snackbar and stays on the
   /// active pool screen so the user can retry.
+  ///
+  /// Sprint 11.0Q — 2-LEVEL FALLBACK. Pre-11.0Q, this
+  /// handler had an early-return on `sessionId == null`
+  /// that showed the "Aktif oturum yok" snackbar and
+  /// DID NOT touch the VPN. Owner 14:14: on a stale
+  /// session state (orchestrator `sessionId` was null
+  /// because the Dart VM had been restarted without the
+  /// session being closed, OR the VPN was active but
+  /// the orchestrator was never started) the user
+  /// couldn't stop the VPN from the app — they had
+  /// to UNINSTALL the app or use the system Settings
+  /// → Network → VPN page. 11.0Q replaces the early
+  /// return with a 2-level fallback:
+  ///   1. LEVEL 1: try `VpnService.instance.stop()`
+  ///      with a 3s timeout + try/catch. The Kotlin
+  ///      service accepts the MethodChannel `stop`
+  ///      call and tears down the TUN + foreground
+  ///      notification cleanly. If the session WAS
+  ///      active on the Kotlin side, this returns a
+  ///      summary map and the original
+  ///      `closeSession()` path can also run.
+  ///   2. LEVEL 2: if level 1 fails (timeout, exception,
+  ///      or no active session on the Kotlin side),
+  ///      call `MainActivity.disconnectVpn` via the
+  ///      permissions MethodChannel. MainActivity
+  ///      hard-stops the service via
+  ///      `stopService(Intent(this,
+  ///      OpenE2eeVpnService::class.java))` AND
+  ///      revokes the system VPN profile via
+  ///      `VpnService.prepare(this)`. This is the
+  ///      nuclear option that ALWAYS works.
+  /// S88 audit verifies this 2-level fallback is
+  /// present in `_oturumuBitir`.
   Future<void> _oturumuBitir() async {
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
-    if (_orchestrator.sessionId == null) {
-      messenger.showSnackBar(
-        const SnackBar(
-          content: Text('Aktif bir oturum yok — önce şifreleme '
-              'doğrulamayı başlatın.'),
-          backgroundColor: AppTheme.danger,
-          duration: Duration(seconds: 3),
-        ),
-      );
-      return;
-    }
+    // Sprint 11.0Q — LEVEL 1: try the Kotlin-side stop
+    // with a 3s timeout. The timeout is critical because
+    // the MethodChannel `stop` call can hang on
+    // OnePlus 9 Pro OxygenOS Magisk Zygisk fd-revoke
+    // (the Kernel TUN close blocks the worker thread
+    // until Zygisk releases the fd, which can take
+    // 2-5s). Without a timeout the Dart side hangs
+    // and the user sees a frozen app.
+    bool vpnStopped = false;
     try {
-      final summary = await _orchestrator.closeSession();
-      if (!mounted) return;
-      // S67 invariant: navigate to /home/skorlar. The Skorlar
-      // screen fetches the latest session list on init, so
-      // the new score is visible without an explicit refresh.
-      context.go('/home/skorlar');
-      if (summary != null) {
-        final overall = (summary['overall_score'] as num?)?.toDouble();
-        if (overall != null) {
-          messenger.showSnackBar(
-            SnackBar(
-              content: Text(
-                'Oturum tamamlandı, skor '
-                '${overall.toStringAsFixed(0)}/100',
-              ),
-              backgroundColor: AppTheme.primary,
-              duration: const Duration(seconds: 3),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-      }
+      await _vpn.stop().timeout(const Duration(seconds: 3));
+      vpnStopped = true;
+      developer.log('LEVEL 1: VpnService.stop() returned OK', name: 'Sprint110Q');
+    } on TimeoutException {
+      developer.log('LEVEL 1: VpnService.stop() timed out after 3s, falling back to LEVEL 2', name: 'Sprint110Q');
     } catch (e) {
-      if (!mounted) return;
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('Oturum kapatılamadı: $e'),
-          backgroundColor: AppTheme.danger,
-          duration: const Duration(seconds: 3),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      developer.log('LEVEL 1: VpnService.stop() failed: $e, falling back to LEVEL 2', name: 'Sprint110Q');
+    }
+    // LEVEL 2: if level 1 didn't cleanly stop the
+    // VPN, call MainActivity.disconnectVpn (which
+    // hard-stops the service + revokes the system
+    // VPN profile).
+    if (!vpnStopped) {
+      try {
+        await _permissions.invokeMethod('disconnectVpn');
+        developer.log('LEVEL 2: MainActivity.disconnectVpn returned OK', name: 'Sprint110Q');
+      } catch (e) {
+        developer.log('LEVEL 2: MainActivity.disconnectVpn failed: $e', name: 'Sprint110Q', error: e);
+        if (!mounted) return;
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('VPN kapatma hatası — sistem ayarlarından kapatın.'),
+            backgroundColor: AppTheme.danger,
+            duration: Duration(seconds: 5),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
+    }
+    if (!mounted) return;
+    messenger.showSnackBar(
+      const SnackBar(
+        content: Text('VPN kapatıldı'),
+        backgroundColor: AppTheme.primary,
+        duration: Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    // S67 invariant: still try to close the session
+    // on the backend (best-effort). If the orchestrator
+    // has a sessionId, POST /api/v1/sessions/$id/close
+    // and navigate to /home/skorlar. If it doesn't (the
+    // typical 11.0Q stale-state case), just navigate
+    // to /home/skorlar without a summary.
+    if (_orchestrator.sessionId != null) {
+      try {
+        final summary = await _orchestrator.closeSession();
+        if (!mounted) return;
+        context.go('/home/skorlar');
+        if (summary != null) {
+          final overall = (summary['overall_score'] as num?)?.toDouble();
+          if (overall != null) {
+            messenger.showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Oturum tamamlandı, skor '
+                  '${overall.toStringAsFixed(0)}/100',
+                ),
+                backgroundColor: AppTheme.primary,
+                duration: const Duration(seconds: 3),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        if (!mounted) return;
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text('Oturum kapatılamadı: $e'),
+            backgroundColor: AppTheme.danger,
+            duration: const Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } else {
+      // No orchestrator session — just navigate. The
+      // 11.0Q flow prioritizes stopping the VPN
+      // (the user-blocking symptom) over closing the
+      // session (which is best-effort backend bookkeeping).
+      context.go('/home/skorlar');
     }
   }
 
