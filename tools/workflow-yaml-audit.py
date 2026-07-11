@@ -2825,28 +2825,37 @@ def check_active_pool_linechart_literal_present() -> list[str]:
     return findings
 
 
-def check_pool_provider_timer_periodic_literal_present() -> list[str]:
-    """Sprint 10.1A: Timer.periodic in pool provider (S28).
+def check_pool_provider_no_fake_animation_v29() -> list[str]:
+    """Sprint 11.0O: NO Timer.periodic in pool provider (S28, INVERTED).
 
-    Sprint 10.1A turns the pool mock state into a "real-time-feel"
-    ticker: `PoolNotifier` runs `Timer.periodic(Duration(seconds: 3), ...)`
-    so paketSayisi / gonulluSayisi advance every three seconds while
-    the user is opted in. Replacing this with a Stream subscription,
-    a manual `Future.delayed` loop, or a one-shot HTTP poll is a
-    Sprint 10.x implementation decision and should require an
-    explicit scope change.
+    Sprint 11.0O INVERTS the Sprint 10.1A S28 invariant.
+    Pre-11.0O, S28 enforced the literal `Timer.periodic`
+    present in `pool_provider.dart` (the 3-second mock
+    ticker that bumped `paketSayisi` and `gonulluSayisi`
+    with no real network call). Owner 13:20: that mock
+    ticker was the source of the "numbers animate without
+    VPN started" symptom. 11.0O REMOVES the ticker (the
+    `Timer.periodic` call is gone, `_mockTick()` is gone,
+    `_mockTimer` is gone) and inverts S28: the literal
+    `Timer.periodic` is now FORBIDDEN in
+    `pool_provider.dart` (comment-stripped) EXCEPT inside
+    the brief "Sprint 10.1A" / "Sprint 11.0O REMOVED"
+    docstring markers that explain why the ticker is gone.
 
-    Audit scope: `mobile/lib/state/pool_provider.dart` must contain
-    the literal `Timer.periodic`.
+    Audit scope: `mobile/lib/state/pool_provider.dart`
+    MUST NOT contain `Timer.periodic(` as a call site
+    (the literal `Timer.periodic` may appear inside
+    docstrings — those are NOT a violation).
     """
     findings = []
     target = REPO_ROOT / "mobile" / "lib" / "state" / "pool_provider.dart"
-    needle = "Timer.periodic"
     if not target.exists():
         findings.append(
             "S28 mobile/lib/state/pool_provider.dart: file missing. "
-            "Sprint 10.1A invariant — the pool provider owns the 3-second "
-            "mock ticker via `Timer.periodic(Duration(seconds: 3), ...)`."
+            "Sprint 11.0O invariant — the Sprint 10.1A mock ticker "
+            "(`Timer.periodic` 3-second loop) MUST be removed from "
+            "`pool_provider.dart`. The file must continue to exist "
+            "for the regression guard to hold."
         )
         return findings
     try:
@@ -2857,13 +2866,264 @@ def check_pool_provider_timer_periodic_literal_present() -> list[str]:
             + str(e) + ")."
         )
         return findings
-    if needle not in text:
-        findings.append(
-            "S28 mobile/lib/state/pool_provider.dart: missing the literal "
-            "`Timer.periodic`. Sprint 10.1A invariant — the pool provider "
-            "must drive the periyodik mock update with `Timer.periodic`."
-        )
+    # Comment-strip (mirrors S43 / S73 / ... / S85). Strip
+    # /* */ blocks AND // line comments so docstring mentions
+    # of `Timer.periodic` (e.g. the "Sprint 10.1A" history
+    # note in the 11.0O replacement block) are NOT violations.
+    import re
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # Forbid the call site `Timer.periodic(` (followed by an
+    # open paren) UNLESS the callback is a real API call
+    # (`_apiTick`, `_poll`, etc.). The bare `Timer.periodic`
+    # symbol in a docstring already got stripped above.
+    # The 5-second `_apiTick` poll is the ONLY legitimate
+    # Timer.periodic that may remain (Sprint 11.0O).
+    for m_call in re.finditer(r"Timer\.periodic\s*\(", code):
+        # Look at the next 200 chars to see if the callback
+        # is a real API tick (named `_apiTick`, `_poll`, etc.)
+        # or a mock tick (named `_mockTick`, `_tick`, etc.).
+        snippet = code[m_call.end():m_call.end() + 200]
+        # Extract the first identifier in the callback — the
+        # pattern is `(_) => IDENT(` or `(_) => IDENT(`.
+        cb_match = re.search(r"=>\s*(\w+)\s*\(", snippet)
+        cb_name = cb_match.group(1) if cb_match else "?"
+        is_real_api = cb_name in ("_apiTick", "_poll", "tick")
+        is_mock = cb_name in ("_mockTick", "_tick", "advance", "fakeTick")
+        if is_mock or (not is_real_api and cb_name != "?"):
+            line_no = code[:m_call.start()].count("\n") + 1
+            findings.append(
+                "S28 mobile/lib/state/pool_provider.dart: contains "
+                "the forbidden call site `Timer.periodic(...) => "
+                + cb_name + "(...)` (line " + str(line_no) + "). "
+                "Sprint 11.0O invariant - the Sprint 10.1A mock "
+                "ticker was REMOVED (Owner 13:20: the 3-second "
+                "Timer.periodic bumped `paketSayisi` and "
+                "`gonulluSayisi` with no real network call). The "
+                "only legitimate Timer.periodic that may remain "
+                "is the 5-second `_apiTick` poll in `_start()`."
+            )
     return findings
+
+
+def check_dart_no_fake_ui_animation_v30() -> list[str]:
+    """Sprint 11.0O: NO fake UI animation in 3 Dart files (S86).
+
+    Owner 13:20 CRITICAL FINDING: the active pool screen
+    shows animated packet + volunteer counts even when the
+    VPN is NOT started. The Kotlin side was correct (Sprint
+    11.0M audit dump proved `packetsObserved.incrementAnd
+    Get` has exactly one site in `startReaderThread`). The
+    Dart side still had Sprint 10.1A mock ticker leftover
+    code that was never cleaned up:
+      - `pool_provider.dart` had a `Timer.periodic` 3-second
+        ticker that bumped `paketSayisi` and
+        `gonulluSayisi` with no real network call.
+      - `PoolState.initial()` returned mock values
+        (`paketSayisi: 247`, `gonulluSayisi: 3`,
+        `testEdilenler: {rcs, whatsapp}`, `paketGecmisi:
+        [1,2,1,3,2,1,2,3,1,2]`).
+      - `active_pool_screen.dart` had a `Future.delayed(
+        Duration(seconds: 5), ...)` that showed a fake
+        "Eşleşme bulundu!" snackbar 5s after the user
+        toggled "Alıcı Ol" ON, regardless of any real
+        backend response.
+
+    11.0O removes all three and replaces them with REAL
+    data sources:
+      - `paketSayisi` accumulates from the cumulative
+        `_vpn.getSampledPackets()` return value (the
+        Kotlin TUN reader's `SampledPacket` list).
+      - `gonulluSayisi` is the length of the peer list
+        from `_matcher.findActiveReceivers(...)` (a real
+        `GET /api/v1/sessions` call).
+      - The "Eşleşme bulundu!" snackbar is fired by
+        `ref.listen(lastSuccess)` in `build()`, not by a
+        fake timer.
+
+    This audit (S86) grep-asserts the invariant in THREE
+    files (comment-stripped):
+      1. `mobile/lib/screens/active_pool_screen.dart`
+      2. `mobile/lib/state/pool_provider.dart`
+      3. `mobile/lib/state/*.dart` (any other state file)
+
+    FORBIDDEN in any of the 3 files (outside docstrings):
+      - `Timer.periodic(` call site (mock ticker).
+      - `setInterval(` (browser-only, defensive guard).
+      - `Future.delayed(` (mock callback).
+      - `paketSayisi: 247` literal (Sprint 10.1A mock).
+      - `gonulluSayisi: 3` literal (Sprint 10.1A mock).
+      - `testEdilenler: {'rcs', 'whatsapp'}` (mock).
+
+    REQUIRED:
+      - `_vpn.packetStream.listen(` in
+        `active_pool_screen.dart` (the real packet stream
+        listen that drives the counter).
+      - `_vpn.stateStream.listen(` in
+        `active_pool_screen.dart` (the real state stream
+        listen that drives the VPN state pill).
+    """
+    import re
+    findings = []
+    targets = [
+        "mobile/lib/screens/active_pool_screen.dart",
+        "mobile/lib/state/pool_provider.dart",
+    ]
+    # Discover all state/*.dart files dynamically.
+    state_dir = REPO_ROOT / "mobile" / "lib" / "state"
+    if state_dir.exists():
+        for p in state_dir.glob("*.dart"):
+            rel = p.relative_to(REPO_ROOT).as_posix()
+            if rel not in targets:
+                targets.append(rel)
+    # Comment-strip helper.
+    def strip_comments(s: str) -> str:
+        s2 = re.sub(r"/\*[\s\S]*?\*/", "", s)
+        lines = []
+        for ln in s2.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    # 1-5. Forbid the mock ticker + delayed patterns.
+    # Note: Timer.periodic IS allowed IF the callback is a
+    # real API tick (`_apiTick`, `_poll`, etc.). The
+    # forbidden forms are: Timer.periodic that drives a
+    # mock callback (`_mockTick`, `_tick`, `fakeTick`).
+    forbidden_call_patterns = [
+        (r"setInterval\s*\(", "setInterval(", "browser-only ticker"),
+        (r"Future\.delayed\s*\(", "Future.delayed(", "mock delayed callback"),
+    ]
+    forbidden_literal_patterns = [
+        (r"paketSayisi\s*:\s*247", "paketSayisi: 247", "Sprint 10.1A mock initial value"),
+        (r"gonulluSayisi\s*:\s*3", "gonulluSayisi: 3", "Sprint 10.1A mock initial value"),
+        (r"testEdilenler\s*:\s*\{\s*'rcs'\s*,\s*'whatsapp'\s*\}", "testEdilenler: {rcs, whatsapp}", "Sprint 10.1A mock initial value"),
+    ]
+    for rel in targets:
+        path = REPO_ROOT / rel
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S86 " + rel + ": read failed (" + str(e) + ")."
+            )
+            continue
+        code = strip_comments(text)
+        for pat, label, why in forbidden_call_patterns:
+            mm = re.search(pat, code)
+            if mm:
+                # Find the line number in code (relative).
+                line_no = code[:mm.start()].count("\n") + 1
+                findings.append(
+                    "S86 " + rel + ": contains forbidden call site `"
+                    + label + "` (line " + str(line_no) + " in "
+                    "comment-stripped code). Sprint 11.0O invariant - "
+                    "the " + why + " was REMOVED (Owner 13:20: it was "
+                    "the source of the 'numbers animate without VPN' "
+                    "symptom). Remove the call site."
+                )
+        # Special check for Timer.periodic — only forbidden
+        # if the callback is a mock ticker (not a real API
+        # call). The legitimate 5s `_apiTick` poll may remain.
+        for m_call in re.finditer(r"Timer\.periodic\s*\(", code):
+            snippet = code[m_call.end():m_call.end() + 200]
+            cb_match = re.search(r"=>\s*(\w+)\s*\(", snippet)
+            cb_name = cb_match.group(1) if cb_match else "?"
+            is_real_api = cb_name in ("_apiTick", "_poll", "tick")
+            is_mock = cb_name in ("_mockTick", "_tick", "advance", "fakeTick")
+            if is_mock or (not is_real_api and cb_name != "?"):
+                line_no = code[:m_call.start()].count("\n") + 1
+                findings.append(
+                    "S86 " + rel + ": contains forbidden Timer.periodic "
+                    "callback `" + cb_name + "()` (line " + str(line_no)
+                    + " in comment-stripped code). Sprint 11.0O "
+                    "invariant - only Timer.periodic callbacks named "
+                    "`_apiTick` / `_poll` are allowed (real API poll). "
+                    "The 3-second `_mockTick` callback was REMOVED "
+                    "(Owner 13:20)."
+                )
+        for pat, label, why in forbidden_literal_patterns:
+            mm = re.search(pat, code)
+            if mm:
+                findings.append(
+                    "S86 " + rel + ": contains forbidden literal `" + label
+                    + "`. Sprint 11.0O invariant - " + why + " was "
+                    "REMOVED (Owner 13:20: it was the source of the "
+                    "'numbers show 247/3 without VPN started' symptom). "
+                    "Replace with 0/empty in `PoolState.initial()`."
+                )
+    # 6. REQUIRED: _vpn.packetStream.listen in active_pool_screen.dart
+    #    AND _vpn.stateStream.listen in active_pool_screen.dart.
+    screen_path = REPO_ROOT / "mobile" / "lib" / "screens" / "active_pool_screen.dart"
+    if not screen_path.exists():
+        findings.append(
+            "S86 active_pool_screen.dart: file missing. Sprint 11.0O "
+            "invariant - the screen must subscribe to the real VPN "
+            "streams (`_vpn.packetStream.listen` for packet counts "
+            "and `_vpn.stateStream.listen` for the state pill)."
+        )
+    else:
+        try:
+            screen_text = screen_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S86 active_pool_screen.dart: read failed (" + str(e) + ")."
+            )
+        else:
+            if "_vpn.packetStream.listen" not in screen_text and "packetStream.listen" not in screen_text:
+                findings.append(
+                    "S86 active_pool_screen.dart: missing `_vpn.packet"
+                    "Stream.listen` subscription. Sprint 11.0O invariant - "
+                    "the screen MUST subscribe to the real packet stream "
+                    "from `VpnService` (not to a mock ticker)."
+                )
+            if "_vpn.stateStream.listen" not in screen_text and "stateStream.listen" not in screen_text:
+                findings.append(
+                    "S86 active_pool_screen.dart: missing `_vpn.state"
+                    "Stream.listen` subscription. Sprint 11.0O invariant - "
+                    "the screen MUST subscribe to the real state stream "
+                    "from `VpnService` (the AKTIF/HAZIR pill is driven "
+                    "by this stream, not by a mock ticker)."
+                )
+    return findings
+
+
+
 
 
 def check_active_pool_haptic_feedback_literal_present() -> list[str]:
@@ -5945,12 +6205,18 @@ def main() -> int:
     else:
         print("PASS: mobile/lib/screens/active_pool_screen.dart contains the literal `LineChart` - Sprint 10.1A S27")
 
-    # Sprint 10.1A: Timer.periodic literal in pool provider (S28).
-    s28_findings = check_pool_provider_timer_periodic_literal_present()
+    # Sprint 11.0O: NO Timer.periodic in pool provider (S28, INVERTED).
+    s28_findings = check_pool_provider_no_fake_animation_v29()
     if s28_findings:
         all_findings.extend(s28_findings)
     else:
-        print("PASS: mobile/lib/state/pool_provider.dart contains the literal `Timer.periodic` - Sprint 10.1A S28")
+        print("PASS: mobile/lib/state/pool_provider.dart has NO Timer.periodic call site (mock ticker removed - Sprint 11.0O S28)")
+
+    s86_findings = check_dart_no_fake_ui_animation_v30()
+    if s86_findings:
+        all_findings.extend(s86_findings)
+    else:
+        print("PASS: active_pool_screen.dart + pool_provider.dart + state/*.dart have NO Timer.periodic / setInterval / Future.delayed / mock initial values; UI updates only via _vpn.packetStream.listen and _vpn.stateStream.listen + setState (Sprint 11.0O S86)")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()

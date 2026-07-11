@@ -14,7 +14,7 @@ check_pubspec_baseline_shape (S20),
 check_no_vpn_string_in_sprint10_ui (S25),
 check_whatsapp_deeplink_literal_present (S26),
 check_active_pool_linechart_literal_present (S27),
-check_pool_provider_timer_periodic_literal_present (S28),
+check_pool_provider_timer_periodic_literal_present (S28 - INVERTED in 11.0O),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -164,17 +164,20 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 135 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 136 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
-1 from S82 + 1 from S84).
-Sprint 11.0M adds 1 new selftest case for S84 (packets
-Observed increment invariant — `packetsObserved.increment
-AndGet` appears EXACTLY ONCE, inside `startReaderThread` read
-branch, NOT in onStartCommand / onRevoke / stopCapture) —
-the OnePlus 9 Pro "fake capture" regression guard (Owner
-13:08 accusation, PID 4244, real root cause was passthrough
-broken in 11.0L, the 258 counter was always real).
+1 from S82 + 1 from S84 + 1 from S86).
+Sprint 11.0O adds 1 new selftest case for S86 (no fake UI
+animation — no mock Timer.periodic callback + no
+setInterval + no Future.delayed in active_pool_screen.dart /
+pool_provider.dart / state/*.dart; the screen MUST
+subscribe to _vpn.packetStream.listen AND _vpn.stateStream
+.listen) — the Owner 13:20 "numbers animate without VPN"
+regression guard. S28 was INVERTED in 11.0O (the Sprint
+10.1A mock ticker audit is now a no-mock-ticker audit;
+the existing 2 S28 selftest cases were re-flipped to
+match the new direction).
 Sprint 11.0J adds 1 new selftest case for S80 (TUN
 passthrough — `output.write(buf, 0, n)` after
 `input.read(buf)`) — the OnePlus 9 Pro "VPN active,
@@ -826,18 +829,119 @@ def run_s27_check(active_pool_text):
 
 
 def run_s28_check(pool_provider_text):
-    """Sprint 10.1A: Timer.periodic literal in pool provider (S28).
+    """Sprint 11.0O: NO Timer.periodic mock ticker in pool provider (S28, INVERTED).
 
-    Mirrors check_pool_provider_timer_periodic_literal_present. The
-    file `mobile/lib/state/pool_provider.dart` must contain the
-    literal `Timer.periodic` (used for the 3-second mock ticker).
+    Mirrors check_pool_provider_no_fake_animation_v29. The
+    file `mobile/lib/state/pool_provider.dart` must NOT
+    contain a `Timer.periodic(... => _mockTick(...))` or
+    `Timer.periodic(... => _tick(...))` call site (the
+    Sprint 10.1A mock ticker). The 5-second real `_apiTick`
+    poll Timer.periodic IS allowed (it's a real API call,
+    not a mock ticker).
     """
+    import re
     findings = []
     if pool_provider_text is None:
         findings.append("S28 fail (file missing)")
         return findings
-    if "Timer.periodic" not in pool_provider_text:
-        findings.append("S28 fail (literal missing)")
+    # Comment-strip.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", pool_provider_text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    for m_call in re.finditer(r"Timer\.periodic\s*\(", code):
+        snippet = code[m_call.end():m_call.end() + 200]
+        cb_match = re.search(r"=>\s*(\w+)\s*\(", snippet)
+        cb_name = cb_match.group(1) if cb_match else "?"
+        is_real_api = cb_name in ("_apiTick", "_poll", "tick")
+        is_mock = cb_name in ("_mockTick", "_tick", "advance", "fakeTick")
+        if is_mock or (not is_real_api and cb_name != "?"):
+            findings.append("S28 fail (mock Timer.periodic callback " + cb_name + ")")
+    return findings
+
+
+def run_s86_check(active_pool_text):
+    """Sprint 11.0O: NO fake UI animation in active pool screen (S86).
+
+    Owner 13:20 CRITICAL: the active pool screen shows
+    animated packet + volunteer counts even when the VPN
+    is NOT started. The Sprint 10.1A mock ticker was the
+    source. 11.0O removes all Timer.periodic mock
+    callbacks + Future.delayed + mock initial values
+    from active_pool_screen.dart + pool_provider.dart
+    + state/*.dart.
+
+    This check asserts the S86 invariants on a fixture
+    string (typically the active_pool_screen.dart source
+    itself):
+      1. NO `Timer.periodic(` with a mock callback
+         (`_mockTick`, `_tick`, `fakeTick`).
+      2. NO `setInterval(`.
+      3. NO `Future.delayed(`.
+      4. The screen MUST contain
+         `_vpn.packetStream.listen` (real packet stream
+         subscription).
+      5. The screen MUST contain
+         `_vpn.stateStream.listen` (real state stream
+         subscription).
+    """
+    import re
+    findings = []
+    if active_pool_text is None:
+        findings.append("S86 fail (file missing)")
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", active_pool_text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    for m_call in re.finditer(r"Timer\.periodic\s*\(", code):
+        snippet = code[m_call.end():m_call.end() + 200]
+        cb_match = re.search(r"=>\s*(\w+)\s*\(", snippet)
+        cb_name = cb_match.group(1) if cb_match else "?"
+        if cb_name in ("_mockTick", "_tick", "advance", "fakeTick"):
+            findings.append("S86 fail (mock Timer.periodic callback " + cb_name + ")")
+    if re.search(r"setInterval\s*\(", code):
+        findings.append("S86 fail (setInterval call)")
+    if re.search(r"Future\.delayed\s*\(", code):
+        findings.append("S86 fail (Future.delayed call)")
+    if "_vpn.packetStream.listen" not in code and "packetStream.listen" not in code:
+        findings.append("S86 fail (missing _vpn.packetStream.listen)")
+    if "_vpn.stateStream.listen" not in code and "stateStream.listen" not in code:
+        findings.append("S86 fail (missing _vpn.stateStream.listen)")
     return findings
 
 
@@ -4549,11 +4653,40 @@ cases = [
      run_s27_check, ("child: LineChart(LineChartData(lineBarsData: [LineChartBarData(spots: [])]))\n",), []),
     ("S27 FAIL (active_pool_screen.dart missing the literal `LineChart` - regression: Sprint 10.1A removed fl_chart)",
      run_s27_check, ("child: Text('chart coming soon')\n",), ["S27 fail (literal missing)"]),
-    # S28 cases (Sprint 10.1A - new)
-    ("S28 PASS (pool_provider.dart contains the literal `Timer.periodic` for 3s mock ticker)",
-     run_s28_check, ("_timer = Timer.periodic(const Duration(seconds: 3), (_) => _tick());\n",), []),
-    ("S28 FAIL (pool_provider.dart missing the literal `Timer.periodic` - regression: periyodik update replaced with one-shot)",
-     run_s28_check, ("// _timer removed; using Future.delayed loop instead\n",), ["S28 fail (literal missing)"]),
+    # S28 cases (Sprint 11.0O - INVERTED). The Sprint 10.1A
+    # S28 audit (Timer.periodic MUST be present for the mock
+    # ticker) is INVERTED in 11.0O to enforce NO mock
+    # ticker Timer.periodic. The legitimate 5s _apiTick
+    # poll Timer.periodic IS allowed.
+    ("S28 PASS (pool_provider.dart has NO mock Timer.periodic - only the legitimate _apiTick poll - Sprint 11.0O inverted)",
+     run_s28_check, ("_pollTimer = Timer.periodic(_pollPeriod, (_) => _apiTick());\n",), []),
+    ("S28 FAIL (pool_provider.dart has the forbidden mock Timer.periodic with _mockTick callback - regression: Sprint 10.1A mock ticker not removed)",
+     run_s28_check, ("_mockTimer = Timer.periodic(_mockTickPeriod, (_) => _mockTick());\n",), ["S28 fail (mock Timer.periodic callback _mockTick)"]),
+    # S86 case (Sprint 11.0O - new) - active_pool_screen.dart
+    # has NO mock Timer.periodic / setInterval / Future.delayed
+    # and DOES subscribe to _vpn.packetStream.listen +
+    # _vpn.stateStream.listen. Regression guard for the
+    # Owner 13:20 "numbers animate without VPN" symptom.
+    # Total selftest: 135 + 1 = 136 (after 11.0O S28
+    # inversion + S86 added; the previous 11.0N S85 was
+    # cancelled).
+    ("S86 PASS (active_pool_screen.dart has NO mock Timer.periodic / setInterval / Future.delayed and DOES subscribe to _vpn.packetStream.listen + _vpn.stateStream.listen - regression guard for OnePlus 9 Pro fake UI animation)",
+     run_s86_check, (
+         "class ActivePoolScreen extends ConsumerStatefulWidget {\n"
+         "  @override\n"
+         "  ConsumerState<ActivePoolScreen> createState() => _S();\n"
+         "}\n"
+         "class _S extends ConsumerState<ActivePoolScreen> {\n"
+         "  late final VpnService _vpn;\n"
+         "  @override\n"
+         "  void initState() {\n"
+         "    super.initState();\n"
+         "    _vpn = VpnService.instance;\n"
+         "    _packetSub = _vpn.packetStream.listen(_onPacketsSampled);\n"
+         "    _stateSub = _vpn.stateStream.listen((s) { setState(() => _vpnState = s); });\n"
+         "  }\n"
+         "}\n",
+     ), []),
     # S29 cases (Sprint 10.1A - new)
     ("S29 PASS (active_pool_screen.dart contains the literal `HapticFeedback` for eşleşme feedback)",
      run_s29_check, ("HapticFeedback.lightImpact();\n",), []),

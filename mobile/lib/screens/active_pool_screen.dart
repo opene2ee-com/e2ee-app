@@ -1,9 +1,7 @@
 import 'dart:async';
 
 import 'package:fl_chart/fl_chart.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -58,7 +56,6 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
   WebRTCState _webrtcState = WebRTCState.idle;
   int _toplamPaket = 0;
   int _toplamTelemetri = 0;
-  bool _eslesmeZamanlayiciAktif = false;
 
   @override
   void initState() {
@@ -248,14 +245,25 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
     final eskiAlici = ref.read(poolProvider).isAlici;
     ref.read(poolProvider.notifier).toggleAlici();
     final yeniAlici = !eskiAlici;
-    if (yeniAlici && !_eslesmeZamanlayiciAktif) {
-      _eslesmeZamanlayiciAktif = true;
-      // Sprint 10.1C — info snackbar when the user opts in.
-      // "Eşleşme aranıyor..." signals that the API call
-      // loop has started, even before the first poll
-      // returns. Owner feedback: "hiç tepki yok gibi" — the
-      // instant snackbar on toggle is the visible
-      // confirmation the user wanted.
+    if (yeniAlici) {
+      // Sprint 11.0O — REMOVED the `Future.delayed(5s)` fake
+      // "Eşleşme bulundu!" snackbar. Pre-11.0O, this code
+      // showed a fake "match found" snackbar 5 seconds after
+      // the user toggled "Alıcı Ol" ON, regardless of whether
+      // the backend P2P matcher had actually returned a peer.
+      // Owner 13:20: this was the source of the
+      // "numbers animate without VPN" symptom — the snackbar
+      // AND the periodic mock ticker (see PoolNotifier
+      // `_mockTick`) both ran without any real network call.
+      //
+      // 11.0O keeps the instant "Eşleşme aranıyor…" snackbar
+      // (visible confirmation that the toggle registered) but
+      // the match-found snackbar is now driven by the real
+      // `_apiTick` callback in PoolNotifier (the
+      // `lastSuccess = "Eşleşme bulundu: ..."` path). When the
+      // backend returns a real peer, `lastSuccess` is set and
+      // the `ref.listen` in `build` fires the snackbar. No
+      // fake timer.
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
         ..showSnackBar(
@@ -269,33 +277,6 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
             ),
           ),
         );
-      // 5 sn sonra "Eşleşme bulundu!" — Sprint 10.1A eşleşme feedback.
-      // The callback re-checks the provider because the user may
-      // have toggled back off in the meantime.
-      Future.delayed(const Duration(seconds: 5), () {
-        if (!mounted) {
-          return;
-        }
-        _eslesmeZamanlayiciAktif = false;
-        final halaAlici = ref.read(poolProvider).isAlici;
-        if (!halaAlici) {
-          return;
-        }
-        HapticFeedback.lightImpact();
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(
-            SnackBar(
-              content: const Text('Eşleşme bulundu! Test başlıyor...'),
-              backgroundColor: AppTheme.primary,
-              duration: const Duration(seconds: 3),
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-          );
-      });
     }
   }
 
