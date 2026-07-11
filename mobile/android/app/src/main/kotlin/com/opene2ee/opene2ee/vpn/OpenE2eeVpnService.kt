@@ -1167,7 +1167,26 @@ class OpenE2eeVpnService : VpnService() {
             Log.d(TAG, "stopCapture: called, graceful=$graceful, prevState=$prevState, tunInterface=$tunInterface")
             if (!running.get() && tunInterface == null) {
                 state = State.STOPPED
-                Log.d(TAG, "stopCapture: DONE (was already idle), state transition $prevState -> $state")
+                // Sprint 11.0V — ALREADY-IDLE BRANCH. The
+                // TUN was already torn down by a prior
+                // stop, but the bounded queue (`ring`)
+                // and the per-session counter
+                // (`packetsObserved`) may still hold
+                // the stale 10 packets from the
+                // previous session. Owner 20:19
+                // reported `getSampledPackets()`
+                // returning 10 packets after VPN
+                // stop — the Dart `poolProvider` used
+                // those to bump the UI counter, making
+                // it look like the VPN was still
+                // capturing. Both branches MUST clear
+                // the ring + reset the counter so the
+                // NEXT session starts from 0 0
+                // (Sprint 11.0R invariant). S95 audit
+                // verifies this branch.
+                synchronized(ringLock) { ring.clear() }
+                packetsObserved.set(0)
+                Log.d(TAG, "stopCapture: DONE (was already idle), state transition $prevState -> $state (ring cleared, packetsObserved=0)")
                 return@synchronized state
             }
             state = State.DRAINING
@@ -1209,12 +1228,33 @@ class OpenE2eeVpnService : VpnService() {
         // is safe even if a tick is mid-flight.
         stopDrainLoop()
 
+        // Sprint 11.0V — NORMAL TEARDOWN BRANCH. Clear
+        // the bounded queue + reset the per-session
+        // counter BEFORE the final telemetry flush so
+        // the last batch doesn't include stale ring
+        // data, AND so the NEXT `getSampledPackets()`
+        // call (after a fresh `requestAndStart()`) returns
+        // 0 packets instead of the previous session's
+        // 10. Owner 20:19: pre-11.0V the ring held 10
+        // packets after VPN stop; the Dart `poolProvider`
+        // read those 10 and bumped the UI counter, making
+        // it look like the VPN was still capturing. S95
+        // audit verifies this branch.
+        synchronized(ringLock) { ring.clear() }
+        packetsObserved.set(0)
+        // Also reset the per-session passthrough
+        // and fragment counters (Sprint 11.0P/11.0T
+        // invariant — these are per-session too, so
+        // they should reset on stop, not just on start).
+        ipFragmentCount.set(0)
+        passthroughCount.set(0)
+
         // Send the final telemetry batch.
         flushTelemetry()
         running.set(false)
         val newState = State.STOPPED
         state = newState
-        Log.d(TAG, "stopCapture: DONE, state transition $prevState -> $newState")
+        Log.d(TAG, "stopCapture: DONE, state transition $prevState -> $newState (ring cleared, packetsObserved=0, fragmentCount=0, passthroughCount=0)")
         return@synchronized newState
         }
     }

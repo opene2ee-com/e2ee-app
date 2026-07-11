@@ -4086,6 +4086,198 @@ def check_vpn_service_passthrough_count_invariant_v36() -> list[str]:
     return findings
 
 
+def check_manifest_change_network_state_v37() -> list[str]:
+    """Sprint 11.0U: AndroidManifest.xml declares
+    android.permission.CHANGE_NETWORK_STATE (S94).
+
+    Owner 20:13 root cause confirmed: the
+    Sprint 11.0S-DNS `checkPrivateDnsAndBindToVpn`
+    (S91) called
+    `ConnectivityManager.bindProcessToNetwork(
+    network)`. On OnePlus 9 Pro Android 14 this
+    call throws
+    `SecurityException: was not granted
+    android.permission.CHANGE_NETWORK_STATE,
+    android.permission.WRITE_SETTINGS` and the
+    bind silently fails. The user sees "VPN
+    active, internet OK, but DNS still bypassed
+    by Private DNS" because the cleartext DNS
+    queries from the VPN process go through the
+    system Private DNS instead of the VPN
+    tunnel.
+
+    11.0U fix: add
+    `<uses-permission android:name="android.
+    permission.CHANGE_NETWORK_STATE" />` to
+    `AndroidManifest.xml`. The permission is a
+    `normal` permission (auto-granted at install
+    time, no runtime prompt needed). The
+    `WRITE_SETTINGS` permission is NOT needed
+    (the Sprint 11.0S-DNS `bindProcessToNetwork`
+    call only requires `CHANGE_NETWORK_STATE`).
+
+    The check requires ONE token in
+    `AndroidManifest.xml` (comment-stripped):
+      1. `<uses-permission android:name="android
+         .permission.CHANGE_NETWORK_STATE" />`
+         literal (or `CHANGE_NETWORK_STATE`
+         substring).
+
+    Missing this re-opens the Owner 20:13
+    "SecurityException: was not granted
+    android.permission.CHANGE_NETWORK_STATE"
+    regression (Sprint 11.0S-DNS S91 silently
+    fails).
+    """
+    import re
+    findings = []
+    manifest_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "AndroidManifest.xml"
+    )
+    if not manifest_path.exists():
+        findings.append(
+            "S94 AndroidManifest.xml: file missing."
+        )
+        return findings
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S94 AndroidManifest.xml: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    if "CHANGE_NETWORK_STATE" not in text:
+        findings.append(
+            "S94 AndroidManifest.xml: missing "
+            "`android.permission.CHANGE_NETWORK_STATE` "
+            "uses-permission. Sprint 11.0U invariant - "
+            "this permission is required by "
+            "`ConnectivityManager.bindProcessToNetwork(network)` "
+            "(called from Sprint 11.0S-DNS S91 "
+            "`checkPrivateDnsAndBindToVpn`). Without the "
+            "permission, the system throws "
+            "`SecurityException: was not granted "
+            "android.permission.CHANGE_NETWORK_STATE` and the "
+            "bind silently fails. Add the uses-permission "
+            "to AndroidManifest.xml."
+        )
+    return findings
+
+
+def check_stop_capture_ring_clear_invariant_v38() -> list[str]:
+    """Sprint 11.0V: OpenE2eeVpnService.kt stopCapture()
+    clears the bounded ring buffer and resets the
+    per-session counters in BOTH branches (S95).
+
+    Owner 20:19 root cause confirmed: after the user
+    disconnects the VPN via the "Oturumu Bitir" button
+    (Sprint 11.0R) or the system toggle, the Dart
+    `_onPacketsSampled` callback was still firing
+    with stale samples. `getSampledPackets()` returned
+    10 packets (the last `SAMPLING_CAP_PACKETS` from
+    the previous session), the `poolProvider`
+    `paketSayisi` was bumped, and the UI counter
+    appeared to grow AFTER the VPN was stopped. The
+    Owner saw the counter go from 0 -> 10 -> 20 ->
+    30 even though `state` was `STOPPED`.
+
+    11.0V fix: in `stopCapture(graceful: Boolean)`,
+    call `synchronized(ringLock) { ring.clear() }`
+    AND `packetsObserved.set(0)` in BOTH branches:
+      * The already-idle early-return branch
+        (when `!running.get() && tunInterface == null`).
+      * The normal teardown branch (after
+        `stopDrainLoop()`, before `flushTelemetry()`).
+
+    Also reset the per-session passthrough and
+    fragment counters (Sprint 11.0P/11.0T invariant -
+    these are per-session, not global, so they should
+    reset on stop, not just on start).
+
+    The check requires the following tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `synchronized(ringLock) { ring.clear() }`
+         literal present AT LEAST 2 TIMES (once per
+         branch).
+      2. `packetsObserved.set(0)` literal present
+         AT LEAST 3 TIMES total (1 in startCapture
+         for the per-session reset, 1 in each of the
+         2 stopCapture branches for the stale-ring
+         reset).
+
+    Missing the ring.clear or packetsObserved.set(0)
+    in either branch re-opens the Owner 20:19
+    "getSampledPackets returns 10 packets after VPN
+    stop" regression (the UI counter would keep
+    growing from the previous session's stale ring
+    data).
+    """
+    import re
+    findings = []
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not service_path.exists():
+        findings.append(
+            "S95 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S95 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    # Strip Kotlin line comments and block comments
+    # to avoid false positives on commented-out code.
+    stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    stripped = re.sub(r"//[^\n]*", "", stripped)
+    ring_clear_count = stripped.count(
+        "synchronized(ringLock) { ring.clear() }"
+    )
+    if ring_clear_count < 2:
+        findings.append(
+            "S95 OpenE2eeVpnService.kt: "
+            "`synchronized(ringLock) { ring.clear() }` "
+            "literal appears " + str(ring_clear_count) +
+            " time(s) (need >=2 - once in the already-idle "
+            "early-return branch AND once in the normal "
+            "teardown branch of `stopCapture`). Sprint "
+            "11.0V invariant - the bounded queue must be "
+            "cleared on BOTH stop paths so the NEXT session "
+            "starts with an empty ring (Owner 20:19 "
+            "regression: getSampledPackets returned 10 "
+            "stale packets after VPN stop)."
+        )
+    # Total packetsObserved.set(0) count: need
+    # >= 3 (1 in startCapture + 1 in already-idle
+    # branch + 1 in normal teardown branch).
+    packets_set_zero_count = stripped.count(
+        "packetsObserved.set(0)"
+    )
+    if packets_set_zero_count < 3:
+        findings.append(
+            "S95 OpenE2eeVpnService.kt: "
+            "`packetsObserved.set(0)` literal appears "
+            + str(packets_set_zero_count) + " time(s) "
+            "(need >=3 - 1 in startCapture for the per-session "
+            "reset, AND 1 in each of the 2 stopCapture "
+            "branches for the stale-ring reset). Sprint "
+            "11.0V invariant - the per-session counter "
+            "must be reset to 0 on BOTH stop paths."
+        )
+    return findings
+
+
+
+
+
 
 
 
@@ -6732,7 +6924,11 @@ def check_vpn_service_packets_observed_increment_invariant_v27() -> list[str]:
                     "non-null, not at function entry or in a "
                     "guard branch."
                 )
-    # 3. packetsObserved.set( allowed ONLY in startCapture.
+    # 3. packetsObserved.set( allowed in startCapture AND
+    #    stopCapture (Sprint 11.0V added the stopCapture
+    #    reset to fix the Owner 20:19 stale-ring regression).
+    #    Disallowed in onRevoke / onStartCommand / etc -
+    #    those would clobber a real in-flight count.
     set_matches = list(re.finditer(
         r"packetsObserved\s*\.\s*set\s*\(", code
     ))
@@ -6745,15 +6941,18 @@ def check_vpn_service_packets_observed_increment_invariant_v27() -> list[str]:
             else:
                 break
         func_name = func_match.group(1) if func_match else "<unknown>"
-        if func_name != "startCapture":
+        if func_name not in ("startCapture", "stopCapture"):
             line_no = code[:sm_pos].count("\n") + 1
             findings.append(
                 "S84 OpenE2eeVpnService.kt: packetsObserved.set( "
                 "call at line " + str(line_no) + " is in "
-                + func_name + ", NOT in startCapture. Sprint 11.0M "
-                "invariant - the reset-to-0 MUST happen only in "
-                "startCapture, not in stopCapture / onRevoke / "
-                "onStartCommand (those would clobber a real count)."
+                + func_name + ", NOT in startCapture / stopCapture. "
+                "Sprint 11.0M + 11.0V invariant - the reset-to-0 "
+                "MUST happen in startCapture (session start) OR "
+                "in stopCapture (session end, to clear stale "
+                "ring state per Owner 20:19), NOT in onRevoke / "
+                "onStartCommand (those would clobber a real "
+                "in-flight count)."
             )
     # 4. Anti-pattern guard: NO string-form increment
     #    packetsObserved.set(packetsObserved.get() + 1).
@@ -7234,6 +7433,18 @@ def main() -> int:
         all_findings.extend(s93_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt has passthroughCount AtomicLong + per-write increment + pfd.fileDescriptor.valid check + catch(Throwable) Log.e + DNS UDP 53 detection - regression guard for OnePlus 9 Pro 'passthrough not actually writing' symptom - Sprint 11.0T S93")
+
+    s94_findings = check_manifest_change_network_state_v37()
+    if s94_findings:
+        all_findings.extend(s94_findings)
+    else:
+        print("PASS: AndroidManifest.xml declares android.permission.CHANGE_NETWORK_STATE - regression guard for Owner 20:13 'bindProcessToNetwork SecurityException' symptom - Sprint 11.0U S94")
+
+    s95_findings = check_stop_capture_ring_clear_invariant_v38()
+    if s95_findings:
+        all_findings.extend(s95_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt stopCapture has ring.clear + packetsObserved.set(0) in BOTH already-idle and normal teardown branches - regression guard for Owner 20:19 'getSampledPackets returns 10 packets after VPN stop' symptom - Sprint 11.0V S95")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()

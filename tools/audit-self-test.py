@@ -21,6 +21,8 @@ check_oturumu_bitir_full_state_reset_v33 (S89),
 check_dns_private_dns_conflict_v34 (S91),
 check_notification_chronometer_autostop_v35 (S92),
 check_vpn_service_passthrough_count_invariant_v36 (S93),
+check_manifest_change_network_state_v37 (S94),
+check_stop_capture_ring_clear_invariant_v38 (S95),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -170,12 +172,12 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 142 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 145 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
 1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
 1 from S88 + 1 from S89 + 1 from S91 + 1 from S92 +
-1 from S93).
+1 from S93 + 1 from S94 + 1 from S95).
 Sprint 11.0Q adds 1 new selftest case for S88 (2-level
 VPN disconnect fallback: .stop with 3s timeout +
 MainActivity.disconnectVpn hard-stop) — the
@@ -879,6 +881,84 @@ def run_s28_check(pool_provider_text):
         is_mock = cb_name in ("_mockTick", "_tick", "advance", "fakeTick")
         if is_mock or (not is_real_api and cb_name != "?"):
             findings.append("S28 fail (mock Timer.periodic callback " + cb_name + ")")
+    return findings
+
+
+def run_s94_check(android_manifest_text):
+    """Sprint 11.0U: AndroidManifest.xml declares
+    android.permission.CHANGE_NETWORK_STATE (S94).
+
+    Owner 20:13 logcat:
+    `checkPrivateDnsAndBindToVpn failed: was not
+    granted android.permission.CHANGE_NETWORK_STATE`.
+    `ConnectivityManager.bindProcessToNetwork` (S91
+    S91) requires this permission. Without it the
+    bind silently fails and the cleartext DNS goes
+    through the system Private DNS instead of the
+    VPN tunnel.
+
+    This check asserts the S94 invariant on
+    AndroidManifest.xml: the literal
+    `CHANGE_NETWORK_STATE` is present in a
+    `<uses-permission>` line.
+    """
+    findings = []
+    if android_manifest_text is None:
+        findings.append("S94 fail (AndroidManifest.xml missing)")
+        return findings
+    if "CHANGE_NETWORK_STATE" not in android_manifest_text:
+        findings.append("S94 fail (CHANGE_NETWORK_STATE permission missing)")
+    return findings
+
+
+def run_s95_check(opene2ee_vpn_service_text):
+    """Sprint 11.0V: OpenE2eeVpnService.kt stopCapture
+    has ring.clear + packetsObserved.set(0) in BOTH
+    branches (S95).
+
+    Owner 20:19 symptom: after VPN stop,
+    getSampledPackets() returns 10 stale packets
+    (the last SAMPLING_CAP_PACKETS from the previous
+    session). Dart poolProvider bumps paketSayisi
+    from those 10 packets, the UI counter grows
+    from 0 -> 10 -> 20 -> 30 even though state is
+    STOPPED.
+
+    This check asserts the S95 invariant on
+    OpenE2eeVpnService.kt: the literal
+    `synchronized(ringLock) { ring.clear() }` appears
+    >= 2 times (once per branch) AND
+    `packetsObserved.set(0)` appears >= 3 times
+    (1 in startCapture + 1 in each stopCapture
+    branch).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S95 fail (OpenE2eeVpnService.kt text missing)")
+        return findings
+    stripped = re.sub(
+        r"/\*.*?\*/", "", opene2ee_vpn_service_text, flags=re.DOTALL
+    )
+    stripped = re.sub(r"//[^\n]*", "", stripped)
+    ring_clear_count = stripped.count(
+        "synchronized(ringLock) { ring.clear() }"
+    )
+    if ring_clear_count < 2:
+        findings.append(
+            "S95 fail (ring.clear() appears "
+            + str(ring_clear_count)
+            + " time(s), need >= 2 - one in already-idle branch + one in normal teardown branch)"
+        )
+    packets_set_zero_count = stripped.count(
+        "packetsObserved.set(0)"
+    )
+    if packets_set_zero_count < 3:
+        findings.append(
+            "S95 fail (packetsObserved.set(0) appears "
+            + str(packets_set_zero_count)
+            + " time(s), need >= 3 - 1 in startCapture + 1 in each stopCapture branch)"
+        )
     return findings
 
 
@@ -5069,11 +5149,82 @@ cases = [
          "                if (!writeOk) break\n"
          "            }\n"
          "        } catch (t: Throwable) {}\n"
+          "    }\n"
+          "    private fun per1000Breadcrumb() {\n"
+          "        Log.d(TAG, \"startReaderThread: MTU=1400, \" +\n"
+          "            \"passthroughCount=${passthroughCount.get()}, \" +\n"
+          "            \"passthroughGap=${packetsObserved.get() - passthroughCount.get()}\")\n"
+          "    }\n"
+          "}\n",
+      ),
+      []),
+    # S94 case (Sprint 11.0U - new) - AndroidManifest
+    # .xml declares android.permission.CHANGE_NETWORK_STATE
+    # (required by ConnectivityManager.bindProcessToNetwork
+    # called from Sprint 11.0S-DNS S91). Regression
+    # guard for the Owner 20:13 "SecurityException: was
+    # not granted android.permission.CHANGE_NETWORK_STATE"
+    # symptom. Total selftest: 142 + 1 = 143.
+    ("S94 PASS (AndroidManifest.xml declares android.permission.CHANGE_NETWORK_STATE - required by bindProcessToNetwork)",
+     run_s94_check, (
+         "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n"
+         "    <uses-permission android:name=\"android.permission.INTERNET\" />\n"
+         "    <uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\" />\n"
+         "    <uses-permission android:name=\"android.permission.CHANGE_NETWORK_STATE\" />\n"
+         "    <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />\n"
+         "    <application>\n"
+         "        <service android:name=\".vpn.OpenE2eeVpnService\"\n"
+         "                 android:permission=\"android.permission.BIND_VPN_SERVICE\" />\n"
+         "    </application>\n"
+         "</manifest>\n",
+     ), []),
+    # S95 case (Sprint 11.0V - new) - OpenE2eeVpnService
+    # .kt stopCapture() has ring.clear() + packetsObserved
+    # .set(0) in BOTH the already-idle early-return branch
+    # AND the normal teardown branch. Regression guard
+    # for the Owner 20:19 "getSampledPackets returns 10
+    # packets after VPN stop" symptom (Dart poolProvider
+    # bumped UI counter from stale ring data). Total
+    # selftest: 143 + 1 = 144.
+    ("S95 PASS (OpenE2eeVpnService.kt stopCapture has ring.clear + packetsObserved.set(0) in BOTH already-idle and normal teardown branches - regression guard for stale ring after VPN stop)",
+     run_s95_check, (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import java.util.concurrent.atomic.AtomicLong\n"
+         "class OpenE2eeVpnService {\n"
+         "    private val packetsObserved = AtomicLong(0)\n"
+         "    private val ipFragmentCount = AtomicLong(0)\n"
+         "    private val passthroughCount = AtomicLong(0)\n"
+         "    private val ring = ArrayDeque<ByteArray>()\n"
+         "    private val ringLock = Any()\n"
+         "    private fun startCapture(): State {\n"
+         "        packetsObserved.set(0)\n"
+         "        ipFragmentCount.set(0)\n"
+         "        passthroughCount.set(0)\n"
+         "        synchronized(ringLock) { ring.clear() }\n"
+         "        return State.RUNNING\n"
          "    }\n"
-         "    private fun per1000Breadcrumb() {\n"
-         "        Log.d(TAG, \"startReaderThread: MTU=1400, \" +\n"
-         "            \"passthroughCount=${passthroughCount.get()}, \" +\n"
-         "            \"passthroughGap=${packetsObserved.get() - passthroughCount.get()}\")\n"
+         "    private fun stopCapture(graceful: Boolean) {\n"
+         "        return synchronized(stateLock) {\n"
+         "            val prevState = state\n"
+         "            if (!running.get() && tunInterface == null) {\n"
+         "                state = State.STOPPED\n"
+         "                synchronized(ringLock) { ring.clear() }\n"
+         "                packetsObserved.set(0)\n"
+         "                return@synchronized state\n"
+         "            }\n"
+         "            state = State.DRAINING\n"
+         "            tunInterface?.let { it.close() }\n"
+         "            readerThread?.join(1_000L)\n"
+         "            stopDrainLoop()\n"
+         "            synchronized(ringLock) { ring.clear() }\n"
+         "            packetsObserved.set(0)\n"
+         "            ipFragmentCount.set(0)\n"
+         "            passthroughCount.set(0)\n"
+         "            flushTelemetry()\n"
+         "            running.set(false)\n"
+         "            state = State.STOPPED\n"
+         "            return@synchronized state\n"
+         "        }\n"
          "    }\n"
          "}\n",
      ), []),
@@ -5198,16 +5349,36 @@ cases = [
          "    final status = await _vpn.status();\n"
          "    final lastError = status['lastError'] as String?;\n"
          "    if (lastError != null && lastError.startsWith('private_dns_active')) {\n"
-         "      ScaffoldMessenger.of(context).showSnackBar(\n"
-         "        SnackBar(\n"
-         "          content: Text('Chrome: chrome://flags/#dns-httpssvc > Disabled. '),\n"
-         "        ),\n"
-         "      );\n"
-          "    }\n"
-          "  }\n"
-          "}\n",
+          "      ScaffoldMessenger.of(context).showSnackBar(\n"
+          "        SnackBar(\n"
+          "          content: Text('Chrome: chrome://flags/#dns-httpssvc > Disabled. '),\n"
+          "        ),\n"
+          "      );\n"
+           "    }\n"
+           "  }\n"
+           "}\n",
       ),
       []),
+    # S94 case (Sprint 11.0U - new) - AndroidManifest
+    # .xml declares android.permission.CHANGE_NETWORK_STATE
+    # (required by ConnectivityManager.bindProcessToNetwork
+    # called from Sprint 11.0S-DNS S91). Regression
+    # guard for the Owner 20:13 "SecurityException: was
+    # not granted android.permission.CHANGE_NETWORK_STATE"
+    # symptom. Total selftest: 142 + 1 = 143.
+    ("S94 PASS (AndroidManifest.xml declares android.permission.CHANGE_NETWORK_STATE - required by bindProcessToNetwork)",
+     run_s94_check, (
+         "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n"
+         "    <uses-permission android:name=\"android.permission.INTERNET\" />\n"
+         "    <uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\" />\n"
+         "    <uses-permission android:name=\"android.permission.CHANGE_NETWORK_STATE\" />\n"
+         "    <uses-permission android:name=\"android.permission.FOREGROUND_SERVICE\" />\n"
+         "    <application>\n"
+         "        <service android:name=\".vpn.OpenE2eeVpnService\"\n"
+         "                 android:permission=\"android.permission.BIND_VPN_SERVICE\" />\n"
+         "    </application>\n"
+         "</manifest>\n",
+     ), []),
     # S92 case (Sprint 11.0S-EXTRA - new) - OpenE2eeVpnService
     # .kt has setUsesChronometer + setWhen + mainHandler
     # .postDelayed auto-stop. Regression guard for the
