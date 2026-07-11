@@ -67,7 +67,19 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
       vsync: this,
       duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
-    _vpn = VpnService();
+    // Sprint 11.0G — VpnService is now a true singleton.
+    // Pre-11.0G, `VpnService()` was a factory that returned the
+    // singleton, but the call shape was indistinguishable from
+    // a fresh-instance ctor. Owner 11:25 confirmation: the
+    // active_pool_screen `_vpn = VpnService()` call site kept
+    // the regression surface opaque — the singleton was in
+    // place but review couldn't tell if the call was
+    // intentional. 11.0G removes the public `VpnService()`
+    // factory; only `VpnService.instance` (singleton) and
+    // `VpnService.forTesting(...)` (test override) remain
+    // callable. This call site now uses the explicit
+    // `VpnService.instance` form.
+    _vpn = VpnService.instance;
     // Sprint 11.0B — the orchestrator + the WebRTC service share
     // the lifecycle of the screen. S60 invariant: the status
     // pill mirrors `webrtcService.stateStream`; the orchestrator

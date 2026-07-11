@@ -57,8 +57,9 @@ check_backend_summary_stats_shape_v17 (S71),
 check_score_calculator_unit_tests_v17 (S72),
 check_main_activity_owns_vpn_channel_v18 (S73),
 check_vpn_service_startforeground_within_5s_v19 (S74),
-check_vpn_service_log_d_breadcrumbs_v20 (S75), and
-check_vpn_service_dart_singleton_v20 (S76).
+check_vpn_service_log_d_breadcrumbs_v20 (S75),
+check_vpn_service_dart_singleton_v20 (S76), and
+check_active_pool_screen_ui_propagation_v21 (S77).
 
 (Sprint 11.0F adds 2 new selftest cases for S75 + S76 —
 the OnePlus 9 Pro Senaryo D regression guards. S75
@@ -158,11 +159,13 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 129 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 130 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
-S76). Sprint 11.0F adds 1 new selftest case for S76
-(VpnService singleton) — S75 (Log.d breadcrumbs) is a
-production-audit-only check, following the S58 pattern.
+S76 + 1 from S77). Sprint 11.0G adds 1 new selftest case for
+S77 (active_pool_screen UI propagation) and tightens S76
+(removes the 11.0F back-compat `factory VpnService()` — the
+fixture is updated to the 11.0G form). S75 remains a
+production-audit-only check (S58 pattern).
 """
 import sys
 from pathlib import Path
@@ -2111,7 +2114,7 @@ def run_s75_check(opene2ee_vpn_service_text):
 
 
 def run_s76_check(vpn_service_text):
-    """Sprint 11.0F: vpn_service.dart exposes VpnService as a Dart singleton (S76).
+    """Sprint 11.0F + 11.0G: vpn_service.dart exposes VpnService as a Dart singleton (S76).
 
     Regression guard for the OnePlus 9 Pro Senaryo D
     regression. Pre-11.0F, every call site constructed a
@@ -2128,28 +2131,44 @@ def run_s76_check(vpn_service_text):
     notification was visible, but the UI's state pill stayed
     on "HAZIRLANIYOR" and the packet count never incremented.
 
-    The fix: VpnService is a singleton. The check requires
-    THREE tokens:
-      1. `VpnService._internal(` — the private constructor
-         used by the static `_instance` initializer.
+    Sprint 11.0G tightening (Owner 11:25): the 11.0F form
+    had `factory VpnService() => _instance` (a back-compat
+    factory that still allowed `VpnService()` to be called
+    from external code). The factory masked the singleton
+    requirement at code-review time. 11.0G REMOVES the
+    public factory — only `VpnService.instance` (singleton)
+    and `VpnService.forTesting(...)` (test override) remain
+    callable. The check requires:
+      1. A private constructor (`VpnService._internal(` or
+         `VpnService._(`) — used by the static `_instance`
+         initializer.
       2. `static VpnService get instance` (or
          `static final VpnService _instance`) — the
          singleton accessor.
-      3. `factory VpnService()` — the backwards-compatible
-         factory that returns the singleton (so existing
-         call sites don't need to change).
+      3. The default `VpnService()` ctor MUST NOT be present
+         in non-comment form (the 11.0F back-compat factory
+         is REMOVED in 11.0G — a stray `VpnService()` is a
+         hard compile error).
     """
+    import re
     findings = []
     if vpn_service_text is None:
         findings.append("S76 vpn_service.dart: file missing")
         return findings
-    if "VpnService._internal(" not in vpn_service_text:
+    # 1. Private constructor.
+    has_private_ctor = bool(re.search(
+        r"VpnService\._(?:internal)?\s*\(",
+        vpn_service_text,
+    ))
+    if not has_private_ctor:
         findings.append(
-            "S76 vpn_service.dart: missing `VpnService._internal(` "
-            "private constructor. Sprint 11.0F invariant — the "
-            "singleton pattern requires a private constructor to "
-            "prevent external instantiation."
+            "S76 vpn_service.dart: missing the private constructor "
+            "(`VpnService._internal(` or `VpnService._(`). "
+            "Sprint 11.0F + 11.0G invariant — the singleton "
+            "pattern requires a private constructor to prevent "
+            "external instantiation."
         )
+    # 2. Singleton accessor.
     has_getter = "static VpnService get instance" in vpn_service_text
     has_field = "static final VpnService _instance" in vpn_service_text
     if not (has_getter or has_field):
@@ -2161,12 +2180,112 @@ def run_s76_check(vpn_service_text):
             "call site constructs a fresh VpnService and the "
             "OnePlus 9 Pro Senaryo D regression returns."
         )
-    if "factory VpnService()" not in vpn_service_text:
+    # 3. 11.0G — NO public `VpnService()` ctor. Comment-strip
+    #    first, then look for `VpnService()` (just parens, no
+    #    name) which would be the removed form.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", vpn_service_text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    bad_default_ctor = re.search(r"VpnService\s*\(\s*\)", code)
+    if bad_default_ctor:
         findings.append(
-            "S76 vpn_service.dart: missing `factory VpnService()` "
-            "backwards-compatible factory. Sprint 11.0F invariant — "
-            "the existing call sites use the default `VpnService()` "
-            "form; the factory makes that form return the singleton."
+            "S76 vpn_service.dart: contains a public `VpnService()` "
+            "default constructor. Sprint 11.0G invariant — the "
+            "11.0F back-compat factory was REMOVED so a stray "
+            "`VpnService()` call is a hard error. Use "
+            "`VpnService.instance` (singleton) or "
+            "`VpnService.forTesting(...)` (test override). The "
+            "11.0F factory masked the Senaryo D regression because "
+            "it made `VpnService()` indistinguishable from a "
+            "fresh-instance ctor at code-review time."
+        )
+    return findings
+
+
+def run_s77_check(active_pool_screen_text):
+    """Sprint 11.0G: active_pool_screen.dart UI propagation invariant (S77).
+
+    The 11.0F singleton fix was necessary but not sufficient
+    — Owner 11:25 confirmed: the singleton IS in place but
+    the UI's state pill still doesn't update because the
+    screen's `_vpn = VpnService()` call site kept the
+    regression surface opaque (the call shape `VpnService()`
+    was indistinguishable from a fresh-instance ctor at
+    code-review time, even though the factory returned the
+    singleton).
+
+    The 11.0G fix has THREE parts:
+      1. The default `VpnService()` ctor is REMOVED —
+         only `VpnService.instance` and
+         `VpnService.forTesting(...)` remain callable
+         (enforced by S76).
+      2. The `active_pool_screen.dart` uses the explicit
+         `VpnService.instance` form (NOT `VpnService()`).
+      3. The state stream subscription calls `setState(...)`
+         inside the `listen` callback so the widget rebuilds
+         on every state transition.
+
+    This check (S77) verifies parts 2 and 3:
+      1. The screen class extends `ConsumerStatefulWidget`.
+      2. The screen has a `stateStream.listen` subscription
+         whose callback body contains `setState(`.
+      3. The screen references `VpnService.instance` (or
+         `vpnServiceProvider`).
+    """
+    findings = []
+    if active_pool_screen_text is None:
+        findings.append("S77 active_pool_screen.dart: file missing")
+        return findings
+    if "ConsumerStatefulWidget" not in active_pool_screen_text:
+        findings.append(
+            "S77 active_pool_screen.dart: does NOT extend "
+            "`ConsumerStatefulWidget`. Sprint 11.0G invariant — "
+            "the screen must be a `ConsumerStatefulWidget` so "
+            "`ref.watch(vpnServiceProvider)` and "
+            "`ref.listen(...)` are available."
+        )
+    if "stateStream.listen" not in active_pool_screen_text and \
+            ".stateStream.listen" not in active_pool_screen_text:
+        findings.append(
+            "S77 active_pool_screen.dart: missing `stateStream.listen` "
+            "subscription. Sprint 11.0G invariant — the screen "
+            "must subscribe to the singleton's `stateStream` so "
+            "VpnLifecycleState transitions propagate to the UI."
+        )
+    if "setState(" not in active_pool_screen_text:
+        findings.append(
+            "S77 active_pool_screen.dart: no `setState(` call "
+            "found. Sprint 11.0G invariant — the `stateStream"
+            ".listen` callback must call `setState(` so the "
+            "widget rebuilds on VPN state transitions."
+        )
+    if "VpnService.instance" not in active_pool_screen_text and \
+            "vpnServiceProvider" not in active_pool_screen_text:
+        findings.append(
+            "S77 active_pool_screen.dart: does NOT reference "
+            "`VpnService.instance` (or `vpnServiceProvider`). "
+            "Sprint 11.0G invariant — the screen must use the "
+            "explicit singleton form. Pre-11.0G, the "
+            "`VpnService()` call site kept the regression surface "
+            "opaque (Owner 11:25 confirmation)."
         )
     return findings
 
@@ -3599,14 +3718,56 @@ case_s76_vpn_service_dart_pass = (
     "import 'dart:async';\n"
     "import 'package:flutter/services.dart';\n"
     "class VpnService {\n"
-    "    VpnService._internal({MethodChannel? channel})\n"
+    "    // Sprint 11.0G — private ctor (`VpnService._`). The 11.0F\n"
+    "    // form was `VpnService._internal(...)`; both are\n"
+    "    // accepted by the audit. The key invariant is that\n"
+    "    // the default `VpnService()` is NOT callable.\n"
+    "    VpnService._({MethodChannel? channel})\n"
     "        : _channel = channel ?? const MethodChannel('opene2ee/vpn') {\n"
     "        _channel.setMethodCallHandler(_onNativeCall);\n"
     "    }\n"
-    "    static final VpnService _instance = VpnService._internal();\n"
+    "    static final VpnService _instance = VpnService._();\n"
     "    static VpnService get instance => _instance;\n"
-    "    factory VpnService() => _instance;\n"
+    "    // NO `factory VpnService()` — the 11.0F back-compat\n"
+    "    // factory was REMOVED in 11.0G. The default ctor\n"
+    "    // doesn't exist; only `VpnService.instance` and\n"
+    "    // `VpnService.forTesting(...)` are callable.\n"
+    "    factory VpnService.forTesting({MethodChannel? channel}) =>\n"
+    "        VpnService._(channel: channel);\n"
     "    final MethodChannel _channel;\n"
+    "}\n"
+)
+
+# S77 (Sprint 11.0G): active_pool_screen.dart UI propagation
+# invariant — ConsumerStatefulWidget + stateStream.listen with
+# setState + VpnService.instance reference. The PASS case
+# mirrors the post-11.0G production file.
+case_s77_active_pool_screen_pass = (
+    "import 'package:flutter/material.dart';\n"
+    "import 'package:flutter_riverpod/flutter_riverpod.dart';\n"
+    "import 'package:opene2ee/services/vpn_service.dart';\n"
+    "\n"
+    "class ActivePoolScreen extends ConsumerStatefulWidget {\n"
+    "  const ActivePoolScreen({super.key});\n"
+    "  @override\n"
+    "  ConsumerState<ActivePoolScreen> createState() =>\n"
+    "      _ActivePoolScreenState();\n"
+    "}\n"
+    "\n"
+    "class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen> {\n"
+    "  VpnLifecycleState _vpnState = VpnLifecycleState.idle;\n"
+    "  @override\n"
+    "  void initState() {\n"
+    "    super.initState();\n"
+    "    // Sprint 11.0G — explicit `VpnService.instance` form\n"
+    "    // (NOT `VpnService()`).\n"
+    "    final vpn = VpnService.instance;\n"
+    "    vpn.stateStream.listen((s) {\n"
+    "      if (mounted) {\n"
+    "        setState(() => _vpnState = s);\n"
+    "      }\n"
+    "    });\n"
+    "  }\n"
     "}\n"
 )
 
@@ -3995,8 +4156,20 @@ cases = [
     # selftest case would only re-test the count, which the
     # production audit already does). Total selftest count:
     # 128 + 1 = 129 (matches the brief target).
-    ("S76 PASS (vpn_service.dart exposes VpnService as a Dart singleton — regression guard for OnePlus 9 Pro Senaryo D widget-rebuild race)",
+    ("S76 PASS (vpn_service.dart exposes VpnService as a Dart singleton — regression guard for OnePlus 9 Pro Senaryo D widget-rebuild race; 11.0G form: no public VpnService() ctor, only VpnService._ + VpnService.instance + VpnService.forTesting)",
      run_s76_check, (case_s76_vpn_service_dart_pass,), []),
+    # S77 case (Sprint 11.0G - new) — active_pool_screen.dart
+    # UI propagation invariant (ConsumerStatefulWidget +
+    # stateStream.listen with setState + VpnService.instance
+    # reference). Regression guard for the OnePlus 9 Pro
+    # "singleton in place but UI doesn't update" symptom
+    # (Owner 11:25 report). Sprint 11.0F added the singleton
+    # but the `_vpn = VpnService()` call site kept the
+    # regression surface opaque; 11.0G tightens with this
+    # S77 UI-propagation invariant. Total selftest: 128 +
+    # 1 = 130 (was 129 before Sprint 11.0G, +1 new case).
+    ("S77 PASS (active_pool_screen.dart is ConsumerStatefulWidget + stateStream.listen with setState + VpnService.instance reference — regression guard for OnePlus 9 Pro UI propagation gap)",
+     run_s77_check, (case_s77_active_pool_screen_pass,), []),
   ]   # noqa: E501
 
 failed = []

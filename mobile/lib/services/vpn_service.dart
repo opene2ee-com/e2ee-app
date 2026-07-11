@@ -47,6 +47,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'packet_parser.dart';
 
@@ -83,12 +84,22 @@ enum VpnLifecycleState {
 }
 
 class VpnService {
-  /// Sprint 11.0F — private constructor used by the singleton
-  /// initializer and the test factory. The default `VpnService()`
-  /// factory (below) returns the singleton; tests use
-  /// `VpnService.forTesting(channel: ...)` to inject a custom
-  /// [MethodChannel].
-  VpnService._internal({MethodChannel? channel})
+  /// Sprint 11.0F + 11.0G — the ONLY constructor. `_` prefix
+  /// makes the ctor private to this library, so external code
+  /// CANNOT call `VpnService()` to construct a fresh instance.
+  /// All app code MUST use [VpnService.instance] (singleton
+  /// accessor) or [VpnService.forTesting] (test-only factory).
+  ///
+  /// Sprint 11.0G — REMOVED the `factory VpnService() => _instance`
+  /// back-compat factory that 11.0F added. Reason: that factory
+  /// STILL made `VpnService()` callable from external code,
+  /// which masked the singleton requirement. If a future
+  /// refactor accidentally wrote `_vpn = VpnService()` somewhere,
+  /// it would compile AND return the singleton — but the
+  /// explicit `VpnService.instance` form forces the developer
+  /// to think about the singleton pattern. The compile error
+  /// on `VpnService()` is the regression guard (S76 + S77).
+  VpnService._({MethodChannel? channel})
       : _channel = channel ?? const MethodChannel('opene2ee/vpn') {
     // Sprint 11.0A — wire the `onPacketsSampled` event stream.
     // S47 invariant: the `MethodChannel` is the same channel the
@@ -100,8 +111,7 @@ class VpnService {
     _channel.setMethodCallHandler(_onNativeCall);
   }
 
-  /// Sprint 11.0F — singleton accessor. All app code uses this
-  /// (the default `VpnService()` factory below delegates here).
+  /// Sprint 11.0F — singleton accessor. All app code uses this.
   /// Pre-11.0F, each call site constructed a fresh
   /// [VpnService], which:
   ///   (a) replaced the previous `_channel.setMethodCallHandler`
@@ -119,29 +129,24 @@ class VpnService {
   /// singleton: ONE [VpnService] for the whole app, with ONE
   /// shared `_packetCtrl` / `_stateCtrl` and ONE channel
   /// handler.
-  static final VpnService _instance = VpnService._internal();
+  static final VpnService _instance = VpnService._();
 
-  /// Sprint 11.0F — explicit singleton accessor. The
-  /// `VpnService()` factory below is the preferred call site
-  /// for app code (backwards compatible); `VpnService.instance`
-  /// is the canonical form for tests + future call sites.
+  /// Sprint 11.0F + 11.0G — THE canonical singleton accessor.
+  /// All app code MUST use `VpnService.instance` (NOT
+  /// `VpnService()`). The previous 11.0F `factory VpnService()`
+  /// back-compat alias is REMOVED in 11.0G because it allowed
+  /// non-singleton call patterns to slip through code review
+  /// (Owner 11:25 confirmation: the active_pool_screen
+  /// `_vpn = VpnService()` call site kept the regression
+  /// surface opaque even after the singleton was in place).
   static VpnService get instance => _instance;
 
-  /// Sprint 11.0F — backwards-compatible factory that returns
-  /// the singleton. Pre-11.0F, `VpnService()` constructed a
-  /// fresh instance; that call shape is preserved (the factory
-  /// here returns the singleton), so existing call sites in
-  /// `pool_provider.dart`, `active_pool_screen.dart`, and the
-  /// Sprint 11.0D handler test don't have to change.
-  factory VpnService() => _instance;
-
-  /// Sprint 11.0F — test-only factory for injecting a custom
-  /// [MethodChannel] (e.g. `TestDefaultBinaryMessengerBinding`
+  /// Sprint 11.0F + 11.0G — test-only factory for injecting a
+  /// custom [MethodChannel] (e.g. `TestDefaultBinaryMessengerBinding`
   /// mock). Returns a fresh instance — do NOT use from app
-  /// code, use the default [VpnService] constructor (singleton)
-  /// or [VpnService.instance] instead.
+  /// code, use [VpnService.instance] instead.
   factory VpnService.forTesting({MethodChannel? channel}) =>
-      VpnService._internal(channel: channel);
+      VpnService._(channel: channel);
 
   final MethodChannel _channel;
   final StreamController<List<SampledPacket>> _packetCtrl =
@@ -384,3 +389,31 @@ class VpnService {
     }
   }
 }
+
+/// Sprint 11.0G — Riverpod Provider for the [VpnService] singleton.
+///
+/// The previous 11.0F form (`_vpn = VpnService();`) still
+/// allowed fresh-instance call patterns to slip through code
+/// review (Owner 11:25 confirmation: the active_pool_screen
+/// `_vpn = VpnService()` call site kept the regression
+/// surface opaque even after the singleton was in place).
+/// Sprint 11.0G tightens this with TWO changes:
+///
+///   1. The default `VpnService()` ctor is REMOVED — only
+///      [VpnService.instance] and [VpnService.forTesting]
+///      remain callable. `VpnService()` from any call site is
+///      a compile error.
+///   2. App code uses `ref.watch(vpnServiceProvider)` instead
+///      of `VpnService.instance` directly. The Riverpod
+///      provider is the canonical DI surface — it surfaces
+///      the singleton to the widget tree, makes the
+///      dependency explicit, and is the natural place to add
+///      test overrides (`overrides: [vpnServiceProvider.overrideWithValue(mockVpn)]`).
+///
+/// The provider simply returns [VpnService.instance] (the
+/// same singleton); it's a thin Riverpod-shaped wrapper, not
+/// a new lifecycle. We do NOT use `Provider.autoDispose` —
+/// the singleton lives for the lifetime of the app.
+final vpnServiceProvider = Provider<VpnService>((ref) {
+  return VpnService.instance;
+});

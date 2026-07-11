@@ -220,7 +220,20 @@ class PoolNotifier extends StateNotifier<PoolState> {
     AuthService? auth,
   })  : _matcher = matcher ??
             P2PMatcher(apiKey: kApiKey, auth: auth),
-        _vpn = vpnService ?? VpnService(),
+        // Sprint 11.0G — `_vpn` now uses the canonical singleton
+        // accessor. Pre-11.0G, `VpnService()` was a factory that
+        // returned the singleton, but the call site form
+        // (`VpnService()`) was indistinguishable from a fresh
+        // instance constructor — so code review couldn't tell
+        // whether the call was intentional singleton access or
+        // an accidental fresh instance. The 11.0G fix removes
+        // the public `VpnService()` factory entirely; only
+        // `VpnService.instance` (singleton) and
+        // `VpnService.forTesting(...)` (test override) remain
+        // callable. The DI surface for production code is
+        // [vpnServiceProvider] — tests can override it via
+        // `ProviderScope(overrides: [vpnServiceProvider.overrideWithValue(mock)])`.
+        _vpn = vpnService ?? VpnService.instance,
         // Sprint 10.1C — use the build-time DEVICE_ID as the
         // session id so the backend BFF correlates every
         // telemetry + matcher poll with the same device
