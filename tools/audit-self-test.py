@@ -64,6 +64,7 @@ check_vpn_service_state_transition_breadcrumbs_v22 (S78),
 check_vpn_service_addroute_bad_address_v23 (S79), and
 check_vpn_service_tun_passthrough_v24 (S80).
 Sprint 11.0K adds `check_vpn_service_ui_thread_push_v26` (S82).
+Sprint 11.0M adds `check_vpn_service_packets_observed_increment_invariant_v27` (S84).
 
 (Sprint 11.0F adds 2 new selftest cases for S75 + S76 —
 the OnePlus 9 Pro Senaryo D regression guards. S75
@@ -163,17 +164,17 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 134 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 135 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
-1 from S82).
-Sprint 11.0K adds 1 new selftest case for S82 (UI-thread
-push — `methodChannel?.invokeMethod` dispatched via
-`Handler(Looper.getMainLooper()).post { ... }`) — the
-OnePlus 9 Pro "VPN active, internet working, UI never
-updates" regression guard (Owner 12:31 report, PID 4244,
-real root cause: `@UiThread` violation on the
-`opene2ee-vpn-drain` ScheduledExecutor worker thread).
+1 from S82 + 1 from S84).
+Sprint 11.0M adds 1 new selftest case for S84 (packets
+Observed increment invariant — `packetsObserved.increment
+AndGet` appears EXACTLY ONCE, inside `startReaderThread` read
+branch, NOT in onStartCommand / onRevoke / stopCapture) —
+the OnePlus 9 Pro "fake capture" regression guard (Owner
+13:08 accusation, PID 4244, real root cause was passthrough
+broken in 11.0L, the 258 counter was always real).
 Sprint 11.0J adds 1 new selftest case for S80 (TUN
 passthrough — `output.write(buf, 0, n)` after
 `input.read(buf)`) — the OnePlus 9 Pro "VPN active,
@@ -2712,6 +2713,121 @@ def run_s82_check(opene2ee_vpn_service_text):
     return findings
 
 
+
+def run_s84_check(opene2ee_vpn_service_text):
+    """Sprint 11.0M: OpenE2eeVpnService.kt packetsObserved
+    increment invariant (S84).
+
+    Owner 13:08 fake-capture accusation: the Owner thought
+    the 258-packet counter was a fake increment because
+    Chrome and WhatsApp have no internet. But the counter
+    IS real - the TUN reader does receive bytes from the
+    kernel; the passthrough write is what was broken (11.0L
+    passthrough write fails on OnePlus 9 Pro OxygenOS).
+
+    This check grep-asserts the invariant:
+      1. EXACTLY ONE packetsObserved.incrementAndGet() call
+         site in the file.
+      2. That site is inside startReaderThread.
+      3. The site is preceded by extractMetadata (within 600
+         chars), confirming it's in the post-extract read
+         branch.
+      4. packetsObserved.set( is allowed ONLY in startCapture
+         (the reset-on-new-session site).
+      5. NO anti-pattern packetsObserved.set(
+         packetsObserved.get() + 1).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S84 OpenE2eeVpnService.kt: file missing")
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # 1. EXACTLY ONE increment site.
+    increment_matches = list(re.finditer(
+        r"packetsObserved\s*\.\s*incrementAndGet\s*\(\s*\)", code
+    ))
+    if len(increment_matches) == 0:
+        findings.append(
+            "S84 OpenE2eeVpnService.kt: ZERO packetsObserved."
+            "incrementAndGet call sites. Sprint 11.0M invariant."
+        )
+    elif len(increment_matches) > 1:
+        findings.append(
+            "S84 OpenE2eeVpnService.kt: " + str(len(increment_matches)) +
+            " packetsObserved.incrementAndGet call site(s); expected 1."
+        )
+    else:
+        inc_pos = increment_matches[0].start()
+        func_match = None
+        for fm in re.finditer(r"(?:private\s+)?fun\s+(\w+)\s*\(", code):
+            if fm.start() < inc_pos:
+                func_match = fm
+            else:
+                break
+        if func_match is None or func_match.group(1) != "startReaderThread":
+            func_name = func_match.group(1) if func_match else "<unknown>"
+            findings.append(
+                "S84 OpenE2eeVpnService.kt: increment in " + func_name +
+                ", NOT in startReaderThread."
+            )
+        else:
+            window_before = code[max(0, inc_pos - 600):inc_pos]
+            if "extractMetadata" not in window_before:
+                findings.append(
+                    "S84 OpenE2eeVpnService.kt: increment in startReaderThread "
+                    "but NOT preceded by extractMetadata."
+                )
+    # 3. set() allowed ONLY in startCapture.
+    set_matches = list(re.finditer(
+        r"packetsObserved\s*\.\s*set\s*\(", code
+    ))
+    for sm in set_matches:
+        sm_pos = sm.start()
+        func_match = None
+        for fm in re.finditer(r"(?:private\s+)?fun\s+(\w+)\s*\(", code):
+            if fm.start() < sm_pos:
+                func_match = fm
+            else:
+                break
+        func_name = func_match.group(1) if func_match else "<unknown>"
+        if func_name != "startCapture":
+            findings.append(
+                "S84 OpenE2eeVpnService.kt: packetsObserved.set( in " +
+                func_name + ", NOT in startCapture."
+            )
+    # 4. Anti-pattern guard.
+    if re.search(
+        r"packetsObserved\s*\.\s*set\s*\(\s*packetsObserved\s*\.\s*get\s*\(\s*\)\s*\+\s*1",
+        code,
+    ):
+        findings.append(
+            "S84 OpenE2eeVpnService.kt: contains fake-increment anti-pattern."
+        )
+    return findings
+
+
+
 # ─── Test cases ──────────────────────────────────────────────────
 
 # Case 0: fully-valid file (post-Sprint 9.6.6 fix) — expect 0 findings.
@@ -4300,6 +4416,36 @@ case_s82_vpn_service_ui_thread_push_pass = (
     "    }\n"
     "}\n"
 )
+# S84 (Sprint 11.0M) - OpenE2eeVpnService.kt packetsObserved
+# increment invariant. Regression guard for OnePlus 9 Pro
+# Sprint 11.0A-11.0L fake-capture accusation (Owner 13:08).
+case_s84_packets_observed_increment_invariant_pass = (
+    "package com.opene2ee.opene2ee.vpn\n"
+    "import java.util.concurrent.atomic.AtomicInteger\n"
+    "class OpenE2eeVpnService {\n"
+    "    private val packetsObserved = AtomicInteger(0)\n"
+    "    private fun startCapture() {\n"
+    "        packetsObserved.set(0)\n"
+    "    }\n"
+    "    private fun startReaderThread() {\n"
+    "        try {\n"
+    "            while (true) {\n"
+    "                val n = input.read(buf)\n"
+    "                if (n <= 0) break\n"
+    "                val meta = extractMetadata(packet, n)\n"
+    "                if (meta != null) {\n"
+    "                    synchronized(ringLock) {\n"
+    "                        ring.addLast(meta)\n"
+    "                    }\n"
+    "                    packetsObserved.incrementAndGet()\n"
+    "                }\n"
+    "            }\n"
+    "        } catch (t: Throwable) {}\n"
+    "    }\n"
+    "}\n"
+)
+
+
 
 cases = [
     # S1-S5 cases (Sprint 9.6.6 — regression guard: must still pass)
@@ -4741,6 +4887,16 @@ cases = [
     # + 1 = 134 (was 133 before Sprint 11.0K).
     ("S82 PASS (OpenE2eeVpnService.kt dispatches MethodChannel.invokeMethod to the Android main looper via Handler(Looper.getMainLooper()).post { ... } — regression guard for OnePlus 9 Pro @UiThread violation on PacketDrain worker)",
      run_s82_check, (case_s82_vpn_service_ui_thread_push_pass,), []),
+    # S84 case (Sprint 11.0M - new) - OpenE2eeVpnService.kt
+    # has packetsObserved.incrementAndGet EXACTLY ONCE,
+    # inside startReaderThread read branch (post
+    # extractMetadata), with packetsObserved.set( allowed
+    # only in startCapture. Regression guard for the
+    # OnePlus 9 Pro Sprint 11.0A-11.0L fake-capture
+    # accusation (Owner 13:08, PID 4244). Total selftest:
+    # 134 + 1 = 135.
+    ("S84 PASS (OpenE2eeVpnService.kt has packetsObserved.incrementAndGet EXACTLY ONCE in startReaderThread read branch - regression guard for OnePlus 9 Pro fake-capture accusation)",
+     run_s84_check, (case_s84_packets_observed_increment_invariant_pass,), []),
   ]   # noqa: E501
 
 failed = []

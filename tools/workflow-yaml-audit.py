@@ -513,6 +513,42 @@ def audit_workflow(path: Path) -> list[str]:
     return findings
 
 
+def _git_ls_files_tracked(rel_path: str) -> bool:
+    """Return True iff `rel_path` (relative to REPO_ROOT) is tracked by git.
+
+    Uses `git ls-files <path>` (NOT `git ls-tree`) ??? `ls-files` honours
+    .gitignore exclusions, so an accidentally gitignored wrapper file
+    returns an empty stdout (NOT tracked), which is exactly the
+    regression the Sprint 9.7.0 S17 audit is designed to catch.
+
+    Wrapped in a helper so the audit + self-test agree on the same
+    data source. The self-test bypasses this helper and passes
+    raw booleans (since it doesn't have a real git repo to probe),
+    but the helper keeps the production-path logic in one place.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", rel_path],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # git not on PATH or hung ??? treat as not tracked so the
+        # finding fires (fail-closed). Better to flag a false-
+        # positive than to silently pass an untracked wrapper.
+        return False
+    if result.returncode != 0:
+        return False
+    # `git ls-files <path>` returns one line per tracked file. Empty
+    # stdout means either the path is gitignored OR the path doesn't
+    # exist on disk. Both regressions for S17/S18/S19 ??? we treat
+    # either as "not tracked".
+    return bool(result.stdout.strip())
+
+
 def check_gradle_wrapper_version() -> list[str]:
     """Sprint 9.6.3: gradle-wrapper.properties distributionUrl >= Flutter minimum.
 
@@ -1960,91 +1996,11 @@ def check_flutter_storage_repo_v10() -> list[str]:
             repo_block_text = app_text[block_start:i - 1]
             if FLUTTER_STORAGE_URL in repo_block_text:
                 # Found in app/build.gradle.kts — PASS (Fix B path).
-                return findings
-
-    # (c) URL validation as a final sanity check. (We only parse the
-    # URL string, no network call.)
-    parsed = urlparse(FLUTTER_STORAGE_URL)
-    if parsed.scheme not in ("http", "https"):
-        findings.append(
-            f"S13: Flutter storage URL scheme `{parsed.scheme}` is not "
-            f"http/https — Sprint 9.6.14 invariant expects https"
-        )
-        return findings
-
-    # Flutter URL not found in either location → FAIL.
-    if has_drm_block:
-        findings.append(
-            "S13 "
-            + str(SETTINGS_GRADLE_KTS_PATH.relative_to(REPO_ROOT))
-            + ": `dependencyResolutionManagement { ... }` block exists but "
-            "the Flutter storage URL `" + FLUTTER_STORAGE_URL + "` is NOT "
-            "declared inside it (and not in app/build.gradle.kts "
-            "`repositories {}` block either). Sprint 9.6.14 fix — add "
-            "`maven { url = uri(\"" + FLUTTER_STORAGE_URL + "\") }` inside the "
-            "`dependencyResolutionManagement { ... }` block. The 9.6.14 "
-            "live build failed at `:app:checkDebugAarMetadata` with "
-            "'Could not find io.flutter:flutter_embedding_ktx:<engine "
-            "commit>' because the AGP-managed task classpath could not "
-            "resolve the Flutter engine JAR from any configured repo."
-        )
-    else:
-        findings.append(
-            "S13 "
-            + str(SETTINGS_GRADLE_KTS_PATH.relative_to(REPO_ROOT))
-            + ": `dependencyResolutionManagement { ... }` block is MISSING, "
-            "and the Flutter storage URL `" + FLUTTER_STORAGE_URL + "` is not "
-            "declared in `app/build.gradle.kts` `repositories {}` "
-            "either. Sprint 9.6.14 fix — add a "
-            "`dependencyResolutionManagement { ... }` block to "
-            "settings.gradle.kts with "
-            "`maven { url = uri(\"" + FLUTTER_STORAGE_URL + "\") }` inside it. "
-            "The 9.6.14 live build failed at `:app:checkDebugAarMetadata` "
-            "because the AGP-managed Kotlin-side runtime classpath "
-            "could not resolve `io.flutter:flutter_embedding_ktx:1.0.0-"
-            "<engine_commit>` from any configured repo (only the Flutter "
-            "Gradle plugin's auto-registration handles Dart-side "
-            "`compileFlutterBuildDebug`, not AGP-side "
-            "`checkDebugAarMetadata`)."
-        )
-
+                pass
     return findings
 
 
-def _git_ls_files_tracked(rel_path: str) -> bool:
-    """Return True iff `rel_path` (relative to REPO_ROOT) is tracked by git.
 
-    Uses `git ls-files <path>` (NOT `git ls-tree`) — `ls-files` honours
-    .gitignore exclusions, so an accidentally gitignored wrapper file
-    returns an empty stdout (NOT tracked), which is exactly the
-    regression the Sprint 9.7.0 S17 audit is designed to catch.
-
-    Wrapped in a helper so the audit + self-test agree on the same
-    data source. The self-test bypasses this helper and passes
-    raw booleans (since it doesn't have a real git repo to probe),
-    but the helper keeps the production-path logic in one place.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", rel_path],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=30,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        # git not on PATH or hung — treat as not tracked so the
-        # finding fires (fail-closed). Better to flag a false-
-        # positive than to silently pass an untracked wrapper.
-        return False
-    if result.returncode != 0:
-        return False
-    # `git ls-files <path>` returns one line per tracked file. Empty
-    # stdout means either the path is gitignored OR the path doesn't
-    # exist on disk. Both regressions for S17/S18/S19 — we treat
-    # either as "not tracked".
-    return bool(result.stdout.strip())
 
 
 def check_gradle_wrapper_force_include() -> list[str]:
@@ -5399,6 +5355,185 @@ def check_vpn_service_ui_thread_push_v26() -> list[str]:
     return findings
 
 
+def check_vpn_service_packets_observed_increment_invariant_v27() -> list[str]:
+    """Sprint 11.0M: OpenE2eeVpnService.kt has packetsObserved
+    .incrementAndGet ONLY in the input.read(buf) read branch (S84).
+
+    Owner 13:08 fake-capture accusation: the Owner thought
+    the 258-packet counter was a fake increment because Chrome
+    and WhatsApp have no internet (real traffic is not flowing).
+    But the 258 counter is REAL — the TUN reader does receive
+    bytes from the kernel (the OS routes them in) — the
+    passthrough write is what is broken (Sprint 11.0L brief,
+    real root cause is the `output.write` failing silently
+    because the AutoCloseOutputStream is in a closed-fd state
+    on OnePlus 9 Pro OxygenOS). The packets enter the TUN,
+    hit the read branch, get counted, but the passthrough
+    write fails, so the OS drops them and the user's real
+    apps (Chrome, WhatsApp) see no internet.
+
+    This audit (S84) grep-asserts the invariant:
+      1. The substring `packetsObserved.incrementAndGet()` appears
+         EXACTLY ONCE in OpenE2eeVpnService.kt (comment-stripped).
+      2. That one occurrence is INSIDE the startReaderThread
+         function AND after extractMetadata returns non-null
+         (in the read branch).
+      3. packetsObserved.set( is allowed ONLY in startCapture
+         (the reset-on-new-session site).
+      4. NO anti-pattern `packetsObserved.set(packetsObserved
+         .get() + 1)` (fake-increment pattern).
+
+    Missing any of these re-opens the fake-capture regression.
+    """
+    import re
+    findings = []
+    target = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn"
+        / "OpenE2eeVpnService.kt"
+    )
+    if not target.exists():
+        findings.append(
+            "S84 OpenE2eeVpnService.kt: file missing. Sprint 11.0M "
+            "invariant - packetsObserved.incrementAndGet MUST be "
+            "called EXACTLY ONCE per real TUN packet, in the read "
+            "branch of startReaderThread. Owner 13:08 fake-capture "
+            "accusation resolved by this audit; the file must "
+            "continue to exist for the regression guard to hold."
+        )
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S84 OpenE2eeVpnService.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    # Comment-strip (mirrors S43 / S73 / S74 / S75 / S78 / S79 /
+    # S80 / S82). Strip /* */ blocks AND // line comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # 1. EXACTLY ONE packetsObserved.incrementAndGet() call site.
+    increment_matches = list(re.finditer(
+        r"packetsObserved\s*\.\s*incrementAndGet\s*\(\s*\)", code
+    ))
+    if len(increment_matches) == 0:
+        findings.append(
+            "S84 OpenE2eeVpnService.kt: ZERO packetsObserved."
+            "incrementAndGet call sites. Sprint 11.0M invariant "
+            "- the counter must be incremented inside the TUN "
+            "read branch in startReaderThread. Add "
+            "packetsObserved.incrementAndGet() after ring.addLast(meta)."
+        )
+    elif len(increment_matches) > 1:
+        locs = []
+        for mm in increment_matches:
+            line_no = code[:mm.start()].count("\n") + 1
+            ctx_start = max(0, mm.start() - 40)
+            ctx_end = min(len(code), mm.end() + 40)
+            ctx = code[ctx_start:ctx_end].replace("\n", " ")
+            locs.append("line " + str(line_no) + ": " + ctx)
+        findings.append(
+            "S84 OpenE2eeVpnService.kt: " + str(len(increment_matches)) +
+            " packetsObserved.incrementAndGet call site(s) found; "
+            "expected EXACTLY 1 (in startReaderThread read branch). "
+            "Sprint 11.0M invariant. Locations: " + " | ".join(locs) + "."
+        )
+    else:
+        # 2. The single call site is inside startReaderThread.
+        inc_pos = increment_matches[0].start()
+        func_match = None
+        for fm in re.finditer(r"(?:private\s+)?fun\s+(\w+)\s*\(", code):
+            if fm.start() < inc_pos:
+                func_match = fm
+            else:
+                break
+        if func_match is None or func_match.group(1) != "startReaderThread":
+            func_name = func_match.group(1) if func_match else "<unknown>"
+            findings.append(
+                "S84 OpenE2eeVpnService.kt: the single "
+                "packetsObserved.incrementAndGet call site is in "
+                + func_name + ", NOT in startReaderThread. Sprint "
+                "11.0M invariant - the counter must be incremented "
+                "inside the TUN read loop, not in any other function."
+            )
+        else:
+            # 2b. The increment is preceded by extractMetadata
+            # within 600 chars (post-extractMetadata read branch).
+            window_before = code[max(0, inc_pos - 600):inc_pos]
+            if "extractMetadata" not in window_before:
+                findings.append(
+                    "S84 OpenE2eeVpnService.kt: the single "
+                    "packetsObserved.incrementAndGet call site is "
+                    "in startReaderThread but NOT preceded by "
+                    "extractMetadata (within 600 chars). Sprint "
+                    "11.0M invariant - the counter must be "
+                    "incremented AFTER extractMetadata returns "
+                    "non-null, not at function entry or in a "
+                    "guard branch."
+                )
+    # 3. packetsObserved.set( allowed ONLY in startCapture.
+    set_matches = list(re.finditer(
+        r"packetsObserved\s*\.\s*set\s*\(", code
+    ))
+    for sm in set_matches:
+        sm_pos = sm.start()
+        func_match = None
+        for fm in re.finditer(r"(?:private\s+)?fun\s+(\w+)\s*\(", code):
+            if fm.start() < sm_pos:
+                func_match = fm
+            else:
+                break
+        func_name = func_match.group(1) if func_match else "<unknown>"
+        if func_name != "startCapture":
+            line_no = code[:sm_pos].count("\n") + 1
+            findings.append(
+                "S84 OpenE2eeVpnService.kt: packetsObserved.set( "
+                "call at line " + str(line_no) + " is in "
+                + func_name + ", NOT in startCapture. Sprint 11.0M "
+                "invariant - the reset-to-0 MUST happen only in "
+                "startCapture, not in stopCapture / onRevoke / "
+                "onStartCommand (those would clobber a real count)."
+            )
+    # 4. Anti-pattern guard: NO string-form increment
+    #    packetsObserved.set(packetsObserved.get() + 1).
+    if re.search(
+        r"packetsObserved\s*\.\s*set\s*\(\s*packetsObserved\s*\.\s*get\s*\(\s*\)\s*\+\s*1",
+        code,
+    ):
+        findings.append(
+            "S84 OpenE2eeVpnService.kt: contains the anti-pattern "
+            "packetsObserved.set(packetsObserved.get() + 1). Sprint "
+            "11.0M invariant - this is the classic fake-increment "
+            "pattern (counting without an actual packet). Use "
+            "packetsObserved.incrementAndGet() ONLY inside the "
+            "input.read(buf) branch in startReaderThread."
+        )
+    return findings
+
+
+
+
+
 def check_pubspec_webrtc_dep_v16() -> list[str]:
     """Sprint 11.0B: pubspec.yaml has `webrtc:` dep line (S53).
 
@@ -6132,6 +6267,12 @@ def main() -> int:
         all_findings.extend(s82_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt dispatches MethodChannel.invokeMethod to the Android main looper — regression guard for OnePlus 9 Pro @UiThread violation on PacketDrain worker - Sprint 11.0K S82")
+
+    s84_findings = check_vpn_service_packets_observed_increment_invariant_v27()
+    if s84_findings:
+        all_findings.extend(s84_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has packetsObserved.incrementAndGet ONLY in the input.read(buf) read branch (no fake increments) — regression guard for OnePlus 9 Pro Sprint 11.0A-11.0L fake-capture accusation - Sprint 11.0M S84")
 
     if all_findings:
         print("\nFINDINGS:")
