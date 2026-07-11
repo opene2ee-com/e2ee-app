@@ -60,8 +60,9 @@ check_vpn_service_startforeground_within_5s_v19 (S74),
 check_vpn_service_log_d_breadcrumbs_v20 (S75),
 check_vpn_service_dart_singleton_v20 (S76),
 check_active_pool_screen_ui_propagation_v21 (S77),
-check_vpn_service_state_transition_breadcrumbs_v22 (S78), and
-check_vpn_service_addroute_bad_address_v23 (S79).
+check_vpn_service_state_transition_breadcrumbs_v22 (S78),
+check_vpn_service_addroute_bad_address_v23 (S79), and
+check_vpn_service_tun_passthrough_v24 (S80).
 
 (Sprint 11.0F adds 2 new selftest cases for S75 + S76 —
 the OnePlus 9 Pro Senaryo D regression guards. S75
@@ -161,14 +162,14 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 132 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 133 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
-S76 + 1 from S77 + 1 from S78 + 1 from S79). Sprint 11.0I
-adds 1 new selftest case for S79 (VpnService.Builder.addRoute
-Bad address fix) — the OnePlus 9 Pro
-`IllegalArgumentException: Bad address` regression guard
-(9.7.0 mirror bug). S75 remains a production-audit-only
-check (S58 pattern).
+S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80).
+Sprint 11.0J adds 1 new selftest case for S80 (TUN
+passthrough — `output.write(buf, 0, n)` after
+`input.read(buf)`) — the OnePlus 9 Pro "VPN active,
+internet dead" regression guard. S75 remains a
+production-audit-only check (S58 pattern).
 """
 import sys
 from pathlib import Path
@@ -2480,6 +2481,91 @@ def run_s79_check(opene2ee_vpn_service_text):
     return findings
 
 
+def run_s80_check(opene2ee_vpn_service_text):
+    """Sprint 11.0J: OpenE2eeVpnService.kt has TUN passthrough (S80).
+
+    Regression guard for the OnePlus 9 Pro "VPN active,
+    internet dead" symptom (Owner 12:14 report, PID 4244).
+    The 11.0I fix (`.addRoute("0.0.0.0", 0)`) is necessary
+    but not sufficient — without the TUN passthrough pattern
+    in the reader thread, the kernel drops all packets the
+    TUN consumes from the input side. Result: the OS
+    triggers a system-side `onRevoke()` after 5-30s.
+
+    The check requires THREE tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `output.write(buf` OR `tunOutput.write(` OR
+         `tun.write(` literal present.
+      2. `input.read(buf` OR `tunInput.read` OR
+         `tun.read` literal present.
+      3. NO `protect(Socket())` no-op (anti-pattern guard).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S80 OpenE2eeVpnService.kt: file missing")
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # 1. Passthrough write call.
+    has_passthrough = (
+        "output.write(buf" in code or
+        "tunOutput.write(" in code or
+        "tun.write(" in code
+    )
+    if not has_passthrough:
+        findings.append(
+            "S80 OpenE2eeVpnService.kt: missing the TUN passthrough "
+            "write call (`output.write(buf, 0, n)`). Sprint 11.0J "
+            "invariant — the reader thread MUST write each packet "
+            "back to the TUN output stream so the kernel routes "
+            "the packet out the device's real NIC."
+        )
+    # 2. Input read call.
+    has_input_read = (
+        "input.read(buf" in code or
+        "tunInput.read(" in code or
+        "tun.read(" in code
+    )
+    if not has_input_read:
+        findings.append(
+            "S80 OpenE2eeVpnService.kt: missing the TUN input "
+            "read call (`input.read(buf)`). Sprint 11.0J "
+            "invariant — the reader thread must read from the "
+            "TUN input stream before writing back to the output."
+        )
+    # 3. Anti-pattern guard: `protect(Socket())` no-op.
+    has_protect_socket = re.search(r"protect\s*\(\s*Socket\s*\(\s*\)", code)
+    if has_protect_socket:
+        findings.append(
+            "S80 OpenE2eeVpnService.kt: contains the anti-pattern "
+            "`protect(Socket())` — the 11.0A-era misconception. "
+            "Sprint 11.0J invariant — `protect(Socket)` marks a "
+            "SOCKET as 'not VPN-routed' but the VPN reader thread "
+            "has no socket to protect. Use `output.write(buf, 0, n)`."
+        )
+    return findings
+
+
 # ─── Test cases ──────────────────────────────────────────────────
 
 # Case 0: fully-valid file (post-Sprint 9.6.6 fix) — expect 0 findings.
@@ -4007,6 +4093,32 @@ case_s79_vpn_service_addroute_pass = (
     "}\n"
 )
 
+# S80 (Sprint 11.0J): OpenE2eeVpnService.kt has TUN passthrough
+# (output.write(buf, 0, n) after input.read(buf)) AND no
+# anti-pattern `protect(Socket())` no-op. The PASS case mirrors
+# the post-11.0J production file.
+case_s80_vpn_service_tun_passthrough_pass = (
+    "package com.opene2ee.opene2ee.vpn\n"
+    "import android.os.ParcelFileDescriptor\n"
+    "class OpenE2eeVpnService {\n"
+    "    private fun startReaderThread(pfd: ParcelFileDescriptor) {\n"
+    "        val input = ParcelFileDescriptor.AutoCloseInputStream(pfd)\n"
+    "        val output = ParcelFileDescriptor.AutoCloseOutputStream(pfd)\n"
+    "        val thread = Thread({\n"
+    "            val buf = ByteArray(1500)\n"
+    "            while (true) {\n"
+    "                val n = input.read(buf)\n"
+    "                if (n <= 0) break\n"
+    "                // Sprint 11.0J — TRANSPARENT PASSTHROUGH.\n"
+    "                output.write(buf, 0, n)\n"
+    "                output.flush()\n"
+    "            }\n"
+    "        }, \"opene2ee-vpn-reader\")\n"
+    "        thread.start()\n"
+    "    }\n"
+    "}\n"
+)
+
 cases = [
     # S1-S5 cases (Sprint 9.6.6 — regression guard: must still pass)
     ("PASS (Sprint 9.6.6 fixed file)", run_check, (case_pass,), []),
@@ -4427,6 +4539,15 @@ cases = [
     # selftest: 131 + 1 = 132 (was 131 before Sprint 11.0I).
     ("S79 PASS (OpenE2eeVpnService.kt has correct addRoute (0.0.0.0/0) and NO addRoute(TUN_ADDRESS) anti-pattern — regression guard for OnePlus 9 Pro IllegalArgumentException: Bad address (Sprint 9.7.0 mirror bug))",
      run_s79_check, (case_s79_vpn_service_addroute_pass,), []),
+    # S80 case (Sprint 11.0J - new) — OpenE2eeVpnService.kt
+    # has TUN passthrough (`output.write(buf, 0, n)` after
+    # `input.read(buf)`) AND no anti-pattern
+    # `protect(Socket())` no-op. Regression guard for the
+    # OnePlus 9 Pro "VPN active, internet dead" symptom
+    # (Owner 12:14 report, PID 4244). Total selftest: 132
+    # + 1 = 133 (was 132 before Sprint 11.0J).
+    ("S80 PASS (OpenE2eeVpnService.kt has TUN passthrough (output.write after input.read) and NO protect(Socket()) no-op — regression guard for OnePlus 9 Pro internet-killed-by-default-route)",
+     run_s80_check, (case_s80_vpn_service_tun_passthrough_pass,), []),
   ]   # noqa: E501
 
 failed = []

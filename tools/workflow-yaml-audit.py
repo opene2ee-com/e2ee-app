@@ -5092,6 +5092,145 @@ def check_vpn_service_addroute_bad_address_v23() -> list[str]:
     return findings
 
 
+def check_vpn_service_tun_passthrough_v24() -> list[str]:
+    """Sprint 11.0J: OpenE2eeVpnService.kt has TUN passthrough (S80).
+
+    Regression guard for the OnePlus 9 Pro "VPN active,
+    internet dead" symptom (Owner 12:14 report, PID 4244,
+    `state: DRAINING, packetsObserved: 0, ringSize: 0`).
+    The 11.0I fix (`.addRoute("0.0.0.0", 0)`) is necessary
+    but not sufficient — without the TUN passthrough pattern
+    in the reader thread, the kernel drops all packets the
+    TUN consumes from the input side. Result: the OS
+    triggers a system-side `onRevoke()` after 5-30s (no
+    network connectivity = VPN profile is "misbehaving")
+    and the `state: DRAINING` regression returns.
+
+    The fundamental VPN capture pattern:
+      1. Open TUN INPUT stream (read packets from kernel).
+      2. Open TUN OUTPUT stream (write packets back to kernel).
+      3. For each packet: read from input, capture metadata
+         for analytics, WRITE THE SAME BYTES BACK to the
+         output (the kernel then routes the packet out the
+         device's real NIC).
+
+    Pre-11.0J, the code opened ONLY the input stream and
+    never wrote to the output. The `protect(Socket)` call
+    was a no-op (it marks a SOCKET as "not VPN-routed" but
+    there's no socket to route). 11.0J removes the bogus
+    `protect()` call and adds the `output.write(buf, 0, n)`
+    passthrough.
+
+    The check requires THREE tokens in `OpenE2eeVpnService.kt`
+    (comment-stripped):
+      1. `output.write(buf` OR `tunOutput.write(` OR
+         `tun.write(` literal present — the passthrough
+         write call.
+      2. `input.read(buf` OR `tunInput.read` OR
+         `tun.read` literal present — the input read call.
+      3. The `protect(Socket)` no-op is NOT present in
+         non-comment form (anti-pattern guard — the
+         11.0A-era `protect()` was a misconception).
+
+    Missing any of these re-opens the "internet dead"
+    regression.
+    """
+    import re
+    findings = []
+    target = REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / \
+        "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn" / "OpenE2eeVpnService.kt"
+    if not target.exists():
+        findings.append(
+            "S80 OpenE2eeVpnService.kt: file missing. Sprint 11.0J "
+            "invariant — the TUN reader thread must WRITE each "
+            "packet back to the TUN output stream (`output.write(buf, 0, n)`) "
+            "so the kernel routes the user's traffic to the real "
+            "NIC. Without this, the user's internet is dead (5-30s "
+            "later the OS triggers `onRevoke()` and the service "
+            "transitions to `state: DRAINING`)."
+        )
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S80 OpenE2eeVpnService.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    # Comment-strip (mirrors S43 / S73 / S74 / S75 / S78 / S79).
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # 1. Passthrough write call (output.write(buf OR
+    #    tunOutput.write( OR tun.write().
+    has_passthrough = (
+        "output.write(buf" in code or
+        "tunOutput.write(" in code or
+        "tun.write(" in code
+    )
+    if not has_passthrough:
+        findings.append(
+            "S80 OpenE2eeVpnService.kt: missing the TUN passthrough "
+            "write call (`output.write(buf, 0, n)` or "
+            "`tunOutput.write(buf, 0, n)`). Sprint 11.0J invariant — "
+            "the reader thread MUST write each packet back to the "
+            "TUN output stream so the kernel routes the packet "
+            "out the device's real NIC. Without this, `.addRoute("
+            "\"0.0.0.0\", 0)` (S79) drops all the user's internet "
+            "traffic and the OS triggers `onRevoke()` 5-30s later."
+        )
+    # 2. Input read call (input.read(buf OR tunInput.read( OR
+    #    tun.read().
+    has_input_read = (
+        "input.read(buf" in code or
+        "tunInput.read(" in code or
+        "tun.read(" in code
+    )
+    if not has_input_read:
+        findings.append(
+            "S80 OpenE2eeVpnService.kt: missing the TUN input "
+            "read call (`input.read(buf)` or `tunInput.read(...)`). "
+            "Sprint 11.0J invariant — the reader thread must "
+            "read from the TUN input stream before writing back "
+            "to the output."
+        )
+    # 3. Anti-pattern guard: `protect(Socket)` no-op MUST NOT be
+    #    present. The 11.0A-era `protect(Socket)` was a
+    #    misconception (protects a SOCKET from VPN, not packets).
+    #    A regression that re-introduces it is flagged.
+    has_protect_socket = re.search(r"protect\s*\(\s*Socket\s*\(\s*\)", code)
+    if has_protect_socket:
+        findings.append(
+            "S80 OpenE2eeVpnService.kt: contains the anti-pattern "
+            "`protect(Socket())` — the 11.0A-era misconception. "
+            "Sprint 11.0J invariant — `protect(Socket)` marks a "
+            "SOCKET as 'not VPN-routed' but the VPN reader thread "
+            "has no socket to protect. The actual transparent "
+            "passthrough pattern is `output.write(buf, 0, n)` "
+            "after `input.read(buf)`. Remove the `protect(Socket())` "
+            "call."
+        )
+    return findings
+
+
 # ═══ Sprint 11.0B — M2 production audit (S53-S60) ═══
 #
 # The M2 brief specifies `webrtc: ^0.13.0+` as the dep. The
@@ -5823,6 +5962,12 @@ def main() -> int:
         all_findings.extend(s79_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt has correct addRoute (0.0.0.0/0 default route) — regression guard for OnePlus 9 Pro IllegalArgumentException: Bad address (Sprint 9.7.0 mirror bug) - Sprint 11.0I S79")
+
+    s80_findings = check_vpn_service_tun_passthrough_v24()
+    if s80_findings:
+        all_findings.extend(s80_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has tun passthrough (tunOutput.write after tunInput.read) — regression guard for OnePlus 9 Pro internet-killed-by-default-route - Sprint 11.0J S80")
 
     if all_findings:
         print("\nFINDINGS:")

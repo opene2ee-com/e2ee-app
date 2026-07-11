@@ -1071,6 +1071,15 @@ class OpenE2eeVpnService : VpnService() {
     }
 
     /**
+     * Sprint 11.0J — return the current ring size under [ringLock].
+     * Used by [PacketDrain.run] to log `ringSize` in the
+     * `deltaPerInterval` breadcrumb. Public-internal visibility
+     * so the `PacketDrain` inner class can call it.
+     */
+    internal fun synchronizedRingSizeForDrain(): Int =
+        synchronized(ringLock) { ring.size }
+
+    /**
      * Sprint 11.0A — start the 5-second scheduled drain loop. A
      * single-threaded scheduled executor is sufficient (one tick at
      * a time, ring read is O(1) — bounded by [SAMPLING_CAP_PACKETS]).
@@ -1116,7 +1125,30 @@ class OpenE2eeVpnService : VpnService() {
      * listener subscribes to.
      */
     private class PacketDrain(private val service: OpenE2eeVpnService) : Runnable {
+        /**
+         * Sprint 11.0J — `prev` counter for the
+         * `deltaPerInterval` breadcrumb. Persistent across `run()`
+         * invocations (one `PacketDrain` instance is created in
+         * `startDrainLoop` and reused for every 5s tick via
+         * `scheduleAtFixedRate`). The breadcrumb makes the
+         * passthrough regression visible: if `deltaPerInterval = 0`
+         * while `running.get() = true` and the foreground
+         * notification is visible, the reader thread is NOT
+         * draining the TUN — the passthrough is broken (the user's
+         * internet is dead).
+         */
+        private var prevPacketsObserved: Int = service.packetsObserved.get()
+
         override fun run() {
+            // Sprint 11.0J — emit the deltaPerInterval breadcrumb
+            // BEFORE the `onPacketsSampled` push so the log line is
+            // visible even if the channel push throws.
+            val currPacketsObserved = service.packetsObserved.get()
+            val delta = currPacketsObserved - prevPacketsObserved
+            prevPacketsObserved = currPacketsObserved
+            val ringSize = service.synchronizedRingSizeForDrain()
+            Log.d(TAG, "PacketDrain: tick, packetsObserved=$currPacketsObserved, " +
+                    "deltaPerInterval=$delta, ringSize=$ringSize")
             val packets: List<Map<String, Any?>> = service.snapshotRing()
             val ch = OpenE2eeVpnService.methodChannel
             if (ch == null) {
@@ -1139,11 +1171,35 @@ class OpenE2eeVpnService : VpnService() {
      * Spawn the dedicated TUN reader thread. The thread reads up to MTU-sized
      * packets in a tight loop, extracts metadata via [extractMetadata], pushes
      * a metadata entry into the ring (cap = [SAMPLING_CAP_PACKETS]), and
-     * PROTECTS the original packet via [protect] so the OS can forward it
-     * out the real network interface. Payload bytes are NEVER copied off-device.
+     * WRITES the packet back to the TUN output stream so the OS can forward
+     * it to the real network interface (transparent VPN passthrough).
+     * Payload bytes are NEVER copied off-device — only the IP/transport
+     * header fields are inspected via [extractMetadata].
+     *
+     * Sprint 11.0J — passthrough was MISSING pre-11.0J. The pre-11.0J
+     * code opened the TUN input stream, read packets, but never
+     * wrote them back. Combined with `.addRoute("0.0.0.0", 0)` (default
+     * route) this caused the OS to drop ALL the user's internet
+     * traffic after 5-30 seconds, triggering a system-side
+     * `onRevoke()` and the `state: DRAINING` regression Owner
+     * observed on PID 4244 (12:14 logcat). The fix opens BOTH the
+     * TUN input stream (read packets from kernel) AND the TUN
+     * output stream (write packets back to kernel — kernel then
+     * routes them out the real NIC) and writes the SAME bytes
+     * back to the output. S80 audit invariant: this is the
+     * load-bearing pattern.
      */
     private fun startReaderThread(pfd: ParcelFileDescriptor) {
-        val input = FileInputStream(pfd.fileDescriptor)
+        // Sprint 11.0J — `AutoCloseInputStream` /
+        // `AutoCloseOutputStream` close the underlying ParcelFileDescriptor
+        // when the stream is closed (i.e., in the `finally` block).
+        // The pre-11.0J code used `FileInputStream(pfd.fileDescriptor)`
+        // which only closed the file descriptor reference, leaking
+        // the kernel-side TUN fd across restart cycles. The
+        // `AutoClose*` variants are the canonical pattern from
+        // `VpnService.Builder.establish()` Javadoc.
+        val input = ParcelFileDescriptor.AutoCloseInputStream(pfd)
+        val output = ParcelFileDescriptor.AutoCloseOutputStream(pfd)
         val thread = Thread({
             val buf = ByteArray(TUN_MTU)
             try {
@@ -1152,9 +1208,13 @@ class OpenE2eeVpnService : VpnService() {
                         input.read(buf)
                     } catch (e: IOException) {
                         // TUN closed — normal shutdown path.
+                        Log.d(TAG, "startReaderThread: TUN input EOF / IOException, exiting reader loop")
                         break
                     }
-                    if (n <= 0) break
+                    if (n <= 0) {
+                        Log.d(TAG, "startReaderThread: read returned $n bytes, exiting reader loop")
+                        break
+                    }
                     val packet = ByteBuffer.wrap(buf, 0, n).order(ByteOrder.BIG_ENDIAN)
                     val meta = extractMetadata(packet, n)
                     if (meta != null) {
@@ -1171,34 +1231,39 @@ class OpenE2eeVpnService : VpnService() {
                             flushTelemetry()
                         }
                     }
-                    // Forward the payload to the real network. `protect()` is a
-                    // VpnService method that excludes this socket from the TUN,
-                    // so the OS sends it out the device's actual NIC. NO copy.
-                    // We don't get a return connection here; this service is
-                    // sampling-only and does not write back to the TUN.
-                    //
-                    // PR-28 originally called `protect(input.fd)` directly, but
-                    // the Android SDK exposes `protect(Socket)` /
-                    // `protect(DatagramSocket)` only — the FileDescriptor
-                    // overload was removed in API 24+. Wrap a fresh Socket so
-                    // the call resolves to the supported overload; we close the
-                    // socket immediately because we never use the connection
-                    // (only the protect() effect on the OS routing table).
-                    val protectSocket = Socket()
+                    // Sprint 11.0J — TRANSPARENT PASSTHROUGH. Write the
+                    // SAME bytes back to the TUN output stream. The
+                    // kernel then routes the packet out the device's
+                    // actual NIC (real network interface). WITHOUT this
+                    // write, the kernel drops the packet (since the
+                    // TUN consumed it from the input side) and the
+                    // user's internet is dead. Pre-11.0J, the code
+                    // called `protect(Socket)` and immediately closed
+                    // it — that protects a SOCKET from the VPN, but
+                    // there's no socket to protect here. The actual
+                    // pattern for a transparent capture VPN is to
+                    // WRITE the packet back to the TUN output. The
+                    // `protect()` call was a 11.0A-era misconception
+                    // and has been REMOVED in 11.0J.
                     try {
-                        protect(protectSocket)
-                    } finally {
-                        protectSocket.close()
+                        output.write(buf, 0, n)
+                        output.flush()
+                    } catch (e: IOException) {
+                        // TUN output closed mid-flight — common during
+                        // the Magisk Zygisk revoke path (Sprint 11.0H).
+                        // Log and exit the reader loop; the service
+                        // will tear down via `onRevoke` /
+                        // `stopCapture`.
+                        Log.w(TAG, "startReaderThread: TUN output write failed (n=$n): ${e.message}; exiting reader loop")
+                        break
                     }
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "TUN reader crashed", t)
                 lastError = "reader: ${t.javaClass.simpleName}: ${t.message}"
             } finally {
-                try {
-                    input.close()
-                } catch (_: IOException) {
-                }
+                try { input.close() } catch (_: IOException) {}
+                try { output.close() } catch (_: IOException) {}
             }
         }, "opene2ee-vpn-reader")
         thread.isDaemon = true
