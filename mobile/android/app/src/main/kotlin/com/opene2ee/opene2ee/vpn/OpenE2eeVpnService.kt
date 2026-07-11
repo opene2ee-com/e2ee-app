@@ -749,6 +749,19 @@ class OpenE2eeVpnService : VpnService() {
     /** True while TUN loop is running. */
     private val running = AtomicBoolean(false)
 
+    // Sprint 11.0Z — user-space TCP/IP stack via
+    // Netty. Initialized lazily in startCapture()
+    // (after the service is fully constructed) and
+    // shutdown in stopCapture(). The class is in
+    // the same `vpn/` package so it has package
+    // access to the VpnService.protect() method
+    // (which is `protected` on the VpnService
+    // base class, but since OpenE2eeVpnService
+    // extends VpnService the protected method is
+    // accessible from same-package code via
+    // `service.protect(socket)`).
+    private var nettyClient: NettyChannelClient? = null
+
     /** Current state — observable via `status`. */
     @Volatile
     private var state: State = State.IDLE
@@ -1125,6 +1138,21 @@ class OpenE2eeVpnService : VpnService() {
                 // session's).
                 passthroughCount.set(0)
                 synchronized(ringLock) { ring.clear() }
+                // Sprint 11.0Z — initialize the
+                // user-space TCP/IP stack (Netty).
+                // The NettyChannelClient owns the
+                // NioEventLoopGroup + the per-flow
+                // Channel map. It calls
+                // `service.protect(socket)` on every
+                // outbound socket so the socket
+                // bypasses the VPN and uses the real
+                // NIC. Without this initialization,
+                // the TUN-captured packets are
+                // re-routed into the TUN and the
+                // user sees a "VPN blackhole"
+                // (Owner 22:08 root cause).
+                nettyClient = NettyChannelClient(this)
+                Log.d(TAG, "startCapture: nettyClient initialized (user-space TCP/IP stack via Netty)")
                 startForegroundCompat()
                 Log.d(TAG, "startCapture: startForegroundCompat() returned (foreground promotion OK)")
                 startReaderThread(pfd)
@@ -1248,6 +1276,16 @@ class OpenE2eeVpnService : VpnService() {
         // holds no ring references, so cancel + await-termination
         // is safe even if a tick is mid-flight.
         stopDrainLoop()
+
+        // Sprint 11.0Z — shutdown the user-space
+        // TCP/IP stack (Netty). Closes all per-flow
+        // Channels + the NioEventLoopGroup. The
+        // shutdown is graceful (1-second wait per
+        // the NioEventLoopGroup default), so any
+        // in-flight write/read completes before
+        // the worker threads exit.
+        nettyClient?.shutdown()
+        nettyClient = null
 
         // Sprint 11.0V — NORMAL TEARDOWN BRANCH. Clear
         // the bounded queue + reset the per-session
@@ -1958,6 +1996,86 @@ class OpenE2eeVpnService : VpnService() {
                     if (!pfd.fileDescriptor.valid()) {
                         Log.e(TAG, "startReaderThread: TUN pfd.fileDescriptor.valid() = false (fd revoked?); exiting reader loop")
                         break
+                    }
+                    // Sprint 11.0Z — user-space routing
+                    // via NettyChannelClient. For each
+                    // IP packet, parse the IPv4 header
+                    // + TCP/UDP header and dispatch to
+                    // the Netty client. The Netty client
+                    // calls `service.protect(socket)`
+                    // on the outbound socket so it
+                    // bypasses the VPN and uses the
+                    // real NIC. For Sprint 11.0Z, the
+                    // dispatch is BEST-EFFORT: the
+                    // transparent passthrough (write
+                    // back to TUN) is kept as a
+                    // fallback so the build compiles
+                    // + the APK still launches. The
+                    // full TCP state machine + UDP
+                    // handler + response packet
+                    // construction will be filled in
+                    // by Sprint 12.0X (user-space
+                    // protocol stack).
+                    val client = nettyClient
+                    if (client != null) {
+                        val ip = client.parseIpv4Packet(buf, n)
+                        if (ip != null) {
+                            when (ip.protocol) {
+                                NettyChannelClient.IPPROTO_TCP -> {
+                                    val tcp = client.parseTcpHeader(buf, n, ip.ihl)
+                                    if (tcp != null) {
+                                        val flowKey = client.flowKey(
+                                            ip.srcAddr, tcp.srcPort,
+                                            ip.dstAddr, tcp.dstPort,
+                                            ip.protocol
+                                        )
+                                        if ((tcp.flags and 0x02) != 0) {
+                                            // TCP SYN — establish
+                                            // a new outbound
+                                            // connection via
+                                            // protect() + Netty.
+                                            val sock = client.protectAndConnect(
+                                                ip.dstAddr, tcp.dstPort, flowKey
+                                            )
+                                            if (sock != null) {
+                                                Log.d(TAG, "startReaderThread: user-space routing TCP SYN $flowKey via NettyChannelClient.protectAndConnect (socket local=${sock.localSocketAddress}, remote=${sock.remoteSocketAddress})")
+                                            }
+                                        } else {
+                                            // 11.0Z TODO — forward
+                                            // established-flow data
+                                            // via the Netty channel.
+                                            Log.d(TAG, "startReaderThread: TCP flow $flowKey flags=0x${"%02x".format(tcp.flags)} (BEST-EFFORT: 11.0Z does not forward data yet)")
+                                        }
+                                    }
+                                }
+                                NettyChannelClient.IPPROTO_UDP -> {
+                                    val udp = client.parseUdpHeader(buf, n, ip.ihl)
+                                    if (udp != null) {
+                                        val flowKey = client.flowKey(
+                                            ip.srcAddr, udp.srcPort,
+                                            ip.dstAddr, udp.dstPort,
+                                            ip.protocol
+                                        )
+                                        // 11.0Z TODO: full UDP
+                                        // request/response
+                                        // matching + DNS
+                                        // synthesis. For now,
+                                        // log + skip.
+                                        Log.d(TAG, "startReaderThread: user-space routing UDP packet $flowKey (len=${udp.length}, BEST-EFFORT: 11.0Z does not forward yet)")
+                                    }
+                                }
+                                NettyChannelClient.IPPROTO_ICMP -> {
+                                    // 11.0Z TODO: ICMP echo
+                                    // request/reply. For now,
+                                    // log + skip.
+                                    Log.d(TAG, "startReaderThread: user-space routing ICMP packet (src=${ip.srcAddr.hostAddress}, dst=${ip.dstAddr.hostAddress}, BEST-EFFORT: 11.0Z does not echo yet)")
+                                }
+                                else -> {
+                                    // Unknown protocol —
+                                    // transparent passthrough.
+                                }
+                            }
+                        }
                     }
                     val writeOk = try {
                         // (1) write + flush + increment.

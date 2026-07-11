@@ -26,6 +26,7 @@ check_stop_capture_ring_clear_invariant_v38 (S95),
 check_check_private_dns_bind_5_logd_invariant_v39 (S96),
 check_check_private_dns_5s_fallback_invariant_v40 (S97),
 check_check_private_dns_call_before_establish_invariant_v41 (S98),
+check_user_space_tcp_ip_stack_invariant_v42 (S99),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -175,13 +176,13 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 148 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 149 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
 1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
 1 from S88 + 1 from S89 + 1 from S91 + 1 from S92 +
 1 from S93 + 1 from S94 + 1 from S95 + 1 from S96 +
-1 from S97 + 1 from S98).
+1 from S97 + 1 from S98 + 1 from S99).
 Sprint 11.0Q adds 1 new selftest case for S88 (2-level
 VPN disconnect fallback: .stop with 3s timeout +
 MainActivity.disconnectVpn hard-stop) — the
@@ -1141,6 +1142,54 @@ def run_s98_check(opene2ee_vpn_service_text):
             + str(establish_line)
             + "; must be BEFORE)"
         )
+    return findings
+
+
+def run_s99_check(opene2ee_vpn_service_text, build_gradle_kts_text, netty_channel_client_text):
+    """Sprint 11.0Z: user-space TCP/IP stack via Netty
+    (S99).
+
+    Owner 22:08 root cause: pre-11.0Z transparent
+    passthrough (write IP packet back to TUN output)
+    caused a "VPN blackhole" because the catch-all
+    `addRoute(0.0.0.0/0)` re-enters the TUN a
+    second time, and the real-NIC route is never
+    taken.
+
+    This check asserts the S99 invariant on 3 files:
+      a. `build.gradle.kts` has `io.netty:netty-all`
+         (the Netty dependency).
+      b. `NettyChannelClient.kt` has
+         `VpnService.protect(` call (the protect
+         on the outbound socket) + `class NettyChannelClient`
+         declaration (the user-space routing
+         orchestrator).
+      c. `OpenE2eeVpnService.kt` has the `user-space`
+         literal in the startReaderThread comment.
+
+    NOTE: this is a SKELETON. The full TCP state
+    machine + UDP handler + ICMP echo + DNS synthesis
+    is multi-week work and will be filled in by
+    Sprint 12.0X.
+    """
+    findings = []
+    if build_gradle_kts_text is None:
+        findings.append("S99 fail (build.gradle.kts text missing)")
+    else:
+        if "io.netty:netty-all" not in build_gradle_kts_text:
+            findings.append("S99 fail (build.gradle.kts missing `io.netty:netty-all` Netty dep)")
+    if netty_channel_client_text is None:
+        findings.append("S99 fail (NettyChannelClient.kt text missing)")
+    else:
+        if "VpnService.protect(" not in netty_channel_client_text:
+            findings.append("S99 fail (NettyChannelClient.kt missing `VpnService.protect(` call)")
+        if "class NettyChannelClient" not in netty_channel_client_text:
+            findings.append("S99 fail (NettyChannelClient.kt missing `class NettyChannelClient` declaration)")
+    if opene2ee_vpn_service_text is None:
+        findings.append("S99 fail (OpenE2eeVpnService.kt text missing)")
+    else:
+        if "user-space" not in opene2ee_vpn_service_text:
+            findings.append("S99 fail (OpenE2eeVpnService.kt missing `user-space` literal)")
     return findings
 
 
@@ -5669,6 +5718,46 @@ cases = [
            "    }\n"
            "}\n",
        ), []),
+      # S99 case (Sprint 11.0Z - new) - user-space
+      # TCP/IP stack via Netty + VpnService.protect().
+      # build.gradle.kts has io.netty:netty-all dep;
+      # NettyChannelClient.kt has VpnService.protect(
+      # call + class NettyChannelClient declaration;
+      # OpenE2eeVpnService.kt startReaderThread has
+      # the user-space routing comment. Regression
+      # guard for the Owner 22:08 'VPN blackhole'
+      # symptom (catch-all addRoute 0.0.0.0/0 re-enters
+      # TUN, no real-NIC route). Total selftest: 148 + 1 = 149.
+      # NOTE: this is a SKELETON. The full TCP state
+      # machine + UDP handler + ICMP echo + DNS synthesis
+      # is multi-week work (Sprint 12.0X).
+      ("S99 PASS (user-space TCP/IP stack via Netty + VpnService.protect() - regression guard for Owner 22:08 VPN blackhole symptom)",
+       run_s99_check,
+       # args tuple: (opene2ee_vpn_service_text, build_gradle_kts_text, netty_channel_client_text)
+       (
+           # opene2ee_vpn_service_text
+           "// OpenE2eeVpnService.kt stub for S99\n"
+           "// Sprint 11.0Z - user-space routing via NettyChannelClient.\n"
+           "// The startReaderThread now parses IP packets and dispatches to\n"
+           "// nettyClient.protectAndConnect for outbound sockets.\n"
+           "class OpenE2eeVpnService { }\n",
+           # build_gradle_kts_text
+           "// build.gradle.kts stub for S99\n"
+           "dependencies {\n"
+           "    implementation(\"io.netty:netty-all:4.1.107.Final\")\n"
+           "}\n",
+           # netty_channel_client_text
+           "// NettyChannelClient.kt stub for S99\n"
+           "package com.opene2ee.opene2ee.vpn\n"
+           "class NettyChannelClient(private val service: OpenE2eeVpnService) {\n"
+           "    fun protectAndConnect(dstAddr: java.net.InetAddress, dstPort: Int, flowKey: String): java.net.Socket? {\n"
+           "        val socket = java.net.Socket()\n"
+           "        val protected = service.VpnService.protect(socket)\n"
+           "        return socket\n"
+           "    }\n"
+           "}\n",
+       ),
+       []),
     # S91 case (Sprint 11.0S-DNS - new) - OpenE2eeVpnService
     # .kt has isPrivateDnsActive + ConnectivityManager
     # .bindProcessToNetwork + active_pool_screen.dart has

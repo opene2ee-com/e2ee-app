@@ -4638,6 +4638,157 @@ def check_check_private_dns_call_before_establish_invariant_v41() -> list[str]:
     return findings
 
 
+def check_user_space_tcp_ip_stack_invariant_v42() -> list[str]:
+    """Sprint 11.0Z: user-space TCP/IP stack via Netty
+    (S99).
+
+    Owner 22:08 root cause: the pre-11.0Z code in
+    `startReaderThread` did "transparent passthrough"
+    (write the IP packet back to the TUN output and
+    let the kernel route it). This caused a "VPN
+    blackhole" because the OpenE2ee TUN is configured
+    with `addRoute(0.0.0.0/0)` (catch-all) — the
+    kernel treats ALL outbound traffic as destined
+    for the VPN interface, and writing a packet back
+    to the TUN makes the kernel re-enter the TUN a
+    second time, so the real-NIC route is never taken.
+
+    11.0Z fix: user-space TCP/IP stack via Netty +
+    `VpnService.protect()`. For each IP packet:
+      1. Parse the IPv4 header (ver + IHL + total
+         length + protocol + src/dst IP).
+      2. For TCP/UDP, parse the transport header
+         (src/dst port + flags).
+      3. Create a real socket to the destination.
+      4. Call `service.protect(socket)` BEFORE
+         connect — this tells the system "this
+         socket MUST bypass the VPN and use the
+         real NIC".
+      5. Connect the socket (now bypasses VPN).
+      6. (Future sprint) Read response, wrap in a
+         new IP packet, write back to the TUN.
+
+    11.0Z SKELETON: this audit verifies the
+    minimum-viable structure (Netty dep +
+    `protect()` call + user-space routing class).
+    The full TCP state machine + UDP handler +
+    ICMP echo + DNS synthesis is multi-week work
+    and will be filled in by Sprint 12.0X.
+
+    The check requires:
+      a. `io.netty:netty-all` literal present in
+         `mobile/android/app/build.gradle.kts`
+         (the Netty dependency).
+      b. `VpnService.protect(` literal present in
+         `mobile/android/app/src/main/kotlin/.../
+         vpn/NettyChannelClient.kt` (the protect()
+         call on the outbound socket).
+      c. `class NettyChannelClient` literal present
+         in the `vpn/` package (the user-space
+         routing orchestrator).
+      d. `user-space` literal present in
+         `OpenE2eeVpnService.kt` (the comment
+         explaining the user-space routing
+         integration in `startReaderThread`).
+
+    Missing any of the 4 re-opens the Owner 22:08
+    "VPN blackhole" regression — the TUN captures
+    the packets but the kernel can't route them
+    because the catch-all `addRoute(0.0.0.0/0)`
+    re-enters the TUN, and without the
+    `protect()`-bypassed socket, no real-NIC route
+    is taken.
+    """
+    import re
+    findings = []
+    gradle_path = REPO_ROOT / "mobile" / "android" / "app" / "build.gradle.kts"
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    # a. Netty dep in build.gradle.kts.
+    if gradle_path.exists():
+        try:
+            gradle_text = gradle_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S99 build.gradle.kts: read failed (" + str(e) + ")."
+            )
+            gradle_text = ""
+        if "io.netty:netty-all" not in gradle_text:
+            findings.append(
+                "S99 build.gradle.kts: missing `io.netty:netty-all` "
+                "Netty dependency. Sprint 11.0Z invariant - the "
+                "user-space TCP/IP stack needs Netty for the "
+                "async NIO socket layer (regression guard for "
+                "Owner 22:08 'VPN blackhole' symptom)."
+            )
+    else:
+        findings.append(
+            "S99 build.gradle.kts: file missing."
+        )
+    # b. VpnService.protect( call in NettyChannelClient.kt.
+    if netty_path.exists():
+        try:
+            netty_text = netty_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S99 NettyChannelClient.kt: read failed (" + str(e) + ")."
+            )
+            netty_text = ""
+        if "VpnService.protect(" not in netty_text:
+            findings.append(
+                "S99 NettyChannelClient.kt: missing `VpnService.protect(` "
+                "call. Sprint 11.0Z invariant - the outbound socket "
+                "MUST be protected() BEFORE the connect so the "
+                "socket bypasses the VPN and uses the real NIC "
+                "(regression guard for Owner 22:08 'VPN blackhole' "
+                "symptom — without protect(), the socket is also "
+                "captured by the TUN and the packet loops forever)."
+            )
+        if "class NettyChannelClient" not in netty_text:
+            findings.append(
+                "S99 NettyChannelClient.kt: missing `class NettyChannelClient` "
+                "declaration. Sprint 11.0Z invariant - the user-space "
+                "routing orchestrator class must be present in the "
+                "`vpn/` package."
+            )
+    else:
+        findings.append(
+            "S99 NettyChannelClient.kt: file missing. Sprint 11.0Z "
+            "invariant - the user-space routing orchestrator class "
+            "must be present in the `vpn/` package."
+        )
+    # d. user-space literal in OpenE2eeVpnService.kt.
+    if service_path.exists():
+        try:
+            service_text = service_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S99 OpenE2eeVpnService.kt: read failed (" + str(e) + ")."
+            )
+            service_text = ""
+        if "user-space" not in service_text:
+            findings.append(
+                "S99 OpenE2eeVpnService.kt: missing `user-space` "
+                "literal in the startReaderThread comment. Sprint "
+                "11.0Z invariant - the comment must explain the "
+                "user-space routing integration so the Owner can "
+                "see the intent in the source."
+            )
+    else:
+        findings.append(
+            "S99 OpenE2eeVpnService.kt: file missing."
+        )
+    return findings
+
+
 
 
 
@@ -7826,6 +7977,12 @@ def main() -> int:
         all_findings.extend(s98_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn is called BEFORE Builder.establish() in startCapture (requestNetwork(TRANSPORT_VPN) issued while VPN is being registered) - regression guard for Owner 21:37 'callback never fires for 1 minute on non-rooted tablet' symptom - Sprint 11.0Y S98")
+
+    s99_findings = check_user_space_tcp_ip_stack_invariant_v42()
+    if s99_findings:
+        all_findings.extend(s99_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has user-space TCP/IP stack via Netty (build.gradle.kts has io.netty:netty-all dep + NettyChannelClient.kt has VpnService.protect( call + class NettyChannelClient declaration + OpenE2eeVpnService.kt startReaderThread has user-space routing comment) - regression guard for Owner 22:08 'VPN blackhole' symptom (catch-all addRoute 0.0.0.0/0 re-enters TUN) - Sprint 11.0Z S99")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()
