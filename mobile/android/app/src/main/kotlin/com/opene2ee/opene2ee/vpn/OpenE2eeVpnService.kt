@@ -186,6 +186,32 @@ class OpenE2eeVpnService : VpnService() {
     companion object {
         private const val TAG = "OpenE2eeVpn"
 
+        /**
+         * Sprint 11.0H — TOCTOU (Time-Of-Check-Time-Of-Use) guard
+         * for [startCapture] and [stopCapture]. Without this lock,
+         * a double-tap on the "Aktif Nöbet başlat" button (or a
+         * system-side `onStartCommand` self-restart) can race:
+         * the FIRST `startCapture` is mid-flight (TUN setup),
+         * `running.set(true)` not yet called, when the SECOND
+         * `startCapture` enters, sees `running.get() == false`,
+         * and starts a SECOND TUN setup. The two TUNs collide,
+         * the reader thread from the first captures EOF from
+         * the second's `pfd.close()`, and the service lands in
+         * a corrupt state — symptom Owner saw: `start` returns
+         * `state: DRAINING, packetsObserved: 0, ringSize: 0`
+         * with no `lastError` (the catch block wasn't hit, the
+         * stop path WAS hit by the racing stop).
+         *
+         * The lock serializes `startCapture` / `stopCapture` /
+         * `onRevoke` so the TOCTOU window is closed. The lock
+         * is a companion-level `@JvmStatic` `Object` so it is
+         * shared across all instances (companion fields are
+         * shared JVM-wide). It is intentionally NOT the
+         * per-instance `lock` — that would defeat the purpose.
+         */
+        @JvmField
+        val stateLock: Any = Any()
+
         /** Must match `kVpnMethodChannel` in Dart. */
         const val METHOD_CHANNEL = "opene2ee/vpn"
 
@@ -765,78 +791,109 @@ class OpenE2eeVpnService : VpnService() {
      * thread. Idempotent — a duplicate call while already running is a no-op.
      */
     private fun startCapture(): State {
-        if (running.get()) return state
-        // Sprint 11.0F — diagnostic breadcrumbs. Each `Log.d` line is
-        // emitted BEFORE the named side-effect so the Owner (or
-        // anyone running `adb logcat -d -s OpenE2eeVpn:V`) can
-        // pinpoint which step regressed. The `S75` audit invariant
-        // asserts at least 5 of these are present in the source.
-        Log.d(TAG, "startCapture: entry (running=false, state=$state)")
-        try {
-            val builder = buildVpnBuilder()
-            Log.d(TAG, "startCapture: buildVpnBuilder returned (addAddress=${TUN_ADDRESS.hostAddress}, mtu=$TUN_MTU)")
-            val pfd = builder.establish()
-            if (pfd == null) {
-                // Sprint 11.0F — make the error message actionable.
-                // On OnePlus 9 Pro (rootlu, Magisk Zygisk) the
-                // `VpnService.Builder.establish()` call returns
-                // null even though the user already granted consent
-                // via `VpnService.prepare(this)` (because the
-                // foreground-service consent was confirmed in a
-                // PRIOR process / boot — `prepare()` returns null
-                // in that case too). The most common cause on a
-                // rooted OnePlus is Magisk's Zygisk module
-                // intercepting VpnService.establish() as part of
-                // its root-hide trick. The actionable advice: open
-                // Magisk → Settings → Zygisk → Disable, then
-                // reboot. Without this hint, the user sees a
-                // generic error and the regression looks
-                // unresolvable.
-                state = State.ERROR
-                lastError = "VpnService.Builder.establish() returned null " +
-                        "(user declined consent, system refused, OR " +
-                        "OnePlus Magisk Zygisk is intercepting). " +
-                        "Workaround: Magisk → Settings → Zygisk → Disable, " +
-                        "reboot, reinstall APK. See sprint-110f-final-report.md."
-                Log.e(TAG, lastError!!)
-                notifyError(lastError!!)
-                return state
+        // Sprint 11.0H — TOCTOU guard. The `synchronized(stateLock)`
+        // block serializes `startCapture` / `stopCapture` /
+        // `onRevoke` so a double-tap on the "Aktif Nöbet başlat"
+        // button (or a system-side `onStartCommand` self-restart)
+        // cannot race. Pre-11.0H the check
+        // `if (running.get()) return state` was non-atomic
+        // w.r.t. the rest of the function — a second invocation
+        // could enter mid-flight. The lock closes that window.
+        return synchronized(stateLock) {
+            val prevState = state
+            if (running.get()) {
+                Log.d(TAG, "startCapture: TOCTOU guard hit, already running (state=$state, returning $state)")
+                return@synchronized state
             }
-            Log.d(TAG, "startCapture: builder.establish() returned pfd=$pfd (TUN descriptor acquired)")
-            tunInterface = pfd
-            running.set(true)
-            state = State.SAMPLING
-            packetsObserved.set(0)
-            synchronized(ringLock) { ring.clear() }
-            startForegroundCompat()
-            Log.d(TAG, "startCapture: startForegroundCompat() returned (foreground promotion OK)")
-            startReaderThread(pfd)
-            Log.d(TAG, "startCapture: startReaderThread(pfd) returned (TUN reader thread spawned)")
-            // Sprint 11.0A — start the 5-second scheduled drain that
-            // pushes the current ring to Dart via the shared
-            // methodChannel. The handler is `PacketDrain::tick`.
-            startDrainLoop()
-            Log.d(TAG, "startCapture: startDrainLoop() returned (5-second scheduled drain armed)")
-            Log.d(TAG, "startCapture: success — state=$state (SAMPLING)")
-        } catch (e: Throwable) {
-            running.set(false)
-            state = State.ERROR
-            lastError = "startCapture failed: ${e.javaClass.simpleName}: ${e.message}"
-            Log.e(TAG, lastError, e)
-            notifyError(lastError!!)
+            // Sprint 11.0F — diagnostic breadcrumbs. Each `Log.d` line is
+            // emitted BEFORE the named side-effect so the Owner (or
+            // anyone running `adb logcat -d -s OpenE2eeVpn:V`) can
+            // pinpoint which step regressed. The `S75` audit invariant
+            // asserts at least 5 of these are present in the source.
+            // Sprint 11.0H — `prevState` is logged at entry so the
+            // state-transition breadcrumbs (S78) are explicit
+            // about the BEFORE / AFTER delta.
+            Log.d(TAG, "startCapture: entry (running=false, prevState=$prevState)")
+            try {
+                val builder = buildVpnBuilder()
+                Log.d(TAG, "startCapture: buildVpnBuilder returned (addAddress=${TUN_ADDRESS.hostAddress}, mtu=$TUN_MTU)")
+                val pfd = builder.establish()
+                if (pfd == null) {
+                    // Sprint 11.0F — make the error message actionable.
+                    // On OnePlus 9 Pro (rootlu, Magisk Zygisk) the
+                    // `VpnService.Builder.establish()` call returns
+                    // null even though the user already granted consent
+                    // via `VpnService.prepare(this)` (because the
+                    // foreground-service consent was confirmed in a
+                    // PRIOR process / boot — `prepare()` returns null
+                    // in that case too). The most common cause on a
+                    // rooted OnePlus is Magisk's Zygisk module
+                    // intercepting VpnService.establish() as part of
+                    // its root-hide trick. The actionable advice: open
+                    // Magisk → Settings → Zygisk → Disable, then
+                    // reboot. Without this hint, the user sees a
+                    // generic error and the regression looks
+                    // unresolvable.
+                    state = State.ERROR
+                    lastError = "VpnService.Builder.establish() returned null " +
+                            "(user declined consent, system refused, OR " +
+                            "OnePlus Magisk Zygisk is intercepting). " +
+                            "Workaround: Magisk → Settings → Zygisk → Disable, " +
+                            "reboot, reinstall APK. See sprint-110f-final-report.md."
+                    Log.w(TAG, "startCapture: state transition $prevState -> ERROR (establish() returned null, Magisk hint emitted)")
+                    notifyError(lastError!!)
+                    return@synchronized state
+                }
+                Log.d(TAG, "startCapture: builder.establish() returned pfd=$pfd (TUN descriptor acquired)")
+                tunInterface = pfd
+                running.set(true)
+                state = State.SAMPLING
+                Log.d(TAG, "startCapture: SAMPLING started, pfd=$pfd, state transition $prevState -> $state")
+                packetsObserved.set(0)
+                synchronized(ringLock) { ring.clear() }
+                startForegroundCompat()
+                Log.d(TAG, "startCapture: startForegroundCompat() returned (foreground promotion OK)")
+                startReaderThread(pfd)
+                Log.d(TAG, "startCapture: startReaderThread(pfd) returned (TUN reader thread spawned)")
+                // Sprint 11.0A — start the 5-second scheduled drain that
+                // pushes the current ring to Dart via the shared
+                // methodChannel. The handler is `PacketDrain::tick`.
+                startDrainLoop()
+                Log.d(TAG, "startCapture: startDrainLoop() returned (5-second scheduled drain armed)")
+                Log.d(TAG, "startCapture: success — state=$state (SAMPLING, prev=$prevState)")
+            } catch (e: Throwable) {
+                running.set(false)
+                state = State.ERROR
+                lastError = "startCapture failed: ${e.javaClass.simpleName}: ${e.message}"
+                Log.e(TAG, "startCapture: state transition $prevState -> ERROR (caught exception)", e)
+                notifyError(lastError!!)
+            }
+            return@synchronized state
         }
-        return state
     }
 
     /**
      * Tear down TUN, flush ring, notify Dart.
+     *
+     * Sprint 11.0H — wrapped in `synchronized(stateLock)` so the
+     * TOCTOU guard covers the stop path too. The lock is
+     * intentional — without it, a racing `startCapture` could
+     * see `running.get() == false` (because stop hadn't yet
+     * set it) and start a second TUN while the first stop
+     * was still in flight. The log breadcrumbs at entry / DRAINING
+     * / DONE are the S78 invariant.
      */
     private fun stopCapture(@Suppress("UNUSED_PARAMETER") graceful: Boolean): State {
-        if (!running.get() && tunInterface == null) {
-            state = State.STOPPED
-            return state
-        }
-        state = State.DRAINING
+        return synchronized(stateLock) {
+            val prevState = state
+            Log.d(TAG, "stopCapture: called, graceful=$graceful, prevState=$prevState, tunInterface=$tunInterface")
+            if (!running.get() && tunInterface == null) {
+                state = State.STOPPED
+                Log.d(TAG, "stopCapture: DONE (was already idle), state transition $prevState -> $state")
+                return@synchronized state
+            }
+            state = State.DRAINING
+            Log.d(TAG, "stopCapture: state transition $prevState -> $state (TUN tear-down starts)")
         // Close the TUN — the reader thread will see EOF and exit.
         tunInterface?.let { pfd ->
             try {
@@ -877,8 +934,11 @@ class OpenE2eeVpnService : VpnService() {
         // Send the final telemetry batch.
         flushTelemetry()
         running.set(false)
-        state = State.STOPPED
-        return state
+        val newState = State.STOPPED
+        state = newState
+        Log.d(TAG, "stopCapture: DONE, state transition $prevState -> $newState")
+        return@synchronized newState
+        }
     }
 
     /**
@@ -1439,7 +1499,14 @@ class OpenE2eeVpnService : VpnService() {
     }
 
     override fun onRevoke() {
-        // User revoked the VPN profile from system settings — tear down.
+        // Sprint 11.0H — diagnostic breadcrumb at the system-side
+        // revoke path. The Owner saw `start` return `state: DRAINING`
+        // (not `state: SAMPLING`) which suggested `stopCapture` was
+        // called from somewhere external — `onRevoke` (system
+        // settings / Magisk Zygisk revoke) is one candidate. The
+        // log line identifies the path so the next regression can
+        // be diagnosed via `adb logcat -d -s OpenE2eeVpn:V`.
+        Log.w(TAG, "onRevoke: VPN profile revoked by system (Magisk Zygisk or settings or user); tearing down")
         stopCapture(graceful = true)
         super.onRevoke()
     }

@@ -4840,6 +4840,139 @@ def check_active_pool_screen_ui_propagation_v21() -> list[str]:
     return findings
 
 
+def check_vpn_service_state_transition_breadcrumbs_v22() -> list[str]:
+    """Sprint 11.0H: OpenE2eeVpnService.kt has state-transition breadcrumbs + TOCTOU guard (S78).
+
+    Regression guard for the OnePlus 9 Pro
+    `start` returns `state: DRAINING` regression
+    (Owner 11:38 logcat). The 11.0F/11.0G singleton + UI
+    propagation fixes were necessary but not sufficient —
+    the Kotlin-side `startCapture` was racing with a
+    `stopCapture` (likely Magisk Zygisk revoke on a rooted
+    OnePlus) so the `startCapture` finished setting
+    `state = SAMPLING` but the racing `stopCapture` then
+    set `state = DRAINING` and the result returned to Dart
+    was the DRAINING state (not SAMPLING).
+
+    The Sprint 11.0H fix has THREE parts:
+      1. State-transition `Log.d` / `Log.w` breadcrumbs at
+         each step of `startCapture` / `stopCapture` /
+         `onRevoke` so the next regression is diagnosable
+         via `adb logcat -d -s OpenE2eeVpn:V` (the
+         `state: DRAINING` symptom doesn't include a
+         stacktrace, so the only signal is the
+         breadcrumb order).
+      2. A `synchronized(stateLock)` TOCTOU guard around
+         `startCapture` and `stopCapture` so the
+         start/stop race is impossible — the second
+         invocation waits for the first to complete.
+      3. An explicit `Log.w` on `onRevoke` (the
+         system-side revoke callback) so the Owner can
+         distinguish Magisk/system revoke from a manual
+         Dart-side `stop()`.
+
+    This check (S78) requires FOUR tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `startCapture: SAMPLING started` literal — proves
+         the state-transition log is present at the
+         happy-path point.
+      2. `stopCapture: called` literal — proves the
+         stop-path entry log is present (so the
+         `adb logcat` output shows WHERE stop was called
+         from).
+      3. `onRevoke:` literal — proves the system-revoke
+         path is instrumented.
+      4. `synchronized(` literal paired with a `stateLock`
+         reference — proves the TOCTOU guard is in place.
+    """
+    import re
+    findings = []
+    target = REPO_ROOT / "mobile" / "android" / "app" / "src" / "main" / \
+        "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn" / "OpenE2eeVpnService.kt"
+    if not target.exists():
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: file missing. Sprint 11.0H "
+            "invariant — the service must emit state-transition "
+            "Log.d / Log.w breadcrumbs at each step of "
+            "startCapture / stopCapture / onRevoke AND wrap the "
+            "start/stop paths in a `synchronized(stateLock)` "
+            "TOCTOU guard so the OnePlus 9 Pro `start` returns "
+            "`state: DRAINING` regression is closed."
+        )
+        return findings
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    # Comment-strip loop (mirrors S43 / S73 / S74 / S75).
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # 1. startCapture: SAMPLING started.
+    if "startCapture: SAMPLING started" not in code:
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: missing `startCapture: "
+            "SAMPLING started` literal. Sprint 11.0H invariant — "
+            "the state-transition log at the happy-path point is "
+            "the breadcrumb that distinguishes a healthy start "
+            "from a racing-stop regression (Owner 11:38 saw "
+            "`start` return `state: DRAINING` with no stacktrace)."
+        )
+    # 2. stopCapture: called.
+    if "stopCapture: called" not in code:
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: missing `stopCapture: "
+            "called` literal. Sprint 11.0H invariant — the "
+            "stop-path entry log identifies WHO called "
+            "stopCapture (Dart-side invokeMethod vs system "
+            "onRevoke vs racing startCapture)."
+        )
+    # 3. onRevoke: literal.
+    if "onRevoke:" not in code:
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: missing `onRevoke:` "
+            "literal. Sprint 11.0H invariant — the system-side "
+            "revoke callback (Magisk Zygisk / settings / user) "
+            "must be instrumented so the next regression can "
+            "distinguish the four candidate stop paths."
+        )
+    # 4. synchronized(stateLock) TOCTOU guard.
+    has_synchronized = "synchronized(" in code
+    has_state_lock = "stateLock" in code
+    if not (has_synchronized and has_state_lock):
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: missing `synchronized(stateLock)` "
+            "TOCTOU guard. Sprint 11.0H invariant — the "
+            "startCapture / stopCapture race on a rooted OnePlus "
+            "(Magisk Zygisk revoke) is impossible without "
+            "serializing the two paths. The lock is a "
+            "companion-level `@JvmField val stateLock: Any` so "
+            "it is shared JVM-wide across all instances."
+        )
+    return findings
+
+
 # ═══ Sprint 11.0B — M2 production audit (S53-S60) ═══
 #
 # The M2 brief specifies `webrtc: ^0.13.0+` as the dep. The
@@ -5559,6 +5692,12 @@ def main() -> int:
         all_findings.extend(s77_findings)
     else:
         print("PASS: active_pool_screen.dart uses ConsumerStatefulWidget + stateStream.listen(setState) for VPN UI propagation - Sprint 11.0G S77")
+
+    s78_findings = check_vpn_service_state_transition_breadcrumbs_v22()
+    if s78_findings:
+        all_findings.extend(s78_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has state-transition Log.d breadcrumbs (startCapture/stopCapture/onRevoke) + synchronized TOCTOU guard - Sprint 11.0H S78")
 
     if all_findings:
         print("\nFINDINGS:")

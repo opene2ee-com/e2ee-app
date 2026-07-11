@@ -58,8 +58,9 @@ check_score_calculator_unit_tests_v17 (S72),
 check_main_activity_owns_vpn_channel_v18 (S73),
 check_vpn_service_startforeground_within_5s_v19 (S74),
 check_vpn_service_log_d_breadcrumbs_v20 (S75),
-check_vpn_service_dart_singleton_v20 (S76), and
-check_active_pool_screen_ui_propagation_v21 (S77).
+check_vpn_service_dart_singleton_v20 (S76),
+check_active_pool_screen_ui_propagation_v21 (S77), and
+check_vpn_service_state_transition_breadcrumbs_v22 (S78).
 
 (Sprint 11.0F adds 2 new selftest cases for S75 + S76 —
 the OnePlus 9 Pro Senaryo D regression guards. S75
@@ -159,13 +160,13 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 130 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 131 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
-S76 + 1 from S77). Sprint 11.0G adds 1 new selftest case for
-S77 (active_pool_screen UI propagation) and tightens S76
-(removes the 11.0F back-compat `factory VpnService()` — the
-fixture is updated to the 11.0G form). S75 remains a
-production-audit-only check (S58 pattern).
+S76 + 1 from S77 + 1 from S78). Sprint 11.0H adds 1 new
+selftest case for S78 (state-transition breadcrumbs + TOCTOU
+guard) — the OnePlus 9 Pro `start -> DRAINING` regression
+guard. S75 remains a production-audit-only check (S58
+pattern).
 """
 import sys
 from pathlib import Path
@@ -2290,6 +2291,108 @@ def run_s77_check(active_pool_screen_text):
     return findings
 
 
+def run_s78_check(opene2ee_vpn_service_text):
+    """Sprint 11.0H: OpenE2eeVpnService.kt state-transition breadcrumbs + TOCTOU guard (S78).
+
+    Regression guard for the OnePlus 9 Pro
+    `start` returns `state: DRAINING` regression
+    (Owner 11:38 logcat). The 11.0F/11.0G singleton + UI
+    propagation fixes were necessary but not sufficient —
+    the Kotlin-side `startCapture` was racing with a
+    `stopCapture` (likely Magisk Zygisk revoke on a rooted
+    OnePlus) so the `startCapture` finished setting
+    `state = SAMPLING` but the racing `stopCapture` then
+    set `state = DRAINING` and the result returned to Dart
+    was the DRAINING state (not SAMPLING).
+
+    The Sprint 11.0H fix has TWO parts:
+      1. State-transition `Log.d` / `Log.w` breadcrumbs at
+         each step of `startCapture` / `stopCapture` /
+         `onRevoke` so the next regression is diagnosable
+         via `adb logcat -d -s OpenE2eeVpn:V` (the
+         `state: DRAINING` symptom doesn't include a
+         stacktrace, so the only signal is the
+         breadcrumb order).
+      2. A `synchronized(stateLock)` TOCTOU guard around
+         `startCapture` and `stopCapture` so the
+         start/stop race is impossible — the second
+         invocation waits for the first to complete.
+
+    The check requires FOUR tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `startCapture: SAMPLING started` literal — the
+         happy-path state-transition log.
+      2. `stopCapture: called` literal — the stop-path
+         entry log.
+      3. `onRevoke:` literal — the system-side revoke
+         callback instrumentation.
+      4. `synchronized(` literal paired with a `stateLock`
+         reference — the TOCTOU guard.
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S78 OpenE2eeVpnService.kt: file missing")
+        return findings
+    # Comment-strip loop (mirrors S43 / S73 / S74 / S75).
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    code_lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            code_lines.append(ln[:cut_at])
+        else:
+            code_lines.append(ln)
+    code = "\n".join(code_lines)
+    # 1. startCapture: SAMPLING started.
+    if "startCapture: SAMPLING started" not in code:
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: missing `startCapture: "
+            "SAMPLING started` literal. Sprint 11.0H invariant — "
+            "the state-transition log at the happy-path point is "
+            "the breadcrumb that distinguishes a healthy start "
+            "from a racing-stop regression."
+        )
+    # 2. stopCapture: called.
+    if "stopCapture: called" not in code:
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: missing `stopCapture: "
+            "called` literal. Sprint 11.0H invariant — the "
+            "stop-path entry log identifies WHO called stopCapture."
+        )
+    # 3. onRevoke:.
+    if "onRevoke:" not in code:
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: missing `onRevoke:` "
+            "literal. Sprint 11.0H invariant — the system-side "
+            "revoke callback (Magisk Zygisk / settings / user) "
+            "must be instrumented."
+        )
+    # 4. synchronized(stateLock) TOCTOU guard.
+    has_synchronized = "synchronized(" in code
+    has_state_lock = "stateLock" in code
+    if not (has_synchronized and has_state_lock):
+        findings.append(
+            "S78 OpenE2eeVpnService.kt: missing `synchronized(stateLock)` "
+            "TOCTOU guard. Sprint 11.0H invariant — the "
+            "startCapture / stopCapture race is impossible without "
+            "serializing the two paths."
+        )
+    return findings
+
+
 # ─── Test cases ──────────────────────────────────────────────────
 
 # Case 0: fully-valid file (post-Sprint 9.6.6 fix) — expect 0 findings.
@@ -3770,6 +3873,30 @@ case_s77_active_pool_screen_pass = (
     "  }\n"
     "}\n"
 )
+case_s78_vpn_service_state_transitions_pass = (
+    "package com.opene2ee.opene2ee.vpn\n"
+    "import android.util.Log\n"
+    "class OpenE2eeVpnService {\n"
+    "    companion object {\n"
+    "        @JvmField val stateLock: Any = Any()\n"
+    "    }\n"
+    "    private fun startCapture(): State {\n"
+    "        return synchronized(stateLock) {\n"
+    "            Log.d(TAG, \"startCapture: SAMPLING started, pfd=$pfd, state transition $prevState -> $state\")\n"
+    "            return@synchronized state\n"
+    "        }\n"
+    "    }\n"
+    "    private fun stopCapture(graceful: Boolean): State {\n"
+    "        return synchronized(stateLock) {\n"
+    "            Log.d(TAG, \"stopCapture: called, graceful=$graceful, prevState=$prevState\")\n"
+    "            return@synchronized state\n"
+    "        }\n"
+    "    }\n"
+    "    override fun onRevoke() {\n"
+    "        Log.w(TAG, \"onRevoke: VPN profile revoked by system\")\n"
+    "    }\n"
+    "}\n"
+)
 
 cases = [
     # S1-S5 cases (Sprint 9.6.6 — regression guard: must still pass)
@@ -4170,6 +4297,19 @@ cases = [
     # 1 = 130 (was 129 before Sprint 11.0G, +1 new case).
     ("S77 PASS (active_pool_screen.dart is ConsumerStatefulWidget + stateStream.listen with setState + VpnService.instance reference — regression guard for OnePlus 9 Pro UI propagation gap)",
      run_s77_check, (case_s77_active_pool_screen_pass,), []),
+    # S78 case (Sprint 11.0H - new) — OpenE2eeVpnService.kt
+    # has state-transition Log.d breadcrumbs (startCapture /
+    # stopCapture / onRevoke) AND a synchronized(stateLock)
+    # TOCTOU guard. Regression guard for the OnePlus 9 Pro
+    # `start` returns `state: DRAINING` regression (Owner
+    # 11:38 logcat). The 11.0F/11.0G singleton + UI
+    # propagation fixes were necessary but not sufficient —
+    # the Kotlin-side startCapture was racing with
+    # stopCapture. S78 closes the gap with the TOCTOU
+    # guard + diagnostic breadcrumbs. Total selftest:
+    # 130 + 1 = 131 (was 130 before Sprint 11.0H).
+    ("S78 PASS (OpenE2eeVpnService.kt has state-transition Log.d breadcrumbs + synchronized(stateLock) TOCTOU guard — regression guard for OnePlus 9 Pro start->DRAINING race)",
+     run_s78_check, (case_s78_vpn_service_state_transitions_pass,), []),
   ]   # noqa: E501
 
 failed = []
