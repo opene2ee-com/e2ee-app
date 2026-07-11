@@ -23,6 +23,7 @@ check_notification_chronometer_autostop_v35 (S92),
 check_vpn_service_passthrough_count_invariant_v36 (S93),
 check_manifest_change_network_state_v37 (S94),
 check_stop_capture_ring_clear_invariant_v38 (S95),
+check_check_private_dns_bind_5_logd_invariant_v39 (S96),
 check_active_pool_haptic_feedback_literal_present (S29),
 check_pool_provider_debug_state_fields (S33),
 check_active_pool_scaffold_messenger_snackbar (S34),
@@ -172,12 +173,12 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 145 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 146 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
 1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
 1 from S88 + 1 from S89 + 1 from S91 + 1 from S92 +
-1 from S93 + 1 from S94 + 1 from S95).
+1 from S93 + 1 from S94 + 1 from S95 + 1 from S96).
 Sprint 11.0Q adds 1 new selftest case for S88 (2-level
 VPN disconnect fallback: .stop with 3s timeout +
 MainActivity.disconnectVpn hard-stop) — the
@@ -959,6 +960,55 @@ def run_s95_check(opene2ee_vpn_service_text):
             + str(packets_set_zero_count)
             + " time(s), need >= 3 - 1 in startCapture + 1 in each stopCapture branch)"
         )
+    return findings
+
+
+def run_s96_check(opene2ee_vpn_service_text):
+    """Sprint 11.0W: OpenE2eeVpnService.kt
+    checkPrivateDnsAndBindToVpn has 5 Log.d
+    breadcrumbs (S96).
+
+    Owner 20:45 symptom: logcat shows NO breadcrumb
+    for checkPrivateDnsAndBindToVpn at all — the
+    function SILENTLY returned early (e.g. if
+    activeNetwork was null) or the function never
+    reached its happy path. The Owner could not
+    distinguish "function never ran" from "function
+    ran and bindProcessToNetwork failed silently".
+
+    This check asserts the S96 invariant on
+    OpenE2eeVpnService.kt: 6 token substrings
+    (5 Log.d breadcrumbs) are present:
+      1. `DNS: checkPrivateDnsAndBindToVpn: ENTRY`
+      2. `isPrivateDnsActive=`
+      3. `ConnectivityManager.requestNetwork(TRANSPORT_VPN) start`
+      4a. `NetworkCallback.onAvailable`
+      4b. `NetworkCallback.onUnavailable`
+      5. `bindProcessToNetwork(vpn) result=`
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S96 fail (OpenE2eeVpnService.kt text missing)")
+        return findings
+    stripped = re.sub(
+        r"/\*.*?\*/", "", opene2ee_vpn_service_text, flags=re.DOTALL
+    )
+    stripped = re.sub(r"//[^\n]*", "", stripped)
+    required_tokens = {
+        "1.ENTRY": "DNS: checkPrivateDnsAndBindToVpn: ENTRY",
+        "2.isPrivateDnsActive": "isPrivateDnsActive=",
+        "3.requestNetwork start": "ConnectivityManager.requestNetwork(TRANSPORT_VPN) start",
+        "4a.onAvailable": "NetworkCallback.onAvailable",
+        "4b.onUnavailable": "NetworkCallback.onUnavailable",
+        "5.bindProcessToNetwork result": "bindProcessToNetwork(vpn) result=",
+    }
+    for label, token in required_tokens.items():
+        if token not in stripped:
+            findings.append(
+                "S96 fail (missing Log.d breadcrumb token `"
+                + token + "` for " + label + ")"
+            )
     return findings
 
 
@@ -5216,13 +5266,13 @@ cases = [
          "            tunInterface?.let { it.close() }\n"
          "            readerThread?.join(1_000L)\n"
          "            stopDrainLoop()\n"
-         "            synchronized(ringLock) { ring.clear() }\n"
-         "            packetsObserved.set(0)\n"
-         "            ipFragmentCount.set(0)\n"
-         "            passthroughCount.set(0)\n"
-         "            flushTelemetry()\n"
-         "            running.set(false)\n"
-         "            state = State.STOPPED\n"
+          "            synchronized(ringLock) { ring.clear() }\n"
+          "            packetsObserved.set(0)\n"
+          "            ipFragmentCount.set(0)\n"
+          "            passthroughCount.set(0)\n"
+          "            flushTelemetry()\n"
+          "            running.set(false)\n"
+          "            state = State.STOPPED\n"
          "            return@synchronized state\n"
          "        }\n"
          "    }\n"
@@ -5309,6 +5359,70 @@ cases = [
           "  }\n"
           "}\n",
       ), []),
+      # S96 case (Sprint 11.0W - new) - OpenE2eeVpnService
+      # .kt checkPrivateDnsAndBindToVpn() has 5 Log.d
+      # breadcrumbs (ENTRY, isPrivateDnsActive,
+      # requestNetwork start, onAvailable + onUnavailable,
+      # bindProcessToNetwork result). Regression guard
+      # for the Owner 20:45 "log YOK logcatte" symptom
+      # (function silently returned early on OnePlus
+      # OxygenOS - could not distinguish 'never ran' from
+      # 'failed silently'). Total selftest: 145 + 1 = 146.
+      ("S96 PASS (OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn has 5 Log.d breadcrumbs - regression guard for OnePlus 9 Pro OxygenOS 'function silently returned early' symptom)",
+       run_s96_check, (
+           "package com.opene2ee.opene2ee.vpn\n"
+           "import android.net.ConnectivityManager\n"
+           "import android.net.LinkProperties\n"
+           "import android.net.Network\n"
+           "import android.net.NetworkCapabilities\n"
+           "import android.net.NetworkRequest\n"
+           "import android.util.Log\n"
+           "class OpenE2eeVpnService {\n"
+           "    private fun checkPrivateDnsAndBindToVpn() {\n"
+           "        try {\n"
+           "            // (1) ENTRY breadcrumb.\n"
+           "            Log.d(TAG, \"DNS: checkPrivateDnsAndBindToVpn: ENTRY\")\n"
+           "            val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager\n"
+           "            val activeNet = cm.activeNetwork\n"
+           "            if (activeNet != null) {\n"
+           "                val lp: LinkProperties? = cm.getLinkProperties(activeNet)\n"
+           "                if (lp != null) {\n"
+           "                    val serverName = try { lp.privateDnsServerName ?: \"automatic\" } catch (e: Throwable) { \"unknown\" }\n"
+           "                    // (2) isPrivateDnsActive breadcrumb.\n"
+           "                    Log.d(TAG, \"DNS: LinkProperties.isPrivateDnsActive=${lp.isPrivateDnsActive}, privateDnsServerName=$serverName\")\n"
+           "                }\n"
+           "            }\n"
+           "            val request = NetworkRequest.Builder()\n"
+           "                .addTransportType(NetworkCapabilities.TRANSPORT_VPN)\n"
+           "                .build()\n"
+           "            // (3) requestNetwork start breadcrumb.\n"
+           "            Log.d(TAG, \"DNS: ConnectivityManager.requestNetwork(TRANSPORT_VPN) start\")\n"
+           "            cm.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {\n"
+           "                override fun onAvailable(network: Network) {\n"
+           "                    // (4a) onAvailable breadcrumb.\n"
+           "                    Log.d(TAG, \"DNS: NetworkCallback.onAvailable (VPN network up), attempting bindProcessToNetwork\")\n"
+           "                    try {\n"
+           "                        // (5) bindProcessToNetwork result breadcrumb.\n"
+           "                        val bindResult = cm.bindProcessToNetwork(network)\n"
+           "                        Log.d(TAG, \"DNS: bindProcessToNetwork(vpn) result=$bindResult\")\n"
+           "                    } catch (e: Throwable) {\n"
+           "                        Log.w(TAG, \"DNS: bindProcessToNetwork(vpn) failed: ${e.message}\")\n"
+           "                    } finally {\n"
+           "                        try { cm.unregisterNetworkCallback(this) } catch (_: Throwable) {}\n"
+           "                    }\n"
+           "                }\n"
+           "                override fun onUnavailable() {\n"
+           "                    // (4b) onUnavailable breadcrumb.\n"
+           "                    Log.d(TAG, \"DNS: NetworkCallback.onUnavailable (no VPN network for bindProcessToNetwork)\")\n"
+           "                    try { cm.unregisterNetworkCallback(this) } catch (_: Throwable) {}\n"
+           "                }\n"
+           "            })\n"
+           "        } catch (e: Throwable) {\n"
+           "            Log.w(TAG, \"DNS: checkPrivateDnsAndBindToVpn failed: ${e.message}\")\n"
+           "        }\n"
+           "    }\n"
+           "}\n",
+       ), []),
     # S91 case (Sprint 11.0S-DNS - new) - OpenE2eeVpnService
     # .kt has isPrivateDnsActive + ConnectivityManager
     # .bindProcessToNetwork + active_pool_screen.dart has

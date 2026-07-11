@@ -4275,6 +4275,109 @@ def check_stop_capture_ring_clear_invariant_v38() -> list[str]:
     return findings
 
 
+def check_check_private_dns_bind_5_logd_invariant_v39() -> list[str]:
+    """Sprint 11.0W: OpenE2eeVpnService.kt
+    checkPrivateDnsAndBindToVpn() has 5 Log.d
+    breadcrumbs (S96).
+
+    Owner 20:45 root cause: pre-11.0W the function
+    only logged `Log.w` in the warning/exception
+    paths. The happy path (LinkProperties probed
+    + requestNetwork dispatched + onAvailable
+    fires + bindProcessToNetwork returns true)
+    had NO breadcrumb. If the function SILENTLY
+    returned early (e.g. if requestNetwork never
+    fires onAvailable or onUnavailable on OnePlus
+    OxygenOS, or if activeNetwork is null and the
+    function returns after the `if (activeNet != null)`
+    block), there was NO log entry at all. The Owner
+    could not distinguish "function never ran" from
+    "function ran and bindProcessToNetwork failed
+    silently".
+
+    11.0W fix: add 5 explicit `Log.d` breadcrumbs
+    at every step of the DNS check + bind:
+      1. ENTRY: at the very start of the function.
+      2. LinkProperties.isPrivateDnsActive: shows
+         the boolean + privateDnsServerName (OnePlus
+         OxygenOS sometimes sets a hostname that
+         returns NXDOMAIN — logging the hostname
+         confirms whether the bad one is in use).
+      3. ConnectivityManager.requestNetwork(
+         TRANSPORT_VPN) start: confirms the request
+         was actually issued.
+      4. NetworkCallback.onAvailable OR
+         NetworkCallback.onUnavailable: confirms
+         the callback fired (success or failure).
+      5. bindProcessToNetwork(vpn) result: shows
+         the boolean return value (true=bind OK,
+         false=bind silently failed).
+
+    The check requires the following 5 token
+    substrings in `OpenE2eeVpnService.kt`
+    (comment-stripped), all inside or near
+    `checkPrivateDnsAndBindToVpn`:
+      1. `DNS: checkPrivateDnsAndBindToVpn: ENTRY`
+      2. `isPrivateDnsActive=`
+      3. `ConnectivityManager.requestNetwork(TRANSPORT_VPN) start`
+      4. `NetworkCallback.onAvailable` (the onAvailable
+         breadcrumb) AND `NetworkCallback.onUnavailable`
+         (the onUnavailable breadcrumb).
+      5. `bindProcessToNetwork(vpn) result=`
+
+    Missing any of the 5 re-opens the Owner 20:45
+    "log YOK logcatte" regression — the Owner can
+    no longer tell from logcat where the function
+    actually stopped.
+    """
+    import re
+    findings = []
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not service_path.exists():
+        findings.append(
+            "S96 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S96 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    # Strip Kotlin line + block comments to avoid
+    # false positives on commented-out breadcrumbs.
+    stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    stripped = re.sub(r"//[^\n]*", "", stripped)
+    # Required token substrings (5 of them).
+    required_tokens = {
+        "1.ENTRY": "DNS: checkPrivateDnsAndBindToVpn: ENTRY",
+        "2.isPrivateDnsActive": "isPrivateDnsActive=",
+        "3.requestNetwork start": "ConnectivityManager.requestNetwork(TRANSPORT_VPN) start",
+        "4a.onAvailable": "NetworkCallback.onAvailable",
+        "4b.onUnavailable": "NetworkCallback.onUnavailable",
+        "5.bindProcessToNetwork result": "bindProcessToNetwork(vpn) result=",
+    }
+    for label, token in required_tokens.items():
+        if token not in stripped:
+            findings.append(
+                "S96 OpenE2eeVpnService.kt: missing Log.d "
+                "breadcrumb token `" + token + "` ("
+                + label + "). Sprint 11.0W invariant - "
+                "checkPrivateDnsAndBindToVpn must log "
+                "all 5 steps so the Owner can confirm "
+                "in logcat where the function reached "
+                "(regression guard for Owner 20:45 "
+                "'log YOK logcatte' symptom)."
+            )
+    return findings
+
+
 
 
 
@@ -7445,6 +7548,12 @@ def main() -> int:
         all_findings.extend(s95_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt stopCapture has ring.clear + packetsObserved.set(0) in BOTH already-idle and normal teardown branches - regression guard for Owner 20:19 'getSampledPackets returns 10 packets after VPN stop' symptom - Sprint 11.0V S95")
+
+    s96_findings = check_check_private_dns_bind_5_logd_invariant_v39()
+    if s96_findings:
+        all_findings.extend(s96_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn has 5 Log.d breadcrumbs (ENTRY, isPrivateDnsActive, requestNetwork start, onAvailable/onUnavailable, bindProcessToNetwork result) - regression guard for Owner 20:45 'log YOK logcatte' symptom - Sprint 11.0W S96")
 
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()

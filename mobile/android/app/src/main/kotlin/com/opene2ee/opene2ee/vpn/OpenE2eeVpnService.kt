@@ -1465,7 +1465,18 @@ class OpenE2eeVpnService : VpnService() {
      *       `bindProcessToNetwork` call site.
      */
     private fun checkPrivateDnsAndBindToVpn() {
+        // Sprint 11.0W — 5 explicit Log.d breadcrumbs
+        // at every step of the DNS check + bind.
+        // Owner 20:45 reported `checkPrivateDnsAndBindToVpn
+        // log YOK logcatte` — the previous version only
+        // logged in the error/exception path. If the
+        // function SILENTLY returned early (e.g. if
+        // requestNetwork never fires onAvailable/onUnavailable
+        // on OnePlus OxygenOS), there was NO breadcrumb
+        // at all. S96 audit verifies all 5 Log.d tokens.
         try {
+            // (1) ENTRY breadcrumb.
+            Log.d(TAG, "DNS: checkPrivateDnsAndBindToVpn: ENTRY")
             val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             // Check the active network's LinkProperties for
             // Private DNS. We probe the active network
@@ -1476,14 +1487,30 @@ class OpenE2eeVpnService : VpnService() {
             val activeNet = cm.activeNetwork
             if (activeNet != null) {
                 val lp: LinkProperties? = cm.getLinkProperties(activeNet)
-                if (lp != null && lp.isPrivateDnsActive) {
-                    Log.w(TAG, "DNS: Android Private DNS is ACTIVE on the active network — VPN addDnsServer will be ignored by the system. User must disable Private DNS: Settings > Network & internet > Private DNS > Off.")
-                    // Stash the warning in `lastError` so the
-                    // Dart side can show a snackbar via
-                    // the existing `lastError` state field
-                    // (no new field needed — the Dart
-                    // `stateToMap` already serializes it).
-                    lastError = "private_dns_active: VPN DNS bypassed by Android DoT. Disable Settings > Network > Private DNS."
+                if (lp != null) {
+                    // (2) isPrivateDnsActive breadcrumb.
+                    // OnePlus OxygenOS sometimes sets a
+                    // Private DNS hostname that resolves to
+                    // NXDOMAIN. Log the hostname alongside
+                    // the boolean so the Owner can confirm
+                    // in logcat whether the hostname is
+                    // a known-bad one (e.g. an unreachable
+                    // cellular carrier DNS that returns
+                    // NXDOMAIN and disables Private DNS
+                    // silently).
+                    val serverName = try {
+                        lp.privateDnsServerName ?: "automatic"
+                    } catch (e: Throwable) { "unknown" }
+                    Log.d(TAG, "DNS: LinkProperties.isPrivateDnsActive=${lp.isPrivateDnsActive}, privateDnsServerName=$serverName")
+                    if (lp.isPrivateDnsActive) {
+                        Log.w(TAG, "DNS: Android Private DNS is ACTIVE on the active network — VPN addDnsServer will be ignored by the system. User must disable Private DNS: Settings > Network & internet > Private DNS > Off.")
+                        // Stash the warning in `lastError` so the
+                        // Dart side can show a snackbar via
+                        // the existing `lastError` state field
+                        // (no new field needed — the Dart
+                        // `stateToMap` already serializes it).
+                        lastError = "private_dns_active: VPN DNS bypassed by Android DoT. Disable Settings > Network > Private DNS."
+                    }
                 }
             }
             // (2) Bind this process to the VPN network.
@@ -1495,9 +1522,28 @@ class OpenE2eeVpnService : VpnService() {
             val request = NetworkRequest.Builder()
                 .addTransportType(NetworkCapabilities.TRANSPORT_VPN)
                 .build()
+            // (3) requestNetwork start breadcrumb.
+            // OnePlus OxygenOS sometimes silently
+            // drops requestNetwork(TRANSPORT_VPN) if
+            // the device's VPN profile is in a
+            // half-configured state — the callback
+            // never fires onAvailable or onUnavailable.
+            // This Log.d confirms the request was
+            // actually issued.
+            Log.d(TAG, "DNS: ConnectivityManager.requestNetwork(TRANSPORT_VPN) start")
             cm.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
+                    // (4a) NetworkCallback.onAvailable
+                    // success breadcrumb.
+                    Log.d(TAG, "DNS: NetworkCallback.onAvailable (VPN network up), attempting bindProcessToNetwork")
                     try {
+                        // (5) bindProcessToNetwork result
+                        // breadcrumb. Log.d the boolean
+                        // return value (true=bind OK,
+                        // false=bind silently failed —
+                        // common on OnePlus OxygenOS if
+                        // the VPN profile is not in the
+                        // "connected" state).
                         val bindResult = cm.bindProcessToNetwork(network)
                         Log.d(TAG, "DNS: bindProcessToNetwork(vpn) result=$bindResult")
                     } catch (e: Throwable) {
@@ -1507,7 +1553,13 @@ class OpenE2eeVpnService : VpnService() {
                     }
                 }
                 override fun onUnavailable() {
-                    Log.w(TAG, "DNS: no VPN network available for bindProcessToNetwork")
+                    // (4b) NetworkCallback.onUnavailable
+                    // failure breadcrumb. Replaces the
+                    // pre-11.0W `Log.w` with a `Log.d`
+                    // so the Owner can `adb logcat -s
+                    // OpenE2eeVpnService:V` and confirm
+                    // the failure path was reached.
+                    Log.d(TAG, "DNS: NetworkCallback.onUnavailable (no VPN network for bindProcessToNetwork)")
                     try { cm.unregisterNetworkCallback(this) } catch (_: Throwable) {}
                 }
             })
