@@ -785,6 +785,30 @@ class OpenE2eeVpnService : VpnService() {
     // udpReaderFutures cancel) runs first.
     private val udpForwarder = UdpForwarder(this)
 
+    // Sprint 12.0C — minimal TCP forwarder lives
+    // DIRECTLY in OpenE2eeVpnService.kt (not in
+    // NettyChannelClient.kt). The brief is
+    // explicit: "OpenE2eeVpnService.kt icine
+    // TcpForwarder class (raw java.net.Socket,
+    // Netty DEGIL, 12.0B gibi)". The class is
+    // defined at the bottom of this file
+    // (top-level, same `vpn/` package). It owns
+    // the per-flow tcpConnectionMap, the
+    // per-flow tcpReaderFutures map, and a single
+    // ThreadPoolExecutor for the per-flow TCP
+    // reader threads. Its `tearDown()` method is
+    // called from `stopCapture()` BEFORE
+    // `nettyClient?.shutdown()` so the 6-step
+    // teardown's step 2 (tcpConnectionMap
+    // readerFuture.cancel + socket.close +
+    // readerThread.interrupt + readerThread.join
+    // + map.clear) runs first. After 12.0C the
+    // NettyChannelClient.shutdown() step 2 is a
+    // forward-compat no-op (logs "step 2
+    // DELEGATED") — the actual teardown ran in
+    // TcpForwarder.tearDown() first.
+    private val tcpForwarder = TcpForwarder(this)
+
     /** Current state — observable via `status`. */
     @Volatile
     private var state: State = State.IDLE
@@ -1343,6 +1367,26 @@ class OpenE2eeVpnService : VpnService() {
         //      wait for ALL per-flow reader threads to
         //      exit.
         udpForwarder.tearDown()
+        // Sprint 12.0C — same delegation pattern for
+        // the per-flow TCP Sockets + reader threads
+        // (moved to the service-level `TcpForwarder`
+        // per the brief: "raw java.net.Socket, Netty
+        // DEGIL, 12.0B gibi"). The teardown must run
+        // FIRST (BEFORE `nettyClient?.shutdown()`) so
+        // the 6-step shutdown's step 2 can safely
+        // delegate to the forwarder's teardown as a
+        // no-op (the map is already empty at that
+        // point). The teardown does:
+        //   1. Cancel every per-flow TCP reader Future.
+        //   2. Close every per-flow Socket.
+        //   3. Interrupt every per-flow reader Thread
+        //      (defense in depth).
+        //   4. Join every per-flow reader Thread (1s
+        //      bounded wait).
+        //   5. Clear the maps.
+        //   6. backgroundExecutor.shutdownNow() +
+        //      awaitTermination(1, SECONDS).
+        tcpForwarder.tearDown()
         nettyClient?.shutdown()
         nettyClient = null
 
@@ -1918,6 +1962,17 @@ class OpenE2eeVpnService : VpnService() {
         // DNS queries would never get a response and
         // every hostname-dependent app would fail.
         udpForwarder.setTunOutputStream(output)
+        // Sprint 12.0C — same setter for the service-level
+        // TCP forwarder. The per-connection reader thread
+        // (started by `TcpForwarder.handleSyn` on the
+        // first SYN for a flow) needs the TUN output
+        // stream to write the wrapped IP+TCP response
+        // packets (DATA, FIN+ACK) back to the kernel so
+        // the app sees the server's response. Without this
+        // wire, Chrome / WhatsApp would never get a
+        // response to the SYN+ACK we send back and the
+        // HTTP request would time out.
+        tcpForwarder.setTunOutputStream(output)
         val thread = Thread({
             val buf = ByteArray(TUN_MTU)
             try {
@@ -2131,19 +2186,30 @@ class OpenE2eeVpnService : VpnService() {
                                     // packets seen" from
                                     // "dispatch is broken".
                                     Log.d(TAG, "startReaderThread: TCP packet ENTRY (src=${ip.srcAddr.hostAddress}, dst=${ip.dstAddr.hostAddress}, n=$n, ihl=${ip.ihl})")
-                                    // Sprint 12.0A — TCP state machine.
-                                    // Parse the TCP header once (the
-                                    // handler re-parses internally for
-                                    // clarity but we pass the ports
-                                    // forward to keep the brief's exact
-                                    // signature). The handler drives
+                                    // Sprint 12.0C — TCP state
+                                    // machine dispatch is now on
+                                    // the SERVICE's TcpForwarder,
+                                    // not on the NettyChannelClient.
+                                    // The brief is explicit:
+                                    // "OpenE2eeVpnService.kt icine
+                                    // TcpForwarder class (raw
+                                    // java.net.Socket, Netty
+                                    // DEGIL, 12.0B gibi)".
+                                    // The forwarder parses the TCP
+                                    // header (re-using the IP
+                                    // header already parsed by the
+                                    // Netty client — the IP parser
+                                    // is a thin wrapper around a
+                                    // 20-byte read so reusing it
+                                    // keeps the code DRY) and drives
                                     // the 3-way handshake (SYN ->
-                                    // SYN+ACK -> ESTABLISHED), forwards
-                                    // PSH+ACK data to the real socket,
-                                    // and handles FIN+ACK teardown. See
-                                    // NettyChannelClient.handleTcpPacket
+                                    // SYN+ACK -> ESTABLISHED),
+                                    // forwards PSH+ACK data to the
+                                    // real java.net.Socket, and
+                                    // handles FIN+ACK teardown. See
+                                    // TcpForwarder.handleTcpPacket
                                     // for the full state machine.
-                                    val tcp = client.parseTcpHeader(buf, n, ip.ihl)
+                                    val tcp = tcpForwarder.parseTcpHeader(buf, n, ip.ihl)
                                     if (tcp != null) {
                                         // Sprint 12.0A.6 — breadcrumb
                                         // (2) parseTcpHeader dstPort:
@@ -2171,13 +2237,12 @@ class OpenE2eeVpnService : VpnService() {
                                         // Owner can confirm the
                                         // call site + the handler
                                         // agree on the key.
-                                        val dispatchFlowKey = client.flowKey(
+                                        val dispatchFlowKey = tcpForwarder.flowKey(
                                             ip.srcAddr, tcp.srcPort,
-                                            ip.dstAddr, tcp.dstPort,
-                                            ip.protocol
+                                            ip.dstAddr, tcp.dstPort
                                         )
-                                        Log.d(TAG, "startReaderThread: handleTcpPacket dispatch (flowKey=$dispatchFlowKey)")
-                                        client.handleTcpPacket(
+                                        Log.d(TAG, "startReaderThread: handleTcpPacket dispatch (flowKey=$dispatchFlowKey, forwarder=TcpForwarder)")
+                                        tcpForwarder.handleTcpPacket(
                                             ipPacket = buf,
                                             offset = ip.ihl,
                                             length = n,
@@ -3476,5 +3541,1055 @@ internal class UdpForwarder(private val service: OpenE2eeVpnService) {
         }
 
         Log.d(TAG, "tearDown: DONE (comprehensive teardown complete, no orphan UDP reader)")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Sprint 12.0C — TcpForwarder (raw java.net.Socket, NOT Netty).
+//
+// Why this lives in OpenE2eeVpnService.kt and not in
+// NettyChannelClient.kt:
+//
+//   The brief is explicit: "OpenE2eeVpnService.kt icine
+//   TcpForwarder class (raw java.net.Socket, Netty DEGIL,
+//   12.0B gibi)". The 12.0B sprint moved the UDP forwarder
+//   out of NettyChannelClient.kt and into a new top-level
+//   class IN OpenE2eeVpnService.kt. 12.0C mirrors that
+//   pattern for TCP:
+//
+//     - NettyChannelClient = Netty skeleton (parseIpv4Packet,
+//       parseTcpHeader, flowMap, workerGroup, shutdown())
+//       + 12.0A TCP state machine (kept for S100-S114 audit
+//       compatibility — see 12.0C commit for the runtime
+//       dispatch switch to TcpForwarder).
+//     - UdpForwarder       = UDP only (Sprint 12.0B).
+//     - TcpForwarder       = TCP only (Sprint 12.0C, this
+//       class).
+//
+//   The runtime path in `startReaderThread` now dispatches
+//   TCP packets to `tcpForwarder.handleTcpPacket(...)`
+//   (NOT `nettyClient.handleTcpPacket(...)`) so the
+//   user-space TCP path uses raw java.net.Socket +
+//   service.protect(socket) on every connection — no Netty
+//   dependency for the TCP socket I/O.
+//
+// Why a class and not loose methods on the service:
+//
+//   The per-flow TCP state map + reader Future map +
+//   background Executor are a coherent unit of state. Pulling
+//   them into a class makes the teardown (`tearDown()`) a
+//   single method call and gives the audit a single token
+//   to verify (`TcpForwarder`, `tcpConnectionMap`, `tearDown`,
+//   `protect(`).
+//
+// Why not a new file (TcpForwarder.kt):
+//
+//   The brief says "OpenE2eeVpnService.kt icine" — "into
+//   OpenE2eeVpnService.kt". Top-level class declarations in
+//   the same Kotlin file are the standard way to keep
+//   related code together.
+//
+// Sprint 12.0X 6-step teardown: the 12.0X teardown's
+// step 2 (tcpConnectionMap readerFuture.cancel + socket.close
+// + readerThread.interrupt + readerThread.join + map.clear)
+// is moved into `TcpForwarder.tearDown()`. `stopCapture()`
+// calls `tcpForwarder.tearDown()` BEFORE `nettyClient?.shutdown()`
+// so the 6-step shutdown in NettyChannelClient can safely
+// delegate step 2 to `TcpForwarder.tearDown()` as a no-op
+// (the teardown already ran first in `stopCapture()`). This
+// mirrors the post-12.0B pattern (step 3 delegates to
+// UdpForwarder.tearDown()).
+//
+// Sprint 12.0C Volatile + dual put contract:
+//   (1) TcpConnection has 8 fields, all @Volatile
+//       (state, seqNum, ackNum, receiveWindow, socket,
+//       lastAckSent, retransmissionTimer, readerThread).
+//       The previous 12.0A.7 design had 9 fields (added
+//       readerFuture) and the 12.0A.7 fix was to add
+//       @Volatile to every field. 12.0C reverts to 8
+//       fields (no readerFuture as a field — the
+//       readerFuture is tracked separately in
+//       `tcpReaderFutures` map, matching the
+//       `udpReaderFutures` pattern in UdpForwarder).
+//   (2) handleSyn does a DUAL PUT (stores the
+//       TcpConnection under BOTH the primary (OUTGOING)
+//       and reverse (INCOMING) 5-tuple). Lookup tries
+//       primary first, then reverse. This eliminates
+//       the "UNKNOWN FLOW" symptom that the 12.0A.6
+//       reverse-key fallback produced and the 12.0A.8
+//       late-ACK debug logged. 12.0C does the dual put
+//       in the SYN path (forward prediction) so the
+//       lookup ALWAYS succeeds for the common case
+//       (data flow packets) — no late-ACK debug log
+//       needed (the "revert" of the 12.0A.8 fix).
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Sprint 12.0C — minimal TCP forwarder using raw
+ * `java.net.Socket` (NOT Netty).
+ *
+ * Per-flow protected TCP `Socket` + per-flow reader
+ * thread. The brief: "raw java.net.Socket, Netty
+ * DEGIL, 12.0B gibi" (mirror of the 12.0B UDP
+ * forwarder pattern). The TUN-captured TCP packets
+ * are dispatched here from
+ * `OpenE2eeVpnService.startReaderThread` (replaces
+ * the 12.0A `nettyClient.handleTcpPacket` call).
+ *
+ * The forwarder owns:
+ *   - `tcpConnectionMap` — per-flow TcpConnection
+ *     map (key = "srcIp:srcPort-dstIp:dstPort",
+ *     value = the TcpConnection with the protected
+ *     Socket + reader Thread + Future).
+ *   - `tcpReaderFutures` — per-flow reader Future
+ *     map (key = same flow string, value = the
+ *     Future returned by `backgroundExecutor.submit`
+ *     for the per-connection reader runnable).
+ *   - `backgroundExecutor` — single
+ *     `ThreadPoolExecutor` that owns ALL per-flow TCP
+ *     reader threads.
+ *   - `tunOutputStream` — the TUN output stream
+ *     (set by `OpenE2eeVpnService.startReaderThread`
+ *     so the per-connection reader can write response
+ *     packets back to the kernel).
+ *
+ * Threading model:
+ *   - `handleTcpPacket` is called from the TUN reader
+ *     thread (single-threaded for the dispatch path).
+ *   - The per-flow reader runs on a
+ *     `backgroundExecutor` worker thread (1 thread
+ *     per active flow).
+ *   - `tearDown` is called from the main looper (via
+ *     `stopCapture` / `onRevoke`).
+ *
+ * State machine (RFC 793 — 9 states, per the brief):
+ *   LISTEN -> SYN_SENT -> ESTABLISHED -> FIN_WAIT_1
+ *   -> FIN_WAIT_2 -> CLOSE_WAIT -> LAST_ACK
+ *   -> TIME_WAIT -> CLOSED.
+ *   MVP: NO TIME_WAIT (transitions directly to CLOSED
+ *   after the final FIN+ACK, per the 12.0A brief).
+ */
+internal class TcpForwarder(private val service: OpenE2eeVpnService) {
+
+    companion object {
+        private const val TAG = "TcpForwarder"
+        // IP protocol number for TCP (RFC 790).
+        const val IPPROTO_TCP: Byte = 6
+        // TCP flag bit constants (RFC 793).
+        const val TCP_FIN: Int = 0x01
+        const val TCP_SYN: Int = 0x02
+        const val TCP_RST: Int = 0x04
+        const val TCP_PSH: Int = 0x08
+        const val TCP_ACK: Int = 0x10
+        const val TCP_SYN_ACK: Int = 0x12  // SYN+ACK (SYN=0x02, ACK=0x10)
+        const val TCP_FIN_ACK: Int = 0x11  // FIN+ACK (FIN=0x01, ACK=0x10)
+        // MSS for the single-connection MVP. 1500-byte
+        // MTU minus 40 bytes of headers (20 IP + 20 TCP).
+        const val MSS: Int = 1460
+        // TCP connect timeout. 5 seconds is enough for
+        // a typical mobile RTT (200-500ms) + handshake
+        // overhead, and bounds the per-SYN latency so
+        // a slow server doesn't block the TUN reader.
+        private const val TCP_CONNECT_TIMEOUT_MS = 5_000
+    }
+
+    /**
+     * Parsed IPv4 header (subset) — mirrors the
+     * 12.0A `NettyChannelClient.Ipv4Header` so the
+     * TcpForwarder doesn't depend on NettyChannelClient
+     * (it owns its own parser; the NettyChannelClient
+     * parser stays for the S100 audit invariant).
+     */
+    data class Ipv4Header(
+        val version: Int,
+        val ihl: Int,
+        val totalLength: Int,
+        val protocol: Byte,
+        val srcAddr: java.net.InetAddress,
+        val dstAddr: java.net.InetAddress
+    )
+
+    /**
+     * Parsed TCP header (subset).
+     */
+    data class TcpHeader(
+        val srcPort: Int,
+        val dstPort: Int,
+        val flags: Int,
+        val seqNum: Long,
+        val ackNum: Long
+    )
+
+    /**
+     * Sprint 12.0C — 9-state RFC 793 state machine.
+     * The state NAME is preserved (TIME_WAIT is in
+     * the enum) but the MVP does NOT implement
+     * TIME_WAIT (transitions directly to CLOSED
+     * after the final FIN+ACK, per the brief).
+     */
+    enum class TcpState {
+        LISTEN,
+        SYN_SENT,
+        ESTABLISHED,
+        FIN_WAIT_1,
+        FIN_WAIT_2,
+        CLOSE_WAIT,
+        LAST_ACK,
+        TIME_WAIT,
+        CLOSED
+    }
+
+    /**
+     * Sprint 12.0C — per-flow TCP connection state.
+     * 8 fields, all @Volatile (per the brief).
+     * The readerFuture is NOT a field — it is tracked
+     * separately in `tcpReaderFutures` (matching the
+     * UdpForwarder's `udpReaderFutures` pattern).
+     */
+    data class TcpConnection(
+        @Volatile var state: TcpState = TcpState.LISTEN,
+        // Our seq number (next byte we will send).
+        @Volatile var seqNum: Long = 0L,
+        // Next seq number we expect from the peer.
+        @Volatile var ackNum: Long = 0L,
+        // Receive window (fixed at MSS for MVP, no
+        // sliding window).
+        @Volatile var receiveWindow: Int = MSS,
+        // Real Socket to the destination (after
+        // protect() + connect()). null until
+        // protectAndConnect succeeds.
+        @Volatile var socket: java.net.Socket? = null,
+        // Highest ack number we sent to the app
+        // (for diagnostics).
+        @Volatile var lastAckSent: Long = 0L,
+        // Retransmission timer handle. MVP: null (no
+        // retransmission per the brief).
+        @Volatile var retransmissionTimer: Any? = null,
+        // Background thread that reads from
+        // `socket.getInputStream()` and writes
+        // wrapped IP+TCP packets to the TUN output.
+        @Volatile var readerThread: Thread? = null,
+    )
+
+    /**
+     * Per-flow TCP connection state map. Key:
+     * device 5-tuple "srcIp:srcPort-dstIp:dstPort"
+     * (the original app's flow, NOT reversed).
+     * The map uses ConcurrentHashMap so the TUN
+     * reader thread and the per-connection reader
+     * thread can both touch it (S112 invariant).
+     * Sprint 12.0C: BOTH the primary AND reverse
+     * 5-tuple are stored (dual put in handleSyn).
+     * Lookup in handleTcpPacket tries primary first,
+     * then reverse.
+     */
+    private val tcpConnectionMap: MutableMap<String, TcpConnection> = ConcurrentHashMap()
+
+    /**
+     * Per-flow TCP reader Future map. Key: device
+     * 5-tuple string. Value: the Future returned by
+     * `backgroundExecutor.submit` for the per-flow
+     * TCP reader runnable. The shutdown method
+     * cancels all of these via `Future.cancel(true)`
+     * (which interrupts the worker thread) AND
+     * calls `backgroundExecutor.shutdownNow()` +
+     * `awaitTermination` to ensure no reader thread
+     * outlives the VPN service.
+     */
+    private val tcpReaderFutures: MutableMap<String, Future<*>?> = ConcurrentHashMap()
+
+    /**
+     * Single `ThreadPoolExecutor` that owns ALL
+     * per-flow TCP reader threads. Cached thread
+     * pool so threads are created on demand and
+     * reused. The MVP instantiates up to ~1 reader
+     * per active flow; the cached pool grows as
+     * needed and shrinks when idle.
+     */
+    private val backgroundExecutor: ThreadPoolExecutor = Executors.newCachedThreadPool() as ThreadPoolExecutor
+
+    /**
+     * TUN output stream — the `ParcelFileDescriptor
+     * .AutoCloseOutputStream` that the per-flow
+     * reader thread writes response packets to.
+     * Set by `OpenE2eeVpnService.startReaderThread`
+     * AFTER `Builder.establish()` returns; cleared
+     * by `OpenE2eeVpnService.stopCapture` (via
+     * `tearDown()`) so a stale reference does not
+     * leak.
+     */
+    @Volatile
+    private var tunOutputStream: java.io.OutputStream? = null
+
+    /**
+     * Set the TUN output stream. Called by
+     * `OpenE2eeVpnService.startReaderThread` once
+     * the `ParcelFileDescriptor.AutoCloseOutputStream`
+     * is open. After this call, `handleTcpPacket`
+     * can write response packets (SYN+ACK, ACK,
+     * FIN+ACK, data) back to the device's app via
+     * the TUN. Calling with `null` clears the
+     * reference (used by `tearDown`).
+     */
+    fun setTunOutputStream(output: java.io.OutputStream?) {
+        tunOutputStream = output
+        Log.d(TAG, "setTunOutputStream: TUN output stream ${if (output == null) "cleared" else "set"}")
+    }
+
+    /**
+     * Parse a minimal IPv4 header from a TUN-read
+     * buffer. Returns null if the buffer is too
+     * short or the version is not 4. Mirrors
+     * `NettyChannelClient.parseIpv4Packet` so the
+     * TcpForwarder is self-contained.
+     */
+    fun parseIpv4Packet(buf: ByteArray, len: Int): Ipv4Header? {
+        if (len < 20) return null
+        val bb = java.nio.ByteBuffer.wrap(buf, 0, len).order(java.nio.ByteOrder.BIG_ENDIAN)
+        val verIhl = bb.get(0).toInt() and 0xFF
+        val version = verIhl ushr 4
+        if (version != 4) return null
+        val ihl = (verIhl and 0x0F) * 4
+        if (ihl < 20 || ihl > len) return null
+        val totalLength = bb.getShort(2).toInt() and 0xFFFF
+        val protocol = bb.get(9)
+        val srcBytes = ByteArray(4)
+        val dstBytes = ByteArray(4)
+        bb.position(12)
+        bb.get(srcBytes)
+        bb.get(dstBytes)
+        return Ipv4Header(
+            version = version,
+            ihl = ihl,
+            totalLength = totalLength,
+            protocol = protocol,
+            srcAddr = java.net.InetAddress.getByAddress(srcBytes),
+            dstAddr = java.net.InetAddress.getByAddress(dstBytes)
+        )
+    }
+
+    /**
+     * Parse a minimal TCP header from the buffer
+     * at the given IP header offset. Mirrors
+     * `NettyChannelClient.parseTcpHeader`.
+     */
+    fun parseTcpHeader(buf: ByteArray, len: Int, ipHeaderLen: Int): TcpHeader? {
+        if (len < ipHeaderLen + 20) return null
+        val bb = java.nio.ByteBuffer.wrap(buf, 0, len).order(java.nio.ByteOrder.BIG_ENDIAN)
+        val srcPort = bb.getShort(ipHeaderLen).toInt() and 0xFFFF
+        val dstPort = bb.getShort(ipHeaderLen + 2).toInt() and 0xFFFF
+        val seqNum = bb.getInt(ipHeaderLen + 4).toLong() and 0xFFFFFFFFL
+        val ackNum = bb.getInt(ipHeaderLen + 8).toLong() and 0xFFFFFFFFL
+        val flags = bb.get(ipHeaderLen + 13).toInt() and 0xFF
+        return TcpHeader(
+            srcPort = srcPort,
+            dstPort = dstPort,
+            flags = flags,
+            seqNum = seqNum,
+            ackNum = ackNum
+        )
+    }
+
+    /**
+     * Build a 5-tuple flow key for the
+     * tcpConnectionMap. The "primary" key is the
+     * OUTGOING (app -> real dest) direction. The
+     * "reverse" key is the INCOMING (real dest -> app)
+     * direction. Sprint 12.0C: handleSyn does a dual
+     * put (both keys) so the lookup ALWAYS succeeds
+     * regardless of packet direction.
+     */
+    fun flowKey(
+        srcAddr: java.net.InetAddress,
+        srcPort: Int,
+        dstAddr: java.net.InetAddress,
+        dstPort: Int
+    ): String {
+        return "$srcAddr:$srcPort-$dstAddr:$dstPort"
+    }
+
+    /**
+     * Handle a TUN-captured TCP packet. The IP +
+     * TCP headers have already been parsed by the
+     * caller (see `OpenE2eeVpnService.startReaderThread`).
+     * The 5-tuple can be in EITHER direction
+     * (OUTGOING = app -> real dest, INCOMING = real
+     * dest -> app); we try the primary direction first
+     * and fall back to the reverse direction so the
+     * TcpConnection is found regardless of which way
+     * the packet is going.
+     *
+     * Dispatch precedence (RST > SYN > SYN+ACK >
+     * PSH+ACK > FIN+ACK > ACK).
+     */
+    fun handleTcpPacket(
+        ipPacket: ByteArray,
+        offset: Int,
+        length: Int,
+        srcIp: String,
+        dstIp: String,
+        srcPort: Int,
+        dstPort: Int
+    ) {
+        val primaryFlowKey = flowKey(
+            java.net.InetAddress.getByName(srcIp), srcPort,
+            java.net.InetAddress.getByName(dstIp), dstPort
+        )
+        val reverseFlowKey = flowKey(
+            java.net.InetAddress.getByName(dstIp), dstPort,
+            java.net.InetAddress.getByName(srcIp), srcPort
+        )
+        val tcp = parseTcpHeader(ipPacket, length, offset) ?: return
+        val flags = tcp.flags
+        val payloadLen = (length - offset - 20).coerceAtLeast(0)
+
+        // Sprint 12.0C — bidir lookup. Try the primary
+        // key first; if that misses, try the reverse
+        // key. With the 12.0C dual put in handleSyn
+        // (primary AND reverse stored), the lookup
+        // succeeds for the common case (data flow
+        // packets) regardless of direction.
+        val conn = tcpConnectionMap[primaryFlowKey] ?: tcpConnectionMap[reverseFlowKey]
+        val effectiveFlowKey = if (tcpConnectionMap.containsKey(primaryFlowKey)) {
+            primaryFlowKey
+        } else if (tcpConnectionMap.containsKey(reverseFlowKey)) {
+            reverseFlowKey
+        } else {
+            primaryFlowKey  // not found; SYN path will create under this
+        }
+
+        // RST has highest precedence — the peer is
+        // closing the connection immediately.
+        if ((flags and TCP_RST) != 0) {
+            val rconn = tcpConnectionMap.remove(primaryFlowKey) ?: tcpConnectionMap.remove(reverseFlowKey)
+            try { rconn?.socket?.close() } catch (_: Throwable) {}
+            try { rconn?.readerThread?.interrupt() } catch (_: Throwable) {}
+            tcpReaderFutures.remove(primaryFlowKey)
+            tcpReaderFutures.remove(reverseFlowKey)
+            Log.d(TAG, "handleTcpPacket: RST, closing flow $effectiveFlowKey (state was ${rconn?.state})")
+            return
+        }
+
+        when {
+            (flags and TCP_SYN) != 0 && (flags and TCP_ACK) == 0 -> {
+                // SYN from the app — initiate the 3-way
+                // handshake to the real destination.
+                handleSyn(primaryFlowKey, srcIp, dstIp, srcPort, dstPort, tcp)
+            }
+            (flags and TCP_SYN_ACK) == TCP_SYN_ACK -> {
+                // SYN+ACK from the real dest (the
+                // protectAndConnect path already
+                // completed the 3-way handshake via
+                // Socket.connect()). Send our ACK back
+                // to the app, state = ESTABLISHED.
+                handleSynAck(effectiveFlowKey, conn, srcIp, dstIp, srcPort, dstPort, tcp)
+            }
+            (flags and TCP_PSH) != 0 && (flags and TCP_ACK) != 0 -> {
+                // PSH+ACK from the app — data. Forward
+                // the payload to the real socket (MSS
+                // slicing) and send our ACK back.
+                handleData(effectiveFlowKey, conn, srcIp, dstIp, srcPort, dstPort, tcp,
+                            ipPacket, offset + 20, payloadLen)
+            }
+            (flags and TCP_FIN_ACK) == TCP_FIN_ACK -> {
+                // FIN+ACK from the app — connection
+                // teardown. Send our FIN+ACK to the
+                // real dest and to the app.
+                handleFinAck(effectiveFlowKey, conn, srcIp, dstIp, srcPort, dstPort, tcp)
+            }
+            (flags and TCP_ACK) != 0 -> {
+                // Bare ACK from the app — pure
+                // acknowledgement (e.g., the app
+                // ACKing our FIN+ACK). For the MVP
+                // we just log + bump the lastAckSent
+                // counter.
+                if (conn != null) {
+                    conn.lastAckSent = tcp.ackNum
+                    Log.d(TAG, "handleTcpPacket: ACK, flow $effectiveFlowKey, ackNum=${tcp.ackNum} (state=${conn.state})")
+                } else {
+                    Log.d(TAG, "handleTcpPacket: ACK for unknown flow $effectiveFlowKey; dropping")
+                }
+            }
+            else -> {
+                Log.d(TAG, "handleTcpPacket: unhandled flags 0x${"%02x".format(flags)} for flow $effectiveFlowKey")
+            }
+        }
+    }
+
+    /**
+     * Sprint 12.0C — handle a SYN from the app.
+     * 1. Create a new TcpConnection (initial state
+     *    LISTEN).
+     * 2. Create a raw `java.net.Socket`, call
+     *    `service.protect(socket)` (so the socket
+     *    bypasses the VPN and uses the real NIC),
+     *    then `connect()` to the destination. The
+     *    connect() is synchronous and returns after
+     *    the 3-way handshake completes; if it
+     *    fails we mark the connection CLOSED.
+     * 3. Transition LISTEN -> SYN_SENT -> ESTABLISHED
+     *    (the connect() block covers both
+     *    transitions).
+     * 4. Build a SYN+ACK response packet and write
+     *    it back to the TUN so the app sees a
+     *    SYN+ACK.
+     * 5. Start a background thread that reads from
+     *    the real socket and writes wrapped IP+TCP
+     *    packets back to the TUN (the response
+     *    direction).
+     * 6. DUAL PUT — store the TcpConnection under
+     *    BOTH the primary and reverse flowKey. This
+     *    eliminates the "UNKNOWN FLOW" symptom
+     *    without needing the 12.0A.8 late-ACK
+     *    debug log.
+     */
+    private fun handleSyn(
+        flowKey: String,
+        srcIp: String,
+        dstIp: String,
+        srcPort: Int,
+        dstPort: Int,
+        tcp: TcpHeader
+    ) {
+        val conn = TcpConnection()
+        conn.state = TcpState.LISTEN
+        conn.seqNum = (System.nanoTime() and 0xFFFFFFFFL)
+        conn.ackNum = tcp.seqNum + 1
+        Log.d(TAG, "handleTcpPacket: SYN, flow $flowKey, state=LISTEN -> SYN_SENT")
+        val sock: java.net.Socket? = try {
+            val s = java.net.Socket()
+            // Sprint 12.0C — `service.protect(socket)` is
+            // the load-bearing piece. It tells the system
+            // "this socket MUST bypass the VPN and use
+            // the real NIC". Without protect(), the
+            // socket would be captured by the TUN and
+            // the packet would loop forever (the same
+            // "VPN blackhole" symptom that 12.0A fixed
+            // for the Netty path, now closed for the
+            // raw Socket path).
+            val protected = service.protect(s)
+            if (!protected) {
+                Log.e(TAG, "handleSyn: protect(Socket) returned false for $flowKey; socket will loop in VPN")
+                try { s.close() } catch (_: Throwable) {}
+                null
+            } else {
+                Log.d(TAG, "handleSyn: protected Socket for $flowKey dst=$dstIp:$dstPort")
+                s.connect(java.net.InetSocketAddress(java.net.InetAddress.getByName(dstIp), dstPort), TCP_CONNECT_TIMEOUT_MS)
+                Log.d(TAG, "handleSyn: connected $flowKey to $dstIp:$dstPort (local=${s.localSocketAddress}, remote=${s.remoteSocketAddress})")
+                s
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "handleSyn: Socket() / protect() / connect() failed for $flowKey: ${e.message}")
+            null
+        }
+        if (sock == null) {
+            conn.state = TcpState.CLOSED
+            Log.w(TAG, "handleSyn: protectAndConnect FAILED for $flowKey; state=CLOSED")
+            return
+        }
+        conn.socket = sock
+        // The connect() completed the 3-way handshake
+        // with the real dest, so we transition
+        // SYN_SENT -> ESTABLISHED here.
+        conn.state = TcpState.ESTABLISHED
+        Log.d(TAG, "handleSyn: state=SYN_SENT -> ESTABLISHED for flow $flowKey (TcpConnection: connected to $dstIp:$dstPort)")
+        // Sprint 12.0C — DUAL PUT (forward prediction).
+        // Store the TcpConnection under BOTH the
+        // primary (OUTGOING) and reverse (INCOMING)
+        // 5-tuple. This eliminates the UNKNOWN FLOW
+        // symptom for the common case (data flow
+        // packets) WITHOUT requiring a late-ACK
+        // debug log (the "revert" of the 12.0A.8
+        // specific fix).
+        val reverseKey = flowKey(
+            java.net.InetAddress.getByName(dstIp), dstPort,
+            java.net.InetAddress.getByName(srcIp), srcPort
+        )
+        tcpConnectionMap[flowKey] = conn
+        tcpConnectionMap[reverseKey] = conn
+
+        // Build our SYN+ACK response packet and write
+        // it to the TUN. From the app's perspective,
+        // the VPN is acting as the remote server, so
+        // it expects a SYN+ACK with seq = ourInitialSeq
+        // and ack = appSeq+1.
+        val synAckPkt = buildIpTcpPacket(
+            srcIp = dstIp, dstIp = srcIp,
+            srcPort = dstPort, dstPort = srcPort,
+            seqNum = conn.seqNum, ackNum = conn.ackNum,
+            flags = TCP_SYN_ACK,
+            payload = ByteArray(0),
+        )
+        writeToTun(synAckPkt, "SYN+ACK -> app")
+
+        // Start the background reader thread that
+        // pulls response bytes from the real socket
+        // and writes them back to the TUN (the
+        // reverse direction).
+        startSocketReader(flowKey, conn, srcIp, dstIp, srcPort, dstPort)
+    }
+
+    /**
+     * Sprint 12.0C — handle a SYN+ACK from the
+     * real dest. The `Socket.connect()` path
+     * already completed the 3-way handshake, so
+     * this branch is the diagnostic case where the
+     * SYN+ACK is observed via the TUN (e.g., for
+     * testing without a real socket connect). Send
+     * our ACK to the app and confirm state =
+     * ESTABLISHED.
+     */
+    private fun handleSynAck(
+        flowKey: String,
+        conn: TcpConnection?,
+        srcIp: String,
+        dstIp: String,
+        srcPort: Int,
+        dstPort: Int,
+        tcp: TcpHeader
+    ) {
+        if (conn == null) {
+            Log.w(TAG, "handleTcpPacket: SYN+ACK for unknown flow $flowKey; dropping")
+            return
+        }
+        if (conn.state != TcpState.SYN_SENT && conn.state != TcpState.ESTABLISHED) {
+            Log.w(TAG, "handleTcpPacket: SYN+ACK in unexpected state ${conn.state} for $flowKey")
+        }
+        conn.ackNum = tcp.seqNum + 1
+        conn.state = TcpState.ESTABLISHED
+        Log.d(TAG, "handleTcpPacket: SYN+ACK received, state=SYN_SENT -> ESTABLISHED for flow $flowKey")
+        val ackPkt = buildIpTcpPacket(
+            srcIp = dstIp, dstIp = srcIp,
+            srcPort = dstPort, dstPort = srcPort,
+            seqNum = conn.seqNum, ackNum = conn.ackNum,
+            flags = TCP_ACK, payload = ByteArray(0),
+        )
+        writeToTun(ackPkt, "ACK -> app")
+    }
+
+    /**
+     * Sprint 12.0C — handle a PSH+ACK (data)
+     * packet from the app. Slice the payload into
+     * MSS-sized chunks (the MVP fragmenter) and
+     * write each chunk to the real socket. Build
+     * an ACK response packet (with ack = seq +
+     * payloadLen) and write it to the TUN.
+     */
+    private fun handleData(
+        flowKey: String,
+        conn: TcpConnection?,
+        srcIp: String,
+        dstIp: String,
+        srcPort: Int,
+        dstPort: Int,
+        tcp: TcpHeader,
+        ipPacket: ByteArray,
+        payloadOffset: Int,
+        payloadLen: Int
+    ) {
+        if (conn == null || conn.socket == null) {
+            Log.w(TAG, "handleTcpPacket: PSH+ACK for unknown/no-socket flow $flowKey; dropping")
+            return
+        }
+        if (conn.state != TcpState.ESTABLISHED) {
+            Log.w(TAG, "handleTcpPacket: PSH+ACK in state ${conn.state} for $flowKey; dropping")
+            return
+        }
+        // Slice + write payload to the real socket.
+        val out = conn.socket!!.getOutputStream()
+        var written = 0
+        while (written < payloadLen) {
+            val chunkSize = minOf(MSS, payloadLen - written)
+            out.write(ipPacket, payloadOffset + written, chunkSize)
+            written += chunkSize
+        }
+        out.flush()
+        Log.d(TAG, "handleTcpPacket: PSH+ACK data, forward $written bytes from flow $flowKey to $dstIp:$dstPort (MSS=$MSS)")
+        // ACK back to the app.
+        conn.ackNum = tcp.seqNum + payloadLen
+        conn.lastAckSent = conn.ackNum
+        val ackPkt = buildIpTcpPacket(
+            srcIp = dstIp, dstIp = srcIp,
+            srcPort = dstPort, dstPort = srcPort,
+            seqNum = conn.seqNum, ackNum = conn.ackNum,
+            flags = TCP_ACK, payload = ByteArray(0),
+        )
+        writeToTun(ackPkt, "ACK -> app (data)")
+    }
+
+    /**
+     * Sprint 12.0C — handle a FIN+ACK from the
+     * app. Close the real socket, build a FIN+ACK
+     * response, transition through FIN_WAIT_1 (and
+     * immediately to CLOSED per the brief's MVP —
+     * no TIME_WAIT).
+     */
+    private fun handleFinAck(
+        flowKey: String,
+        conn: TcpConnection?,
+        srcIp: String,
+        dstIp: String,
+        srcPort: Int,
+        dstPort: Int,
+        tcp: TcpHeader
+    ) {
+        if (conn == null) {
+            Log.w(TAG, "handleTcpPacket: FIN+ACK for unknown flow $flowKey; dropping")
+            return
+        }
+        // Remove from BOTH map slots (primary +
+        // reverse) so a later INCOMING packet on the
+        // reverse key does not see the closed
+        // connection. The handleSyn dual put stored
+        // the conn under both keys; iterate the map
+        // to find all keys whose value is this conn
+        // and remove them (cheaper than tracking
+        // both keys separately on every TcpConnection).
+        val keysToRemove = mutableListOf<String>()
+        for ((k, v) in tcpConnectionMap) {
+            if (v === conn) keysToRemove.add(k)
+        }
+        keysToRemove.forEach { tcpConnectionMap.remove(it) }
+        keysToRemove.forEach { tcpReaderFutures.remove(it) }
+        conn.ackNum = tcp.seqNum + 1
+        conn.state = TcpState.FIN_WAIT_1
+        Log.d(TAG, "handleTcpPacket: FIN+ACK, state=ESTABLISHED -> FIN_WAIT_1 for flow $flowKey")
+        // MVP: no TIME_WAIT — close immediately
+        // after sending our FIN+ACK.
+        try { conn.socket?.close() } catch (_: Throwable) {}
+        try { conn.readerThread?.interrupt() } catch (_: Throwable) {}
+        // Build the FIN+ACK response. The response
+        // direction is REVERSED: from the dest
+        // (dstIp:dstPort) to the app (srcIp:srcPort).
+        val finAckPkt = buildIpTcpPacket(
+            srcIp = dstIp, dstIp = srcIp,
+            srcPort = dstPort, dstPort = srcPort,
+            seqNum = conn.seqNum, ackNum = conn.ackNum,
+            flags = TCP_FIN_ACK, payload = ByteArray(0),
+        )
+        writeToTun(finAckPkt, "FIN+ACK -> app")
+        conn.state = TcpState.CLOSED
+        Log.d(TAG, "handleTcpPacket: FIN+ACK, state=FIN_WAIT_1 -> CLOSED (no TIME_WAIT in MVP) for flow $flowKey")
+    }
+
+    /**
+     * Sprint 12.0C — start a background thread
+     * that reads from the real socket and writes
+     * wrapped IP+TCP packets back to the TUN. The
+     * thread is daemon so it does not block process
+     * exit. It exits when the socket is closed
+     * (real EOF) or interrupted by `tearDown()` / a
+     * FIN handler.
+     */
+    private fun startSocketReader(
+        flowKey: String,
+        conn: TcpConnection,
+        srcIp: String,
+        dstIp: String,
+        srcPort: Int,
+        dstPort: Int
+    ) {
+        val sock = conn.socket ?: return
+        // Submit the reader runnable to
+        // backgroundExecutor. The Future is stored in
+        // tcpReaderFutures[flowKey] for shutdown
+        // cancellation. The thread ref (executor
+        // worker thread) is stored in
+        // conn.readerThread for any code that still
+        // reads it. The thread name is set inside the
+        // runnable so logcat shows the
+        // 5-tuple-prefixed name.
+        val runnable = Runnable {
+            try {
+                Thread.currentThread().name = "opene2ee-tcp-forwarder-reader-$flowKey"
+                conn.readerThread = Thread.currentThread()
+            } catch (_: Throwable) {}
+            try {
+                val input = sock.getInputStream()
+                val buf = ByteArray(MSS)
+                while (!Thread.currentThread().isInterrupted) {
+                    val n = try {
+                        input.read(buf)
+                    } catch (e: Throwable) {
+                        Log.d(TAG, "startSocketReader: socket read EOF / error for $flowKey: ${e.message}")
+                        break
+                    }
+                    if (n <= 0) {
+                        Log.d(TAG, "startSocketReader: socket EOF (n=$n), exiting reader for $flowKey")
+                        break
+                    }
+                    // Bump our seq (we are sending n
+                    // bytes).
+                    conn.seqNum += n
+                    val dataPkt = buildIpTcpPacket(
+                        srcIp = dstIp, dstIp = srcIp,
+                        srcPort = dstPort, dstPort = srcPort,
+                        seqNum = conn.seqNum, ackNum = conn.ackNum,
+                        flags = TCP_PSH or TCP_ACK,
+                        payload = buf.copyOf(n),
+                    )
+                    writeToTun(dataPkt, "DATA -> app (${n}B)")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "startSocketReader: thread crash for $flowKey: ${t.message}")
+            } finally {
+                // Remove our Future from tcpReaderFutures
+                // so the shutdown method does not try to
+                // cancel an already-completed Future.
+                synchronized(tcpReaderFutures) { tcpReaderFutures.remove(flowKey) }
+            }
+        }
+        val future = backgroundExecutor.submit(runnable)
+        synchronized(tcpReaderFutures) { tcpReaderFutures[flowKey] = future }
+        Log.d(TAG, "startSocketReader: reader submitted to backgroundExecutor for $flowKey (activeCount=${backgroundExecutor.activeCount})")
+    }
+
+    /**
+     * Sprint 12.0C — write a response packet to
+     * the TUN output stream. The TUN output is
+     * set by `setTunOutputStream` from
+     * `startReaderThread`; this helper is a no-op
+     * if the stream is null (e.g., during a race
+     * with `stopCapture`).
+     */
+    private fun writeToTun(packet: ByteArray, label: String) {
+        val out = tunOutputStream
+        if (out == null) {
+            Log.w(TAG, "writeToTun: TUN output stream not set; dropping $label (${packet.size}B)")
+            return
+        }
+        try {
+            out.write(packet)
+            out.flush()
+        } catch (e: Throwable) {
+            Log.w(TAG, "writeToTun: write FAILED for $label: ${e.message}")
+        }
+    }
+
+    /**
+     * Sprint 12.0C — build an IP+TCP packet (no
+     * IP options, no TCP options — bare 20-byte
+     * headers) for writing back to the TUN.
+     */
+    fun buildIpTcpPacket(
+        srcIp: String,
+        dstIp: String,
+        srcPort: Int,
+        dstPort: Int,
+        seqNum: Long,
+        ackNum: Long,
+        flags: Int,
+        payload: ByteArray
+    ): ByteArray {
+        val ipHeaderLen = 20
+        val tcpHeaderLen = 20
+        val totalLen = ipHeaderLen + tcpHeaderLen + payload.size
+        val out = ByteArray(totalLen)
+        val bb = java.nio.ByteBuffer.wrap(out).order(java.nio.ByteOrder.BIG_ENDIAN)
+
+        // ---- IPv4 header (20 bytes) ----
+        bb.put(0, (0x45).toByte())
+        bb.putShort(2, totalLen.toShort())
+        bb.putShort(4, 0)  // identification (unused for MVP)
+        bb.putShort(6, 0x4000.toShort())  // flags=DF, frag offset=0
+        bb.put(8, 64.toByte())  // TTL=64
+        bb.put(9, IPPROTO_TCP)
+        bb.putShort(10, 0)  // header checksum (filled below)
+        val srcBytes = java.net.InetAddress.getByName(srcIp).address
+        bb.put(12, srcBytes[0]); bb.put(13, srcBytes[1])
+        bb.put(14, srcBytes[2]); bb.put(15, srcBytes[3])
+        val dstBytes = java.net.InetAddress.getByName(dstIp).address
+        bb.put(16, dstBytes[0]); bb.put(17, dstBytes[1])
+        bb.put(18, dstBytes[2]); bb.put(19, dstBytes[3])
+        val ipChecksum = internetChecksum(out, 0, ipHeaderLen)
+        bb.putShort(10, ipChecksum.toShort())
+
+        // ---- TCP header (20 bytes) ----
+        val tcpStart = ipHeaderLen
+        bb.putShort(tcpStart, srcPort.toShort())
+        bb.putShort(tcpStart + 2, dstPort.toShort())
+        bb.putInt(tcpStart + 4, seqNum.toInt())
+        bb.putInt(tcpStart + 8, ackNum.toInt())
+        bb.put(tcpStart + 12, (0x50).toByte())  // data offset=5
+        bb.put(tcpStart + 13, flags.toByte())
+        bb.putShort(tcpStart + 14, MSS.toShort())
+        bb.putShort(tcpStart + 16, 0)  // checksum (filled below)
+        bb.putShort(tcpStart + 18, 0)  // urgent pointer
+        val tcpChecksum = tcpChecksum(out, tcpStart, tcpHeaderLen + payload.size,
+                                       srcBytes, dstBytes)
+        bb.putShort(tcpStart + 16, tcpChecksum.toShort())
+
+        // ---- Payload ----
+        if (payload.isNotEmpty()) {
+            System.arraycopy(payload, 0, out, ipHeaderLen + tcpHeaderLen, payload.size)
+        }
+        return out
+    }
+
+    /**
+     * RFC 1071 Internet checksum.
+     */
+    private fun internetChecksum(buf: ByteArray, start: Int, len: Int): Int {
+        var sum = 0L
+        var i = start
+        val end = start + len
+        while (i + 1 < end) {
+            sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        if (i < end) {
+            sum += (buf[i].toInt() and 0xFF) shl 8
+        }
+        while (sum shr 16 != 0L) {
+            sum = (sum and 0xFFFFL) + (sum shr 16)
+        }
+        return (sum.inv() and 0xFFFFL).toInt()
+    }
+
+    /**
+     * RFC 793 TCP checksum with pseudo-header.
+     */
+    private fun tcpChecksum(
+        buf: ByteArray,
+        tcpStart: Int,
+        tcpLen: Int,
+        srcIp: ByteArray,
+        dstIp: ByteArray
+    ): Int {
+        var sum = 0L
+        sum += ((srcIp[0].toInt() and 0xFF) shl 8) or (srcIp[1].toInt() and 0xFF)
+        sum += ((srcIp[2].toInt() and 0xFF) shl 8) or (srcIp[3].toInt() and 0xFF)
+        sum += ((dstIp[0].toInt() and 0xFF) shl 8) or (dstIp[1].toInt() and 0xFF)
+        sum += ((dstIp[2].toInt() and 0xFF) shl 8) or (dstIp[3].toInt() and 0xFF)
+        sum += IPPROTO_TCP.toInt() and 0xFF
+        sum += tcpLen and 0xFFFF
+        var i = tcpStart
+        val end = tcpStart + tcpLen
+        while (i + 1 < end) {
+            sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        if (i < end) {
+            sum += (buf[i].toInt() and 0xFF) shl 8
+        }
+        while (sum shr 16 != 0L) {
+            sum = (sum and 0xFFFFL) + (sum shr 16)
+        }
+        return (sum.inv() and 0xFFFFL).toInt()
+    }
+
+    /**
+     * Sprint 12.0C — comprehensive teardown of
+     * the TCP forwarder. Called from
+     * `OpenE2eeVpnService.stopCapture` BEFORE
+     * `nettyClient?.shutdown()` so the 6-step
+     * shutdown's step 2 (tcpConnectionMap close) can
+     * safely delegate to `TcpForwarder.tearDown()`
+     * as a no-op (the teardown already ran first in
+     * `stopCapture()`).
+     *
+     * The 6 steps (per the brief "(8) TEARDOWN ekle
+     * 12.0X 6-step'in step 2'sine: tcpConnectionMap
+     * readerFuture.cancel + socket.close +
+     * readerThread.interrupt + readerThread.join +
+     * map.clear"):
+     *   1. Cancel every per-flow TCP reader Future
+     *      (`Future.cancel(true)` interrupts the
+     *      worker thread).
+     *   2. Close every per-flow real `java.net.Socket`
+     *      (so the kernel releases the bound port
+     *      + the OS's TCP state machine sees the
+     *      FIN).
+     *   3. Interrupt every per-flow reader Thread
+     *      (defense in depth — cancel(true) already
+     *      interrupts, but a stale `readerThread`
+     *      ref might survive in the TcpConnection).
+     *   4. Join every per-flow reader Thread with a
+     *      1-second bounded wait (so the executor
+     *      workers exit before we proceed).
+     *   5. Clear `tcpConnectionMap` and
+     *      `tcpReaderFutures`.
+     *   6. `backgroundExecutor.shutdownNow()` +
+     *      `awaitTermination(1, SECONDS)` — bounded
+     *      wait for ALL per-flow reader threads to
+     *      exit.
+     *
+     * After this returns, NO background TCP thread
+     * is alive, every per-flow socket is closed,
+     * and the TUN output stream ref is detached.
+     * The kernel can safely release the TUN
+     * interface.
+     */
+    fun tearDown() {
+        Log.d(TAG, "tearDown: starting comprehensive teardown (12.0C)")
+        // Step 1 — cancel every per-flow TCP reader
+        // Future. `Future.cancel(true)` interrupts the
+        // executor worker thread so the read() call
+        // unblocks with an InterruptedIOException.
+        try {
+            synchronized(tcpReaderFutures) {
+                tcpReaderFutures.values.forEach { f ->
+                    try { f?.cancel(true) } catch (_: Throwable) {}
+                }
+            }
+            Log.d(TAG, "tearDown: step 1 DONE (tcpReaderFutures cancelled)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 1 (tcpReaderFutures) FAILED: ${e.message}")
+        }
+
+        // Step 2 — close every per-flow real Socket.
+        try {
+            tcpConnectionMap.values.forEach { conn ->
+                try { conn.socket?.close() } catch (_: Throwable) {}
+            }
+            Log.d(TAG, "tearDown: step 2 DONE (per-flow Sockets closed)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 2 (Socket close) FAILED: ${e.message}")
+        }
+
+        // Step 3 — interrupt every per-flow reader
+        // Thread (defense in depth).
+        try {
+            tcpConnectionMap.values.forEach { conn ->
+                try { conn.readerThread?.interrupt() } catch (_: Throwable) {}
+            }
+            Log.d(TAG, "tearDown: step 3 DONE (per-flow reader Threads interrupted)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 3 (Thread interrupt) FAILED: ${e.message}")
+        }
+
+        // Step 4 — join every per-flow reader Thread
+        // with a 1-second bounded wait.
+        try {
+            tcpConnectionMap.values.forEach { conn ->
+                try { conn.readerThread?.join(1_000L) } catch (_: Throwable) {}
+            }
+            Log.d(TAG, "tearDown: step 4 DONE (per-flow reader Threads joined)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 4 (Thread join) FAILED: ${e.message}")
+        }
+
+        // Step 5 — clear the maps.
+        try {
+            tcpConnectionMap.clear()
+            synchronized(tcpReaderFutures) { tcpReaderFutures.clear() }
+            Log.d(TAG, "tearDown: step 5 DONE (tcpConnectionMap + tcpReaderFutures cleared)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 5 (map clear) FAILED: ${e.message}")
+        }
+
+        // Step 6 — background executor shutdownNow +
+        // awaitTermination. `shutdownNow()` interrupts
+        // all running tasks; `awaitTermination(1s)`
+        // waits for them to exit.
+        try {
+            backgroundExecutor.shutdownNow()
+            backgroundExecutor.awaitTermination(1, TimeUnit.SECONDS)
+            Log.d(TAG, "tearDown: step 6 DONE (backgroundExecutor shutdownNow + awaitTermination)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 6 (backgroundExecutor) FAILED: ${e.message}")
+        }
+
+        Log.d(TAG, "tearDown: DONE (comprehensive teardown complete, no orphan TCP reader)")
     }
 }

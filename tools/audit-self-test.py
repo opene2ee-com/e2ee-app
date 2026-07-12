@@ -3254,6 +3254,317 @@ def run_s116_check(opene2ee_vpn_service_text):
     return findings
 
 
+def run_s117_check(opene2ee_vpn_service_text):
+    """S117: TcpForwarder teardown invariant (Sprint 12.0C).
+
+    The 12.0A TCP state machine was moved OUT of
+    NettyChannelClient.kt and INTO a new
+    TcpForwarder class in OpenE2eeVpnService.kt per
+    the brief: "OpenE2eeVpnService.kt icine
+    TcpForwarder class (raw java.net.Socket, Netty
+    DEGIL, 12.0B gibi)".
+
+    The TcpForwarder mirrors the 12.0B UdpForwarder
+    pattern: raw java.net.Socket + service.protect
+    on every connection (the brief: "service
+    .protect(socket) + Socket(host, port) +
+    outputStream + inputStream"). The 12.0X 6-step
+    teardown's step 2 is moved into the new
+    TcpForwarder.tearDown() method:
+
+      1. Cancel every per-flow TCP reader Future
+         (`Future.cancel(true)` interrupts the
+         worker thread).
+      2. Close every per-flow real java.net.Socket.
+      3. Interrupt every per-flow reader Thread.
+      4. Join every per-flow reader Thread
+         (1-second bounded wait).
+      5. Clear tcpConnectionMap + tcpReaderFutures.
+      6. backgroundExecutor.shutdownNow() +
+         awaitTermination(1, SECONDS).
+
+    After tearDown returns, NO background TCP thread
+    is alive, every per-flow socket is closed, and
+    the kernel can safely release the TUN
+    interface. The teardown is called from
+    OpenE2eeVpnService.stopCapture BEFORE
+    nettyClient?.shutdown() so the 6-step
+    shutdown's step 2 can safely delegate to the
+    TcpForwarder teardown (similar to the post-12.0B
+    pattern for step 3 / UdpForwarder).
+
+    The audit checks the OpenE2eeVpnService.kt
+    source for the 12 mandatory tokens:
+      1. `class TcpForwarder` declaration (top-level
+         or nested) in the file.
+      2. `tcpConnectionMap` field (per-flow
+         TcpConnection map; the brief requires the
+         teardown to close + clear it).
+      3. `tcpReaderFutures` field (per-flow reader
+         Future map; the teardown must cancel
+         them).
+      4. `tearDown()` method declaration (the
+         public teardown entry point called from
+         `OpenE2eeVpnService.stopCapture`).
+      5. Inside `tearDown`: `cancel(true)` call
+         (cancels every per-flow reader Future so
+         the read() loop unblocks).
+      6. Inside `tearDown`: `conn.socket?.close()`
+         (closes every per-flow real Socket).
+      7. Inside `tearDown`: `readerThread.interrupt`
+         (defense in depth — interrupts every
+         per-flow reader Thread).
+      8. Inside `tearDown`: `readerThread.join` (1s
+         bounded wait for the reader threads to
+         exit before the teardown returns).
+      9. Inside `tearDown`: `shutdownNow()` +
+         `awaitTermination` (backgroundExecutor
+         teardown).
+     10. `protect(` call in the handleSyn code
+         path (the brief: "service.protect(socket)").
+     11. Caller wiring: `tcpForwarder.tearDown()`
+         call from `OpenE2eeVpnService.stopCapture`
+         (the teardown must run BEFORE
+         `nettyClient?.shutdown()` so the 6-step
+         structure is preserved).
+     12. TUN wire: `tcpForwarder.setTunOutputStream`
+         call from `startReaderThread` (so the
+         per-connection reader can write response
+         packets back to the kernel).
+
+    The audit strips `/* ... */` block comments and
+    `//` line comments (preserving strings), then
+    checks for the 12 mandatory token substrings in
+    the resulting code. Any future sprint that
+    drops one of the 12 invariants trips the
+    regression guard.
+
+    Sprint 12.0C target: 163 + 1 = 164 audit cases
+    total (S117 is the 164th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: file text missing. "
+            "Sprint 12.0C invariant - the TcpForwarder "
+            "teardown must be in this file (the brief: "
+            "\"OpenE2eeVpnService.kt icine TcpForwarder "
+            "class (raw java.net.Socket, Netty DEGIL, "
+            "12.0B gibi)\"). S115 is no longer the "
+            "complete teardown guard for the TCP path "
+            "(the TCP code moved out of "
+            "NettyChannelClient.kt); S117 is the new "
+            "authoritative audit for the TCP forwarder "
+            "teardown."
+        )
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    # Strip // line comments (preserving strings).
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # 1. TcpForwarder class declaration.
+    if "class TcpForwarder" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing `class "
+            "TcpForwarder` declaration. Sprint 12.0C "
+            "invariant - the TCP forwarder must be a class "
+            "IN this file (the brief: \"OpenE2eeVpnService.kt "
+            "icine TcpForwarder class\"). "
+            "NettyChannelClient.kt no longer owns the TCP "
+            "runtime code."
+        )
+
+    # 2. tcpConnectionMap field.
+    if "tcpConnectionMap" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`tcpConnectionMap` field. Sprint 12.0C "
+            "invariant - the per-flow TcpConnection map "
+            "must be in TcpForwarder (moved from "
+            "NettyChannelClient) so the teardown can close "
+            "+ clear it."
+        )
+
+    # 3. tcpReaderFutures field.
+    if "tcpReaderFutures" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`tcpReaderFutures` field. Sprint 12.0C "
+            "invariant - the per-flow reader Future map "
+            "must be in TcpForwarder so the teardown can "
+            "cancel them (mirrors the 12.0B UdpForwarder "
+            "`udpReaderFutures` pattern)."
+        )
+
+    # 4. tearDown() method.
+    if "fun tearDown()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing `fun "
+            "tearDown()` method on TcpForwarder. Sprint "
+            "12.0C invariant - the teardown is called from "
+            "OpenE2eeVpnService.stopCapture BEFORE "
+            "nettyClient?.shutdown() so the 6-step "
+            "shutdown's step 2 can safely delegate (step 2 "
+            "is a forward-compat no-op after the teardown "
+            "ran first)."
+        )
+
+    # 5. cancel(true) inside tearDown.
+    if "cancel(true)" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`cancel(true)` in TcpForwarder.tearDown. "
+            "Sprint 12.0C invariant - the per-flow TCP "
+            "reader Futures must be cancelled "
+            "(Future.cancel(true) interrupts the executor "
+            "worker thread) so the read() call unblocks "
+            "immediately."
+        )
+
+    # 6. socket close inside tearDown (per-flow real
+    # java.net.Socket close; without it the socket stays
+    # bound and the kernel cannot release the underlying
+    # port + the OS's TCP state machine never sees the
+    # FIN).
+    if "conn.socket?.close()" not in code and "conn.socket?.close()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing per-flow "
+            "Socket close in TcpForwarder.tearDown. Sprint "
+            "12.0C invariant - every per-flow real "
+            "java.net.Socket must be closed so the kernel "
+            "can release the bound TCP port and the TUN "
+            "interface can be safely released."
+        )
+
+    # 7. readerThread.interrupt inside tearDown.
+    if "conn.readerThread?.interrupt()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`conn.readerThread?.interrupt()` in "
+            "TcpForwarder.tearDown. Sprint 12.0C invariant "
+            "- every per-flow reader Thread must be "
+            "interrupted (defense in depth — cancel(true) "
+            "already interrupts the executor worker, but a "
+            "stale `readerThread` ref might survive in the "
+            "TcpConnection data class and need an explicit "
+            "interrupt)."
+        )
+
+    # 8. readerThread.join inside tearDown (1s bounded
+    # wait for the reader threads to exit before the
+    # teardown returns).
+    if "conn.readerThread?.join" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`conn.readerThread?.join` in "
+            "TcpForwarder.tearDown. Sprint 12.0C invariant "
+            "- every per-flow reader Thread must be joined "
+            "with a bounded wait (1 second per thread) "
+            "before the teardown returns, so the executor "
+            "worker exits before the TUN interface is "
+            "released."
+        )
+
+    # 9. shutdownNow() + awaitTermination in tearDown.
+    if "shutdownNow()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "backgroundExecutor.shutdownNow() in "
+            "TcpForwarder.tearDown. Sprint 12.0C invariant "
+            "- the ExecutorService that owns the per-flow "
+            "TCP reader threads must be shutdownNow() "
+            "(interrupts running tasks) so no reader thread "
+            "outlives the VPN service."
+        )
+    if "awaitTermination" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "backgroundExecutor.awaitTermination in "
+            "TcpForwarder.tearDown. Sprint 12.0C invariant "
+            "- the executor must awaitTermination(1, "
+            "TimeUnit.SECONDS) (waits for running tasks to "
+            "exit) so no reader thread outlives the VPN "
+            "service."
+        )
+
+    # 10. protect() call in the handleSyn code path.
+    # The brief: "service.protect(socket)". Without
+    # protect(), the raw java.net.Socket is captured by
+    # the TUN and the TCP packet loops forever (the
+    # "VPN blackhole" symptom that 12.0A fixed for the
+    # Netty path, now closed for the raw Socket path).
+    if "service.protect(" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`service.protect(` call in TcpForwarder.handleSyn. "
+            "Sprint 12.0C invariant - the per-flow raw "
+            "java.net.Socket must be VpnService.protect()-ed "
+            "(the brief: \"service.protect(socket) + "
+            "Socket(host, port)\") so it bypasses the VPN "
+            "and uses the device's real NIC."
+        )
+
+    # 11. Caller wiring: tcpForwarder.tearDown() call
+    # from stopCapture. The teardown must run BEFORE
+    # nettyClient?.shutdown() so the 6-step structure is
+    # preserved.
+    if "tcpForwarder.tearDown()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`tcpForwarder.tearDown()` call from "
+            "stopCapture. Sprint 12.0C invariant - the "
+            "TcpForwarder teardown must run BEFORE "
+            "nettyClient?.shutdown() so the 6-step "
+            "shutdown's step 2 can safely delegate "
+            "(step 2 is a forward-compat no-op after "
+            "the teardown ran first)."
+        )
+
+    # 12. TUN wire: tcpForwarder.setTunOutputStream call
+    # from startReaderThread. The per-connection reader
+    # needs the TUN output stream to write response
+    # packets back to the kernel; without this wire,
+    # HTTP responses are silently dropped and the
+    # browser shows "no internet" / timeout.
+    if "tcpForwarder.setTunOutputStream" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`tcpForwarder.setTunOutputStream(...)` call "
+            "from startReaderThread. Sprint 12.0C invariant "
+            "- the TUN output stream must be wired to the "
+            "TcpForwarder so the per-connection reader can "
+            "write wrapped IP+TCP response packets (DATA, "
+            "FIN+ACK) back to the kernel. Without this "
+            "wire, Chrome / WhatsApp HTTP responses are "
+            "silently dropped (the request reaches the "
+            "server but the response never reaches the "
+            "app)."
+        )
+
+    return findings
+
+
 def run_s93_check(opene2ee_vpn_service_text):
     """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
     counter invariant (S93).
@@ -8837,6 +9148,98 @@ cases = [
          "        backgroundExecutor.shutdownNow()\n"
          "        backgroundExecutor.awaitTermination(1, TimeUnit.SECONDS)\n"
          "    }\n"
+         "}\n",
+     ),
+     []),
+    # S117 case (Sprint 12.0C - new) - TcpForwarder
+    # teardown invariant. The 12.0A TCP state machine
+    # was moved OUT of NettyChannelClient.kt and INTO
+    # a new TcpForwarder class in OpenE2eeVpnService.kt
+    # per the brief: "OpenE2eeVpnService.kt icine
+    # TcpForwarder class (raw java.net.Socket, Netty
+    # DEGIL, 12.0B gibi)". The teardown is verified by
+    # checking the 12 mandatory tokens in
+    # OpenE2eeVpnService.kt (after comment strip):
+    #   1. `class TcpForwarder` declaration.
+    #   2. `tcpConnectionMap` field (per-flow
+    #      TcpConnection map).
+    #   3. `tcpReaderFutures` field (per-flow reader
+    #      Future map).
+    #   4. `fun tearDown()` method (public teardown
+    #      entry point).
+    #   5. `cancel(true)` inside tearDown (per-flow
+    #      reader Future cancellation).
+    #   6. `conn.socket?.close()` (per-flow real
+    #      java.net.Socket close).
+    #   7. `conn.readerThread?.interrupt()` (per-flow
+    #      reader Thread interrupt).
+    #   8. `conn.readerThread?.join` (per-flow reader
+    #      Thread join, 1s bounded wait).
+    #   9. `shutdownNow()` + `awaitTermination`
+    #      (backgroundExecutor teardown).
+    #  10. `service.protect(` in handleSyn (the brief:
+    #      "service.protect(socket)").
+    #  11. `tcpForwarder.tearDown()` caller wire from
+    #      stopCapture (must run BEFORE
+    #      nettyClient?.shutdown()).
+    #  12. `tcpForwarder.setTunOutputStream` caller wire
+    #      from startReaderThread (per-connection reader
+    #      needs the TUN output stream to write
+    #      responses back).
+    # The S115 + S116 + S117 trio replaces the pre-12.0B
+    # single-audit (S115 only). S115 now checks the
+    # 6-step structure in NettyChannelClient.shutdown
+    # (tolerant of the post-12.0B "step 3 DELEGATED"
+    # and post-12.0C "step 2 DELEGATED" breadcrumbs).
+    # S116 checks the UdpForwarder teardown; S117
+    # checks the TcpForwarder teardown. Total
+    # selftest: 163 + 1 = 164.
+    ("S117 PASS (TcpForwarder teardown in OpenE2eeVpnService.kt - class + tcpConnectionMap + tcpReaderFutures + tearDown + cancel(true) + conn.socket.close() + conn.readerThread.interrupt() + conn.readerThread.join + shutdownNow() + awaitTermination + service.protect( + tcpForwarder.tearDown() caller + tcpForwarder.setTunOutputStream caller - regression guard for Sprint 12.0C, 10x VPN kapa/ac Owner-mandated test)",
+     run_s117_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.Socket\n"
+         "import java.util.concurrent.Executors\n"
+         "import java.util.concurrent.ThreadPoolExecutor\n"
+         "import java.util.concurrent.TimeUnit\n"
+         "class OpenE2eeVpnService : android.net.VpnService() {\n"
+         "    private val tcpForwarder = TcpForwarder(this)\n"
+         "    private fun startReaderThread(pfd: android.os.ParcelFileDescriptor) {\n"
+         "        val output = android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd)\n"
+         "        tcpForwarder.setTunOutputStream(output)\n"
+         "    }\n"
+         "    private fun stopCapture(graceful: Boolean): State {\n"
+         "        tcpForwarder.tearDown()\n"
+         "        nettyClient?.shutdown()\n"
+         "    }\n"
+         "}\n"
+         "internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "    private val tcpConnectionMap: MutableMap<String, Any> = java.util.concurrent.ConcurrentHashMap()\n"
+         "    private val tcpReaderFutures: MutableMap<String, java.util.concurrent.Future<*>?> = java.util.concurrent.ConcurrentHashMap()\n"
+         "    private val backgroundExecutor: ThreadPoolExecutor = Executors.newCachedThreadPool() as ThreadPoolExecutor\n"
+         "    fun handleSyn(flowKey: String, dstIp: String, dstPort: Int) {\n"
+         "        val sock = Socket()\n"
+         "        val protected = service.protect(sock)\n"
+         "        if (protected) sock.connect(java.net.InetSocketAddress(dstIp, dstPort), 5_000)\n"
+         "    }\n"
+         "    fun tearDown() {\n"
+         "        synchronized(tcpReaderFutures) {\n"
+         "            tcpReaderFutures.values.forEach { f -> try { f?.cancel(true) } catch (_: Throwable) {} }\n"
+         "        }\n"
+         "        for (conn in tcpConnectionMap.values) {\n"
+         "            try { conn.socket?.close() } catch (_: Throwable) {}\n"
+         "            try { conn.readerThread?.interrupt() } catch (_: Throwable) {}\n"
+         "            try { conn.readerThread?.join(1_000L) } catch (_: Throwable) {}\n"
+         "        }\n"
+         "        tcpConnectionMap.clear()\n"
+         "        backgroundExecutor.shutdownNow()\n"
+         "        backgroundExecutor.awaitTermination(1, TimeUnit.SECONDS)\n"
+         "    }\n"
+         "    data class TcpConnection(\n"
+         "        @Volatile var socket: Socket? = null,\n"
+         "        @Volatile var readerThread: Thread? = null\n"
+         "    )\n"
          "}\n",
      ),
      []),
