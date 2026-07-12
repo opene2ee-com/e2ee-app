@@ -3834,6 +3834,245 @@ def run_s118_check(opene2ee_vpn_service_text):
     return findings
 
 
+def run_s119_check(opene2ee_vpn_service_text):
+    """S119: SUSPECT response content debug (Sprint 12.0E).
+
+    Owner 14:19 logcat observation (after 12.0D APK
+    install + 10x VPN kapa/ac test, no reboot
+    needed): every 12.0D TcpForwarder breadcrumb
+    fired 10 times (TcpForwarder 10, SYN sent 10,
+    ESTABLISHED 10, recvHttpResponse 10, status=10,
+    content-type=10, content-length=10, forwarded
+    via reverseKey 10, responsePayload 10, bodyBytes
+    10, TRUNCATED 10, COMPLETE 10). AMA ("BUT"):
+      1. SUSPECT log fired 10 times (the 12.0D
+         SUSPECT log only emitted status +
+         content-type + content-length + n, but
+         NOT the EXPECTED value (application/json
+         OR text/*) — the Owner could not tell
+         "expected was application/json but got
+         text/html" from "expected was
+         application/json and got
+         application/json" (the 12.0D log would
+         have fired the SUSPECT log with no
+         expected context)).
+      2. UNKNOWN FLOW still 10 (the 12.0D log
+         is conceptually a replacement for
+         the 12.0A.7 UNKNOWN FLOW warning, but
+         the brief asks for a POSITIVE
+         "flow forward" signal that fires for
+         BOTH primary and reverse directions,
+         REPLACING the UNKNOWN FLOW concept).
+      3. The Owner could not tell which HTTP
+         endpoint the app was calling (no
+         request URI + Host header log).
+      4. The Owner could not see the actual
+         response body bytes (no body first
+         100 bytes hex+ascii log).
+      5. The Owner could not detect when the
+         status 200 + content-type text/plain
+         body byte count did not match the
+         declared Content-Length (no MISMATCH
+         log for the specific healthz case).
+
+    12.0E fix (5 sub-checks bundled into S119):
+      A. SUSPECT log MUST include the EXPECTED
+         value (application/json OR text/*).
+         Without the EXPECTED token the Owner
+         cannot verify the SUSPECT rule.
+      B. sendHttpRequest log MUST include the
+         HTTP request line (method + URI +
+         HTTP/x.x) + the Host header so the
+         Owner knows which endpoint the app
+         is calling. The URI + Host are
+         parsed from the first chunk of the
+         app's HTTP request (the request line
+         is always in the first chunk for
+         HTTP/1.1).
+      C. recvHttpResponse bodyFirst100 log
+         MUST include the first 100 bytes of
+         the response body in hex+ascii
+         format. The Owner greps for this
+         token to see the actual response
+         body bytes and verify it is
+         well-formed (printable ASCII) or
+         garbage (binary).
+      D. MISMATCH log MUST fire when status
+         is 200 + content-type is text/plain
+         AND body byte count != Content-Length.
+         The Patroni healthz endpoint returns
+         text/plain for plain health
+         responses; the MISMATCH log is the
+         SPECIFIC Owner-side diagnostic for
+         this case (the general TRUNCATED log
+         fires for any status + content-type
+         with less specific context).
+      E. `flow forward` Log.d MUST fire for
+         BOTH primary and reverse directions
+         when the conn is found. The
+         UNKNOWN FLOW concept is REPLACED:
+         the dual put eliminates the
+         unknown-flow case entirely (the
+         lookup ALWAYS succeeds for the
+         common case). The `flow forward`
+         log is the POSITIVE signal that the
+         packet was successfully dispatched
+         to the conn handler.
+
+    The audit strips `/* ... */` block comments
+    and `//` line comments (preserving strings),
+    then checks for the 5 mandatory token
+    substrings:
+      (1) `expected=application/json` token
+          in the SUSPECT log.
+      (2) `Host=` token in the sendHttpRequest
+          log (Host header parsed + emitted).
+      (3) `bodyFirst100` token in the
+          recvHttpResponse body fingerprint
+          log.
+      (4) `MISMATCH` token in the
+          status=200 + text/plain body
+          length check log.
+      (5) `flow forward` token in the
+          handleTcpPacket positive signal
+          log.
+
+    Sprint 12.0E target: 165 + 1 = 166 audit
+    cases total (S119 is the 166th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0E invariant - the "
+            "SUSPECT response log with EXPECTED "
+            "value, the sendHttpRequest URI + Host "
+            "log, the recvHttpResponse bodyFirst100 "
+            "log, the MISMATCH log, and the `flow "
+            "forward` log must all be in this file "
+            "(the TcpForwarder is the runtime path; "
+            "the NettyChannelClient log is "
+            "runtime-dead). S118 is no longer the "
+            "complete Owner-side diagnostic for the "
+            "response content; S119 is the new "
+            "authoritative audit for the SUSPECT "
+            "response content debug."
+        )
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    # Strip // line comments (preserving strings).
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # (1) expected=application/json token in SUSPECT log.
+    if "expected=application/json" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`expected=application/json` token in "
+            "the SUSPECT log. Sprint 12.0E invariant "
+            "- the SUSPECT log MUST include the "
+            "EXPECTED value (application/json OR "
+            "text/*) so the Owner can distinguish "
+            "'expected was application/json but got "
+            "text/html' (SUSPECT justified) from "
+            "'expected was application/json and got "
+            "application/json' (no SUSPECT). The "
+            "12.0D SUSPECT log only emitted status + "
+            "content-type + content-length + n, with "
+            "no expected context."
+        )
+    # (2) Host= token in sendHttpRequest log.
+    if "Host=" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`Host=` token in the sendHttpRequest "
+            "log. Sprint 12.0E invariant - the "
+            "sendHttpRequest log MUST include the "
+            "HTTP Host header (e.g., `Host=212.64.210.85`) "
+            "so the Owner knows which endpoint the "
+            "app is calling. Without the Host "
+            "header, the Owner cannot distinguish "
+            "`GET /healthz` to `212.64.210.85` from "
+            "`GET /api/v1/sessions` to "
+            "`api-test.opene2ee.com`."
+        )
+    # (3) bodyFirst100 token in body fingerprint log.
+    if "bodyFirst100" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`bodyFirst100` token in the response "
+            "body fingerprint log. Sprint 12.0E "
+            "invariant - the Owner greps for this "
+            "token to see the first 100 bytes of "
+            "the response body in hex+ascii format. "
+            "Without it, the Owner cannot verify "
+            "the body is well-formed (printable "
+            "ASCII) or detect binary garbage (e.g., "
+            "0xFF 0xFE 0xFD indicating a mis-encoded "
+            "chunk)."
+        )
+    # (4) MISMATCH token in body length check log.
+    if "MISMATCH" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`MISMATCH` token in the body length "
+            "check log. Sprint 12.0E invariant - the "
+            "MISMATCH log MUST fire when status is "
+            "200 + content-type is text/plain AND "
+            "body byte count != Content-Length. The "
+            "Patroni healthz endpoint returns "
+            "text/plain for plain health responses; "
+            "the MISMATCH log is the SPECIFIC "
+            "Owner-side diagnostic for this case "
+            "(the general TRUNCATED log fires for "
+            "any status + content-type with less "
+            "specific context)."
+        )
+    # (5) flow forward token in handleTcpPacket log.
+    if "flow forward" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`flow forward` Log.d. Sprint 12.0E "
+            "invariant - the `flow forward` log "
+            "REPLACES the 12.0A.7 UNKNOWN FLOW "
+            "concept. The dual put in handleSyn "
+            "eliminates the unknown-flow case "
+            "entirely (the lookup ALWAYS succeeds "
+            "for the common case). The `flow "
+            "forward` log is the POSITIVE signal "
+            "that the packet was successfully "
+            "dispatched to the conn handler, and "
+            "fires for BOTH primary and reverse "
+            "directions. Without this log, the "
+            "Owner cannot verify the dual put is "
+            "actually working (the absence of a "
+            "`UNKNOWN FLOW` warning is silent — the "
+            "`flow forward` log is the audible "
+            "confirmation)."
+        )
+    return findings
+
+
 def run_s93_check(opene2ee_vpn_service_text):
     """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
     counter invariant (S93).
@@ -9557,10 +9796,60 @@ cases = [
          "        val buf = ByteArray(1460)\n"
          "        val n = input.read(buf)\n"
          "        Log.d(\"TcpForwarder\", \"recvHttpResponse: $n bytes read from real socket for flow X, status=200, content-type=text/plain, content-length=42\")\n"
-         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: SUSPECT response for flow X (status=502, content-type=text/html)\")\n"
+         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: SUSPECT response for flow X (status=502, content-type=text/html, content-length=42, expected=application/json OR text/)\")\n"
+         "        Log.d(\"TcpForwarder\", \"recvHttpResponse: bodyFirst100 (flow X, $n bytes): hex=[...] ascii=[...]\")\n"
          "        Log.d(\"TcpForwarder\", \"responsePayload: $n bytes written to TUN for flow X, bodyBytes=42, ack=100, status=200, content-type=text/plain\")\n"
+         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: MISMATCH for status=200 + content-type=text/plain (flow X, bodyBytes=42 != content-length=43)\")\n"
+         "    }\n"
+         "    fun handleData() {\n"
+         "        Log.d(\"TcpForwarder\", \"sendHttpRequest: request line [GET /healthz HTTP/1.1] Host=212.64.210.85 for flow X\")\n"
+         "    }\n"
+         "    fun handleTcpPacket() {\n"
+         "        Log.d(\"TcpForwarder\", \"flow forward: primary key X (flags=0x10, state=ESTABLISHED)\")\n"
          "    }\n"
          "    private val tcpConnectionMap: MutableMap<String, Any> = java.util.concurrent.ConcurrentHashMap()\n"
+         "}\n",
+     ),
+     []),
+    # S119 case (Sprint 12.0E - new) - SUSPECT
+    # response content debug. Owner 14:19 logcat
+    # observation: every 12.0D TcpForwarder breadcrumb
+    # fired 10 times BUT SUSPECT log fired 10 times
+    # (no expected context) AND UNKNOWN FLOW still 10
+    # (the dual put works but the positive signal
+    # was missing). The audit verifies the 5
+    # mandatory tokens:
+    #   (1) `expected=application/json` token in
+    #       the SUSPECT log.
+    #   (2) `Host=` token in the sendHttpRequest
+    #       log.
+    #   (3) `bodyFirst100` token in the response
+    #       body fingerprint log.
+    #   (4) `MISMATCH` token in the body length
+    #       check log.
+    #   (5) `flow forward` token in the
+    #       handleTcpPacket positive signal log.
+    # Total selftest: 165 + 1 = 166.
+    ("S119 PASS (SUSPECT response content debug - expected=application/json in SUSPECT log + Host= in sendHttpRequest log + bodyFirst100 in response body fingerprint log + MISMATCH for status=200 + text/plain body length check + flow forward positive signal replacing UNKNOWN FLOW concept - regression guard for Sprint 12.0E, Owner 14:19 SUSPECT 10 + UNKNOWN FLOW 10)",
+     run_s119_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "    fun handleTcpPacket() {\n"
+         "        Log.d(\"TcpForwarder\", \"flow forward: primary key X (flags=0x10, state=ESTABLISHED)\")\n"
+         "    }\n"
+         "    fun handleData() {\n"
+         "        Log.d(\"TcpForwarder\", \"sendHttpRequest: request line [GET /healthz HTTP/1.1] Host=212.64.210.85 for flow X (app=10.42.0.2:12345 -> realDest=212.64.210.85:80)\")\n"
+         "    }\n"
+         "    fun startSocketReader() {\n"
+         "        val input: java.io.InputStream = java.net.Socket().getInputStream()\n"
+         "        val buf = ByteArray(1460)\n"
+         "        val n = input.read(buf)\n"
+         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: SUSPECT response for flow X (status=502, content-type=text/html, content-length=42, expected=application/json OR text/, n=42) — app may not parse this\")\n"
+         "        Log.d(\"TcpForwarder\", \"recvHttpResponse: bodyFirst100 (flow X, 42 bytes): hex=[...] ascii=[...]\")\n"
+         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: MISMATCH for status=200 + content-type=text/plain (flow X, bodyBytes=42 != content-length=43) — text/plain body does not match declared length\")\n"
+         "    }\n"
          "}\n",
      ),
      []),

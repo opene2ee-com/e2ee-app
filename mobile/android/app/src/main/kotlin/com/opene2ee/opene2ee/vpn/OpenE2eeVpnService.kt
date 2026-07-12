@@ -3976,6 +3976,41 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
         if (foundViaReverseKey) {
             Log.d(TAG, "forwarded via reverseKey: $reverseFlowKey (flags=0x${"%02x".format(flags)})")
         }
+        // Sprint 12.0E — `flow forward` Log.d.
+        // The brief: "UNKNOWN FLOW yerine Log.d
+        // 'flow forward' ile degistir (cunku dual
+        // put calisiyor, reverse flow gecmisse
+        // normal)". The "UNKNOWN FLOW" concept
+        // was the 12.0A.7 warning that fired
+        // when the lookup missed BOTH the
+        // primary and reverse key (1 per
+        // connection - diagnostic noise, not
+        // an error). The 12.0A.8 downgraded it
+        // to `late ACK` debug log. The 12.0C
+        // dual put eliminates the unknown-flow
+        // case entirely (the lookup ALWAYS
+        // succeeds for the common case). 12.0E
+        // adds a POSITIVE `flow forward` log
+        // that fires for BOTH directions (the
+        // primary OUTGOING key AND the reverse
+        // INCOMING key) so the Owner has a
+        // single token to grep for when
+        // verifying the packet was successfully
+        // dispatched to the conn handler. The
+        // direction is noted (primary vs
+        // reverse) so the Owner can distinguish
+        // OUTGOING packets from INCOMING
+        // packets in logcat. The `UNKNOWN FLOW`
+        // concept is REPLACED — there is no
+        // longer a warning for missed lookups
+        // (the dual put + the missing-key path
+        // is implicit in the absence of this
+        // log + the SYN path creates a new
+        // conn).
+        if (conn != null) {
+            val direction = if (foundViaReverseKey) "reverse" else "primary"
+            Log.d(TAG, "flow forward: $direction key $effectiveFlowKey (flags=0x${"%02x".format(flags)}, state=${conn.state})")
+        }
 
         // RST has highest precedence — the peer is
         // closing the connection immediately.
@@ -4193,6 +4228,20 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
      * write each chunk to the real socket. Build
      * an ACK response packet (with ack = seq +
      * payloadLen) and write it to the TUN.
+     *
+     * Sprint 12.0E — HTTP request URI + Host
+     * header log. The brief: log the HTTP request
+     * URI + Host header so the Owner knows which
+     * endpoint the app is calling (e.g., "GET /
+     * healthz HTTP/1.1" + "Host: 212.64.210.85").
+     * The URI + Host are extracted from the first
+     * chunk of the app's HTTP request (the
+     * request line is always in the first chunk
+     * for HTTP/1.1). The log fires ONCE on the
+     * first request chunk so the Owner can pair
+     * the request URI with the response status +
+     * Content-Type (via the recvHttpResponse log
+     * on the response side).
      */
     private fun handleData(
         flowKey: String,
@@ -4224,6 +4273,49 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
         }
         out.flush()
         Log.d(TAG, "handleTcpPacket: PSH+ACK data, forward $written bytes from flow $flowKey to $dstIp:$dstPort (MSS=$MSS)")
+        // Sprint 12.0E — HTTP request URI + Host
+        // header log. The Owner greps for the
+        // request URI + Host header to confirm
+        // the app is calling the expected
+        // endpoint (e.g., "GET /healthz
+        // HTTP/1.1" + "Host: 212.64.210.85"). The
+        // URI + Host are parsed from the first
+        // chunk of the request (the request line
+        // is always in the first chunk for
+        // HTTP/1.1; the Host header is also
+        // typically in the first chunk for
+        // non-pipelined requests).
+        try {
+            // Extract up to 2 KiB for the request
+            // header parse (HTTP/1.1 request
+            // headers are typically <1 KiB).
+            val headerEnd = minOf(payloadLen, 2048)
+            val reqHeaderStr = String(ipPacket, payloadOffset, headerEnd, Charsets.US_ASCII)
+            // Only parse if it looks like an HTTP
+            // request (the first 3 chars are
+            // "GET", "POST", "PUT", etc.).
+            if (reqHeaderStr.length >= 4 &&
+                (reqHeaderStr.startsWith("GET ") ||
+                 reqHeaderStr.startsWith("POST ") ||
+                 reqHeaderStr.startsWith("PUT ") ||
+                 reqHeaderStr.startsWith("HEAD ") ||
+                 reqHeaderStr.startsWith("DELETE ") ||
+                 reqHeaderStr.startsWith("OPTIONS "))) {
+                // Request line: "GET /healthz HTTP/1.1\r\n"
+                val requestLine = reqHeaderStr.lineSequence().firstOrNull() ?: ""
+                // Host header: "Host: 212.64.210.85\r\n"
+                val hostMatch = Regex("(?im)^Host:\\s*([^\\r\\n]+)").find(reqHeaderStr)
+                val hostValue = hostMatch?.groupValues?.get(1)?.trim() ?: "?"
+                Log.d(TAG, "sendHttpRequest: request line [$requestLine] Host=$hostValue for flow $flowKey (app=$srcIp:$srcPort -> realDest=$dstIp:$dstPort, $written bytes)")
+            }
+        } catch (e: Throwable) {
+            // Parsing the request line is a
+            // best-effort diagnostic; do NOT
+            // fail the data flow on a parse error
+            // (the real socket write above already
+            // succeeded).
+            Log.d(TAG, "sendHttpRequest: request line parse FAILED for flow $flowKey: ${e.message}")
+        }
         // ACK back to the app.
         conn.ackNum = tcp.seqNum + payloadLen
         conn.lastAckSent = conn.ackNum
@@ -4346,7 +4438,7 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
             // socket is the status line + headers
             // (HTTP/1.1). We accumulate bytes until
             // we see \r\n\r\n (header end marker) and
-            // then parse the status code +
+            // then parse the status line +
             // Content-Type + Content-Length. The
             // values are logged as part of the
             // `recvHttpResponse: ...` breadcrumb so
@@ -4358,6 +4450,19 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
             var responseContentType: String? = null
             var responseContentLength: Int? = null
             var bodyBytesReceived: Int = 0
+            // Sprint 12.0E — `bodyFirst100Logged`
+            // guard. The body first 100 bytes log
+            // fires ONCE on the first read (the
+            // body may be split across multiple
+            // reads for keep-alive responses, so
+            // the first 100 bytes of the first
+            // chunk is the canonical body
+            // fingerprint). The guard prevents
+            // the log from firing on every body
+            // chunk (which would spam logcat for
+            // keep-alive responses with many
+            // chunks).
+            var bodyFirst100Logged: Boolean = false
             try {
                 val input = sock.getInputStream()
                 val buf = ByteArray(MSS)
@@ -4435,6 +4540,24 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
                     // the first chunk) so the log
                     // does not fire on every body
                     // chunk.
+                    //
+                    // Sprint 12.0E — extended the
+                    // SUSPECT log to include the
+                    // EXPECTED value (application/json
+                    // OR text/*) so the Owner can
+                    // grep for the EXPECTED token
+                    // and confirm the validation
+                    // rule. The 12.0D log only
+                    // emitted status + content-type
+                    // + content-length + n, which
+                    // made it impossible to tell
+                    // "expected was application/json
+                    // but got text/html" from
+                    // "expected was application/json
+                    // and got application/json" (the
+                    // 12.0D log would have fired the
+                    // SUSPECT log with no expected
+                    // context).
                     if (headerParsed && n > 0) {
                         val isErrorStatus = responseStatus != null &&
                                 (responseStatus!! >= 400)
@@ -4458,8 +4581,63 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
                         // text/html when the endpoint
                         // is supposed to be JSON).
                         if (isErrorStatus || isUnexpectedContentType) {
-                            Log.w(TAG, "recvHttpResponse: SUSPECT response for flow $flowKey (status=${responseStatus}, content-type=${responseContentType}, content-length=${responseContentLength}, n=$n) — app may not parse this")
+                            // Sprint 12.0E — SUSPECT
+                            // log with EXPECTED
+                            // field. The brief
+                            // asks for the
+                            // expected value
+                            // (application/json
+                            // OR text/*) so the
+                            // Owner can
+                            // distinguish
+                            // "expected was
+                            // application/json
+                            // but got text/html"
+                            // (SUSPECT
+                            // justified) from
+                            // "expected was
+                            // application/json
+                            // and got
+                            // application/json"
+                            // (no SUSPECT).
+                            Log.w(TAG, "recvHttpResponse: SUSPECT response for flow $flowKey (status=${responseStatus}, content-type=${responseContentType}, content-length=${responseContentLength}, expected=application/json OR text/, n=$n) — app may not parse this")
                         }
+                    }
+                    // Sprint 12.0E — response body
+                    // first 100 bytes hex+ascii log.
+                    // The Owner greps for this token
+                    // to see the actual response
+                    // body bytes. The Patroni healthz
+                    // response body is short ASCII
+                    // text (e.g., "ok\n" or
+                    // `{"state":"running"}`); the
+                    // hex+ascii view lets the Owner
+                    // see if the body is well-formed
+                    // (printable ASCII) or contains
+                    // garbage (e.g., 0xFF 0xFE 0xFD
+                    // indicating a mis-encoded
+                    // chunk). Only logged once on
+                    // the FIRST read (the body
+                    // fragment may be split across
+                    // multiple reads for keep-alive
+                    // responses, so the first 100
+                    // bytes of the first chunk is the
+                    // canonical body fingerprint).
+                    if (!bodyFirst100Logged && bodyBytesReceived > 0) {
+                        val toLog = minOf(bodyBytesReceived, 100)
+                        val hex = StringBuilder()
+                        val ascii = StringBuilder()
+                        var i = 0
+                        while (i < toLog) {
+                            val b = buf[i].toInt() and 0xFF
+                            hex.append(String.format("%02x", b))
+                            if (i > 0 && i % 16 == 0) hex.append("\n")
+                            else if (i > 0) hex.append(" ")
+                            ascii.append(if (b in 32..126) b.toChar() else '.')
+                            i++
+                        }
+                        Log.d(TAG, "recvHttpResponse: bodyFirst100 (flow $flowKey, $toLog bytes): hex=[$hex] ascii=[$ascii]")
+                        bodyFirst100Logged = true
                     }
 
                     // Bump our seq (we are sending n
@@ -4503,6 +4681,37 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
                     } else if (bodyBytesReceived == responseContentLength!!) {
                         Log.d(TAG, "recvHttpResponse: COMPLETE body for flow $flowKey (bodyBytes=$bodyBytesReceived == content-length=${responseContentLength}, status=${responseStatus})")
                     }
+                }
+                // Sprint 12.0E — specific MISMATCH
+                // check for status=200 + content-
+                // type=text/plain. The brief: "if
+                // status 200 + content-type text/
+                // plain, check if body byte count
+                // matches Content-Length". The
+                // general TRUNCATED/COMPLETE log
+                // above fires for any status +
+                // any content-type; the MISMATCH
+                // log is the SPECIFIC Owner-side
+                // diagnostic for the healthz
+                // endpoint (the Patroni healthz
+                // endpoint returns text/plain for
+                // plain health responses and
+                // application/json for structured
+                // responses). The MISMATCH log
+                // fires when bodyBytesReceived !=
+                // Content-Length for the 200 + text/
+                // plain case (which the 12.0D
+                // general check ALSO fires for, but
+                // with less specific context). The
+                // Owner greps for the MISMATCH
+                // token to confirm the body
+                // matches the declared length.
+                if (headerParsed && responseStatus == 200 &&
+                    responseContentType != null &&
+                    responseContentType!!.startsWith("text/plain", ignoreCase = true) &&
+                    responseContentLength != null &&
+                    bodyBytesReceived != responseContentLength) {
+                    Log.w(TAG, "recvHttpResponse: MISMATCH for status=200 + content-type=text/plain (flow $flowKey, bodyBytes=$bodyBytesReceived != content-length=${responseContentLength}) — text/plain body does not match declared length")
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "startSocketReader: thread crash for $flowKey: ${t.message}")
