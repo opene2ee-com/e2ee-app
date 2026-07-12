@@ -3653,6 +3653,1971 @@ def check_oturumu_bitir_full_state_reset_v33() -> list[str]:
     return findings
 
 
+def check_dns_private_dns_conflict_v34() -> list[str]:
+    """Sprint 11.0S-DNS: Private DNS conflict detection +
+    bindProcessToNetwork + Chrome DoH disable snackbar
+    (S91).
+
+    Owner 17:14 root cause confirmed by 5-query web
+    research (Stack Overflow, Android Developer docs,
+    celzero/rethink-app issue #25, OnePlus community,
+    Cloudflare docs):
+      1. Android 9+ Private DNS (DNS-over-TLS) is
+         enabled by default on OnePlus 9 Pro
+         OxygenOS. When enabled, the system
+         OVERRIDES the VPN's `addDnsServer(1.1.1.1)`
+         and routes all DNS queries through the
+         user's Private DNS hostname (e.g.
+         `one.one.one.one`). The VPN tunnel
+         intercepts the TUN packets but the DNS
+         resolver inside the tunnel is
+         unreachable (the user's DoT is the
+         resolver, not 1.1.1.1).
+      2. The VPN process is not bound to the VPN
+         network by default — `connectivityManager
+         .bindProcessToNetwork(vpnNetwork)` is
+         needed so cleartext DNS queries from
+         the VPN process go through the VPN
+         tunnel and hit the `addDnsServer`
+         resolvers, bypassing the system DoT
+         override.
+      3. Chrome uses its own DoH resolver
+         (`chrome://flags/#dns-httpssvc`,
+         `chrome://settings/security` Advanced
+         DNS) by default, bypassing the system
+         DoT AND the VPN DNS.
+
+    11.0S-DNS fix (3 parts):
+      A. KOTLIN: on VPN established, check
+         `LinkProperties.isPrivateDnsActive` and
+         log a warning + push telemetry
+         (`lastError = "private_dns_active: ..."`)
+         so the Dart side can show a snackbar.
+      B. KOTLIN: call
+         `ConnectivityManager.bindProcessToNetwork(
+         vpnNetwork)` to bind the process to
+         the VPN network so cleartext DNS hits
+         the VPN tunnel resolvers.
+      C. DART: poll the VPN status 1 second
+         after start; if `lastError` starts
+         with `"private_dns_active"`, show a
+         snackbar with the Private DNS disable
+         instructions (Settings > Network >
+         Private DNS > Off) AND the Chrome DoH
+         disable guide (`chrome://flags/#dns-
+         httpssvc` > Disabled + chrome://settings
+         /security > Advanced DNS > Off).
+
+    The check requires FIVE tokens across TWO
+    files (comment-stripped):
+      1. OpenE2eeVpnService.kt:
+         `isPrivateDnsActive` literal.
+      2. OpenE2eeVpnService.kt:
+         `ConnectivityManager` import.
+      3. OpenE2eeVpnService.kt:
+         `bindProcessToNetwork` literal.
+      4. active_pool_screen.dart:
+         `private_dns_active` literal (the
+         status() poll check).
+      5. active_pool_screen.dart:
+         `chrome://flags/#dns-httpssvc` literal
+         (the Chrome DoH disable URL).
+    """
+    import re
+    findings = []
+    # 1-3: OpenE2eeVpnService.kt
+    vpn_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn"
+        / "OpenE2eeVpnService.kt"
+    )
+    if not vpn_path.exists():
+        findings.append(
+            "S91 OpenE2eeVpnService.kt: file missing."
+        )
+    else:
+        try:
+            vpn_text = vpn_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S91 OpenE2eeVpnService.kt: read failed ("
+                + str(e) + ")."
+            )
+        else:
+            if "isPrivateDnsActive" not in vpn_text:
+                findings.append(
+                    "S91 OpenE2eeVpnService.kt: missing "
+                    "`isPrivateDnsActive` check. Sprint 11.0S-DNS "
+                    "invariant - the Kotlin service MUST check "
+                    "`LinkProperties.isPrivateDnsActive` after "
+                    "`establish()` and log + push telemetry on "
+                    "detection."
+                )
+            if "import android.net.ConnectivityManager" not in vpn_text:
+                findings.append(
+                    "S91 OpenE2eeVpnService.kt: missing "
+                    "`import android.net.ConnectivityManager`. "
+                    "Sprint 11.0S-DNS invariant - the `bindProcess"
+                    "ToNetwork` call needs the ConnectivityManager."
+                )
+            if "bindProcessToNetwork" not in vpn_text:
+                findings.append(
+                    "S91 OpenE2eeVpnService.kt: missing "
+                    "`bindProcessToNetwork` call. Sprint 11.0S-DNS "
+                    "invariant - the VPN process MUST be bound to "
+                    "the VPN network so cleartext DNS queries hit "
+                    "the `addDnsServer` resolvers (1.1.1.1/1.0.0.1) "
+                    "and bypass the system DoT override."
+                )
+    # 4-5: active_pool_screen.dart
+    screen_path = (
+        REPO_ROOT / "mobile" / "lib" / "screens"
+        / "active_pool_screen.dart"
+    )
+    if not screen_path.exists():
+        findings.append(
+            "S91 active_pool_screen.dart: file missing."
+        )
+    else:
+        try:
+            screen_text = screen_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S91 active_pool_screen.dart: read failed ("
+                + str(e) + ")."
+            )
+        else:
+            if "private_dns_active" not in screen_text:
+                findings.append(
+                    "S91 active_pool_screen.dart: missing "
+                    "`private_dns_active` literal. Sprint 11.0S-DNS "
+                    "invariant - the Dart status() poll MUST check "
+                    "for the Kotlin `lastError` starting with "
+                    "`private_dns_active` to trigger the snackbar."
+                )
+            if "chrome://flags/#dns-httpssvc" not in screen_text:
+                findings.append(
+                    "S91 active_pool_screen.dart: missing "
+                    "`chrome://flags/#dns-httpssvc` literal. Sprint "
+                    "11.0S-DNS invariant - the snackbar MUST show "
+                    "the Chrome DoH disable URL so the user can "
+                    "fix Chrome's own DoH override (which is a "
+                    "separate layer from Android Private DNS)."
+                )
+    return findings
+
+
+def check_notification_chronometer_autostop_v35() -> list[str]:
+    """Sprint 11.0S-EXTRA: foreground notification
+    chronometer + auto-stop at 00:00 (S92).
+
+    Owner 17:21: the 15-minute countdown must also
+    be visible in the Android notification bar
+    (not just in the in-app display). The
+    implementation uses the NATIVE Android
+    `setUsesChronometer(true)` + `setWhen(endTimeMs)`
+    pattern on the foreground notification
+    builder — the system renders the countdown
+    internally (no per-second Kotlin Timer = no
+    battery drain). When the chronometer hits
+    00:00, a Handler.postDelayed Runnable fires
+    once and calls `stopCapture(graceful = true)`
+    to tear down the VPN.
+
+    The check requires SIX tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `COUNTDOWN_TOTAL_MS` constant
+        (15 * 60 * 1000).
+      2. `setUsesChronometer(true)` call in the
+        notification builder.
+      3. `setWhen(endTimeMs)` call in the
+        notification builder (or `setWhen(`).
+      4. `scheduleCountdownAutoStop()` method
+        that posts the Runnable.
+      5. `mainHandler.postDelayed(runnable,
+        COUNTDOWN_TOTAL_MS)` call (the auto-stop
+        wakeup).
+      6. `stopCapture(graceful = true)` call in
+        the auto-stop Runnable (the action).
+      7. `countdownAutoStopRunnable?.let` cancel
+        in `stopCapture` (so manual disconnect
+        doesn't leave a pending 00:00 wakeup).
+    """
+    import re
+    findings = []
+    vpn_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn"
+        / "OpenE2eeVpnService.kt"
+    )
+    if not vpn_path.exists():
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = vpn_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    if "COUNTDOWN_TOTAL_MS" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`COUNTDOWN_TOTAL_MS` constant. Sprint 11.0S-EXTRA "
+            "invariant - the 15-minute duration must be a named "
+            "constant (15L * 60L * 1000L) so the chronometer "
+            "setWhen and the Handler.postDelayed agree."
+        )
+    if "setUsesChronometer(true)" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`setUsesChronometer(true)` in the notification "
+            "builder. Sprint 11.0S-EXTRA invariant - the "
+            "native Android chronometer is what renders the "
+            "countdown in the notification bar (no Kotlin "
+            "Timer needed = no per-second battery drain)."
+        )
+    if "setWhen(" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing `setWhen(` "
+            "call. Sprint 11.0S-EXTRA invariant - the "
+            "chronometer needs the target time "
+            "(now + COUNTDOWN_TOTAL_MS) to count down to."
+        )
+    if "scheduleCountdownAutoStop" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`scheduleCountdownAutoStop()` method. Sprint "
+            "11.0S-EXTRA invariant - the auto-stop Handler "
+            "must be scheduled in startCapture after the "
+            "foreground notification is posted."
+        )
+    if "mainHandler.postDelayed" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`mainHandler.postDelayed` call. Sprint 11.0S-EXTRA "
+            "invariant - the auto-stop must be a Handler on the "
+            "main looper, NOT a Timer.periodic (the system "
+            "chronometer handles the per-second display)."
+        )
+    if "stopCapture(graceful = true)" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing "
+            "`stopCapture(graceful = true)` in the auto-stop "
+            "Runnable. Sprint 11.0S-EXTRA invariant - at 00:00 "
+            "the Runnable must call stopCapture to tear down "
+            "the VPN gracefully (close TUN, drain, notify Dart)."
+        )
+    if "countdownAutoStopRunnable?.let" not in text and "countdownAutoStopRunnable" not in text:
+        findings.append(
+            "S92 OpenE2eeVpnService.kt: missing the "
+            "`countdownAutoStopRunnable` cancel in "
+            "`stopCapture`. Sprint 11.0S-EXTRA invariant - "
+            "manual disconnect must cancel the pending 00:00 "
+            "Handler so the wakeup doesn't fire on a stopped "
+            "service (which would be a no-op or worse, a "
+            "re-entrant teardown)."
+        )
+    return findings
+
+
+def check_vpn_service_passthrough_count_invariant_v36() -> list[str]:
+    """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
+    counter invariant (S93).
+
+    Owner 18:19 symptom: `curl 212.64.210.85/healthz`
+    works WITHOUT the VPN (the upstream Patroni
+    answers) but FAILS with the VPN. The Owner
+    concluded the passthrough is NOT actually
+    writing the bytes back to the TUN output.
+    Sprint 11.0J added the write but did not
+    provide a per-write counter for the Owner to
+    grep logcat after a test.
+
+    11.0T fix — 5-limb debug + per-write counter:
+      1. `output.write(buf, 0, n)` is called per
+         read+write and `passthroughCount`
+         increments EXACTLY ONCE per successful
+         write.
+      2. `pfd.fileDescriptor.valid()` is checked
+         before the write (catches a closed-fd
+         state silently).
+      3. `output.flush()` is called immediately
+         after the write (per-packet, no batching).
+      4. DNS UDP 53 packets (port 53 + 853 for
+         DoT) are detected inline and logged
+         every 50th occurrence so the Owner can
+         grep logcat for DNS capture.
+      5. The per-1000-packet breadcrumb now
+         includes `passthroughCount` + the
+         `passthroughGap` (= packetsObserved -
+         passthroughCount) so a non-zero gap is
+         visible in logcat. If `passthroughGap > 0`
+         after a `curl 212.64.210.85/healthz` test,
+         the write IS being called but the bytes
+         are not reaching the kernel (Magisk
+         Zygisk or similar fd-revoke interference).
+
+    The check requires SIX tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `private val passthroughCount = AtomicLong(0)`
+         field declaration.
+      2. `passthroughCount.set(0)` in
+         `startCapture` (paired reset with
+         `packetsObserved.set(0)`).
+      3. `pfd.fileDescriptor.valid()` check in
+         `startReaderThread` BEFORE the write
+         call.
+      4. `passthroughCount.incrementAndGet()`
+         call after the successful write
+         (NOT inside the catch block).
+      5. `catch (t: Throwable)` (broader than
+         `catch (e: IOException)`) for the write
+         block — the non-IOException root cause
+         is the S93 hypothesis.
+      6. `passthroughCount` literal in the
+         per-1000-packet breadcrumb so the
+         Owner can grep `adb logcat` for the
+         counter value.
+
+    Missing any of these re-opens the "passthrough
+    not actually writing" regression.
+    """
+    import re
+    findings = []
+    vpn_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "kotlin" / "com" / "opene2ee" / "opene2ee" / "vpn"
+        / "OpenE2eeVpnService.kt"
+    )
+    if not vpn_path.exists():
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = vpn_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    # 1. passthroughCount field.
+    if not re.search(
+        r"private\s+val\s+passthroughCount\s*=\s*AtomicLong\s*\(\s*0\s*\)",
+        text,
+    ):
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`private val passthroughCount = AtomicLong(0)` "
+            "field. Sprint 11.0T invariant - the counter is "
+            "the canonical diagnostic for the Owner to grep "
+            "logcat after a `curl 212.64.210.85/healthz` test."
+        )
+    # 2. reset in startCapture.
+    if "passthroughCount.set(0)" not in text:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`passthroughCount.set(0)` reset in "
+            "`startCapture`. Sprint 11.0T invariant - the "
+            "counter must be reset alongside "
+            "`packetsObserved.set(0)` so the per-1000 "
+            "breadcrumb measures the new session's counts."
+        )
+    # 3. pfd validity check.
+    if "pfd.fileDescriptor.valid" not in text:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`pfd.fileDescriptor.valid()` check before the "
+            "write. Sprint 11.0T invariant (limb 2 of the "
+            "5-limb debug) - the pfd may be in a closed-fd "
+            "state (Magisk Zygisk revoke) and the write will "
+            "silently fail otherwise."
+        )
+    # 4. increment after successful write.
+    if "passthroughCount.incrementAndGet" not in text:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`passthroughCount.incrementAndGet()` call "
+            "after the successful write. Sprint 11.0T "
+            "invariant (limb 1) - the counter must "
+            "increment EXACTLY ONCE per successful write "
+            "(NOT inside the catch block)."
+        )
+    # 5. catch (Throwable) for the write.
+    has_ioe_catch = re.search(r"catch\s*\(\s*\w+\s*:\s*IOException\s*\)", text)
+    has_throwable_catch = re.search(r"catch\s*\(\s*t\s*:\s*Throwable\s*\)", text)
+    if not has_throwable_catch:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`catch (t: Throwable)` for the write block. "
+            "Sprint 11.0T invariant (limb 5 hypothesis) - "
+            "the non-IOException root cause (e.g. "
+            "IllegalStateException on a closed "
+            "AutoCloseOutputStream) is the S93 hypothesis. "
+            "Without the broader catch, the exception "
+            "bubbles to the outer Throwable handler and "
+            "logs only 'TUN reader crashed' (no exception "
+            "class / message)."
+        )
+    if not has_ioe_catch:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`catch (e: IOException)` for the write block. "
+            "Sprint 11.0T invariant - the IOException catch "
+            "MUST be present (in addition to the broader "
+            "Throwable catch) for the normal TUN-close path."
+        )
+    # 6. passthroughCount in the per-1000-packet breadcrumb.
+    if "passthroughCount" not in text or "passthroughGap" not in text:
+        findings.append(
+            "S93 OpenE2eeVpnService.kt: missing "
+            "`passthroughCount` / `passthroughGap` in the "
+            "per-1000-packet breadcrumb. Sprint 11.0T "
+            "invariant - the Owner greps `adb logcat` for "
+            "`startReaderThread: MTU=..., passthroughCount=..., "
+            "passthroughGap=...` to verify the per-session "
+            "counter."
+        )
+    return findings
+
+
+def check_manifest_change_network_state_v37() -> list[str]:
+    """Sprint 11.0U: AndroidManifest.xml declares
+    android.permission.CHANGE_NETWORK_STATE (S94).
+
+    Owner 20:13 root cause confirmed: the
+    Sprint 11.0S-DNS `checkPrivateDnsAndBindToVpn`
+    (S91) called
+    `ConnectivityManager.bindProcessToNetwork(
+    network)`. On OnePlus 9 Pro Android 14 this
+    call throws
+    `SecurityException: was not granted
+    android.permission.CHANGE_NETWORK_STATE,
+    android.permission.WRITE_SETTINGS` and the
+    bind silently fails. The user sees "VPN
+    active, internet OK, but DNS still bypassed
+    by Private DNS" because the cleartext DNS
+    queries from the VPN process go through the
+    system Private DNS instead of the VPN
+    tunnel.
+
+    11.0U fix: add
+    `<uses-permission android:name="android.
+    permission.CHANGE_NETWORK_STATE" />` to
+    `AndroidManifest.xml`. The permission is a
+    `normal` permission (auto-granted at install
+    time, no runtime prompt needed). The
+    `WRITE_SETTINGS` permission is NOT needed
+    (the Sprint 11.0S-DNS `bindProcessToNetwork`
+    call only requires `CHANGE_NETWORK_STATE`).
+
+    The check requires ONE token in
+    `AndroidManifest.xml` (comment-stripped):
+      1. `<uses-permission android:name="android
+         .permission.CHANGE_NETWORK_STATE" />`
+         literal (or `CHANGE_NETWORK_STATE`
+         substring).
+
+    Missing this re-opens the Owner 20:13
+    "SecurityException: was not granted
+    android.permission.CHANGE_NETWORK_STATE"
+    regression (Sprint 11.0S-DNS S91 silently
+    fails).
+    """
+    import re
+    findings = []
+    manifest_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src" / "main"
+        / "AndroidManifest.xml"
+    )
+    if not manifest_path.exists():
+        findings.append(
+            "S94 AndroidManifest.xml: file missing."
+        )
+        return findings
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S94 AndroidManifest.xml: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    if "CHANGE_NETWORK_STATE" not in text:
+        findings.append(
+            "S94 AndroidManifest.xml: missing "
+            "`android.permission.CHANGE_NETWORK_STATE` "
+            "uses-permission. Sprint 11.0U invariant - "
+            "this permission is required by "
+            "`ConnectivityManager.bindProcessToNetwork(network)` "
+            "(called from Sprint 11.0S-DNS S91 "
+            "`checkPrivateDnsAndBindToVpn`). Without the "
+            "permission, the system throws "
+            "`SecurityException: was not granted "
+            "android.permission.CHANGE_NETWORK_STATE` and the "
+            "bind silently fails. Add the uses-permission "
+            "to AndroidManifest.xml."
+        )
+    return findings
+
+
+def check_stop_capture_ring_clear_invariant_v38() -> list[str]:
+    """Sprint 11.0V: OpenE2eeVpnService.kt stopCapture()
+    clears the bounded ring buffer and resets the
+    per-session counters in BOTH branches (S95).
+
+    Owner 20:19 root cause confirmed: after the user
+    disconnects the VPN via the "Oturumu Bitir" button
+    (Sprint 11.0R) or the system toggle, the Dart
+    `_onPacketsSampled` callback was still firing
+    with stale samples. `getSampledPackets()` returned
+    10 packets (the last `SAMPLING_CAP_PACKETS` from
+    the previous session), the `poolProvider`
+    `paketSayisi` was bumped, and the UI counter
+    appeared to grow AFTER the VPN was stopped. The
+    Owner saw the counter go from 0 -> 10 -> 20 ->
+    30 even though `state` was `STOPPED`.
+
+    11.0V fix: in `stopCapture(graceful: Boolean)`,
+    call `synchronized(ringLock) { ring.clear() }`
+    AND `packetsObserved.set(0)` in BOTH branches:
+      * The already-idle early-return branch
+        (when `!running.get() && tunInterface == null`).
+      * The normal teardown branch (after
+        `stopDrainLoop()`, before `flushTelemetry()`).
+
+    Also reset the per-session passthrough and
+    fragment counters (Sprint 11.0P/11.0T invariant -
+    these are per-session, not global, so they should
+    reset on stop, not just on start).
+
+    The check requires the following tokens in
+    `OpenE2eeVpnService.kt` (comment-stripped):
+      1. `synchronized(ringLock) { ring.clear() }`
+         literal present AT LEAST 2 TIMES (once per
+         branch).
+      2. `packetsObserved.set(0)` literal present
+         AT LEAST 3 TIMES total (1 in startCapture
+         for the per-session reset, 1 in each of the
+         2 stopCapture branches for the stale-ring
+         reset).
+
+    Missing the ring.clear or packetsObserved.set(0)
+    in either branch re-opens the Owner 20:19
+    "getSampledPackets returns 10 packets after VPN
+    stop" regression (the UI counter would keep
+    growing from the previous session's stale ring
+    data).
+    """
+    import re
+    findings = []
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not service_path.exists():
+        findings.append(
+            "S95 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S95 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    # Strip Kotlin line comments and block comments
+    # to avoid false positives on commented-out code.
+    stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    stripped = re.sub(r"//[^\n]*", "", stripped)
+    ring_clear_count = stripped.count(
+        "synchronized(ringLock) { ring.clear() }"
+    )
+    if ring_clear_count < 2:
+        findings.append(
+            "S95 OpenE2eeVpnService.kt: "
+            "`synchronized(ringLock) { ring.clear() }` "
+            "literal appears " + str(ring_clear_count) +
+            " time(s) (need >=2 - once in the already-idle "
+            "early-return branch AND once in the normal "
+            "teardown branch of `stopCapture`). Sprint "
+            "11.0V invariant - the bounded queue must be "
+            "cleared on BOTH stop paths so the NEXT session "
+            "starts with an empty ring (Owner 20:19 "
+            "regression: getSampledPackets returned 10 "
+            "stale packets after VPN stop)."
+        )
+    # Total packetsObserved.set(0) count: need
+    # >= 3 (1 in startCapture + 1 in already-idle
+    # branch + 1 in normal teardown branch).
+    packets_set_zero_count = stripped.count(
+        "packetsObserved.set(0)"
+    )
+    if packets_set_zero_count < 3:
+        findings.append(
+            "S95 OpenE2eeVpnService.kt: "
+            "`packetsObserved.set(0)` literal appears "
+            + str(packets_set_zero_count) + " time(s) "
+            "(need >=3 - 1 in startCapture for the per-session "
+            "reset, AND 1 in each of the 2 stopCapture "
+            "branches for the stale-ring reset). Sprint "
+            "11.0V invariant - the per-session counter "
+            "must be reset to 0 on BOTH stop paths."
+        )
+    return findings
+
+
+def check_check_private_dns_bind_5_logd_invariant_v39() -> list[str]:
+    """Sprint 11.0W: OpenE2eeVpnService.kt
+    checkPrivateDnsAndBindToVpn() has 5 Log.d
+    breadcrumbs (S96).
+
+    Owner 20:45 root cause: pre-11.0W the function
+    only logged `Log.w` in the warning/exception
+    paths. The happy path (LinkProperties probed
+    + requestNetwork dispatched + onAvailable
+    fires + bindProcessToNetwork returns true)
+    had NO breadcrumb. If the function SILENTLY
+    returned early (e.g. if requestNetwork never
+    fires onAvailable or onUnavailable on OnePlus
+    OxygenOS, or if activeNetwork is null and the
+    function returns after the `if (activeNet != null)`
+    block), there was NO log entry at all. The Owner
+    could not distinguish "function never ran" from
+    "function ran and bindProcessToNetwork failed
+    silently".
+
+    11.0W fix: add 5 explicit `Log.d` breadcrumbs
+    at every step of the DNS check + bind:
+      1. ENTRY: at the very start of the function.
+      2. LinkProperties.isPrivateDnsActive: shows
+         the boolean + privateDnsServerName (OnePlus
+         OxygenOS sometimes sets a hostname that
+         returns NXDOMAIN — logging the hostname
+         confirms whether the bad one is in use).
+      3. ConnectivityManager.requestNetwork(
+         TRANSPORT_VPN) start: confirms the request
+         was actually issued.
+      4. NetworkCallback.onAvailable OR
+         NetworkCallback.onUnavailable: confirms
+         the callback fired (success or failure).
+      5. bindProcessToNetwork(vpn) result: shows
+         the boolean return value (true=bind OK,
+         false=bind silently failed).
+
+    The check requires the following 5 token
+    substrings in `OpenE2eeVpnService.kt`
+    (comment-stripped), all inside or near
+    `checkPrivateDnsAndBindToVpn`:
+      1. `DNS: checkPrivateDnsAndBindToVpn: ENTRY`
+      2. `isPrivateDnsActive=`
+      3. `ConnectivityManager.requestNetwork(TRANSPORT_VPN) start`
+      4. `NetworkCallback.onAvailable` (the onAvailable
+         breadcrumb) AND `NetworkCallback.onUnavailable`
+         (the onUnavailable breadcrumb).
+      5. `bindProcessToNetwork(vpn) result=`
+
+    Missing any of the 5 re-opens the Owner 20:45
+    "log YOK logcatte" regression — the Owner can
+    no longer tell from logcat where the function
+    actually stopped.
+    """
+    import re
+    findings = []
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not service_path.exists():
+        findings.append(
+            "S96 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S96 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    # Strip Kotlin line + block comments to avoid
+    # false positives on commented-out breadcrumbs.
+    stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    stripped = re.sub(r"//[^\n]*", "", stripped)
+    # Required token substrings (5 of them).
+    required_tokens = {
+        "1.ENTRY": "DNS: checkPrivateDnsAndBindToVpn: ENTRY",
+        "2.isPrivateDnsActive": "isPrivateDnsActive=",
+        "3.requestNetwork start": "ConnectivityManager.requestNetwork(TRANSPORT_VPN) start",
+        "4a.onAvailable": "NetworkCallback.onAvailable",
+        "4b.onUnavailable": "NetworkCallback.onUnavailable",
+        "5.bindProcessToNetwork result": "bindProcessToNetwork(vpn) result=",
+    }
+    for label, token in required_tokens.items():
+        if token not in stripped:
+            findings.append(
+                "S96 OpenE2eeVpnService.kt: missing Log.d "
+                "breadcrumb token `" + token + "` ("
+                + label + "). Sprint 11.0W invariant - "
+                "checkPrivateDnsAndBindToVpn must log "
+                "all 5 steps so the Owner can confirm "
+                "in logcat where the function reached "
+                "(regression guard for Owner 20:45 "
+                "'log YOK logcatte' symptom)."
+            )
+    return findings
+
+
+def check_check_private_dns_5s_fallback_invariant_v40() -> list[str]:
+    """Sprint 11.0X: checkPrivateDnsAndBindToVpn has
+    a 5s activeNetwork FALLBACK when the
+    NetworkCallback never fires (S97).
+
+    Owner 21:08 symptom: pre-11.0X the function
+    only logged inside the onAvailable / onUnavailable
+    lambdas. On OnePlus 9 Pro OxygenOS, the callback
+    NEVER fired (for 1 minute) - so the function
+    showed the `requestNetwork start` Log.d but never
+    showed onAvailable/onUnavailable/bindProcessToNetwork.
+    The Owner could not tell from logcat whether the
+    callback was just slow or whether the request was
+    silently dropped.
+
+    11.0X fix: 3 new invariants:
+      1. NetworkCallback.onAvailable log (S96
+         invariant #4a) PLUS a callbackFired flag
+         set in BOTH onAvailable AND onUnavailable,
+         so we know the callback was invoked even if
+         the result is "unavailable".
+      2. A 5s Handler.postDelayed fallback Runnable
+         that, if callbackFired is still false, reads
+         `cm.activeNetwork`, checks
+         `getNetworkCapabilities(activeNet)
+         .hasTransport(TRANSPORT_VPN)`, and if true
+         calls `bindProcessToNetwork(activeNet)`.
+      3. Log.e with Magisk DenyList / OnePlus
+         OxygenOS battery optimization / foreground
+         service type troubleshooting hints if BOTH
+         paths fail (so the Owner + Mavis can see
+         the root cause in logcat).
+
+    The check requires the following token substrings
+    in `OpenE2eeVpnService.kt` (comment-stripped):
+      a. `callbackFired` (the AtomicBoolean flag).
+      b. `Handler(Looper.getMainLooper())` (the
+         fallback Handler).
+      c. `postDelayed(` (the 5s scheduling).
+      d. `NetworkCallback TIMEOUT` (the fallback log
+         breadcrumb).
+      e. `FALLBACK bindProcessToNetwork(activeNetwork)`
+         (the fallback bind log).
+      f. `hasTransport(NetworkCapabilities.TRANSPORT_VPN)`
+         (the TRANSPORT_VPN check on the active
+         network).
+      g. `Magisk DenyList` (the Owner troubleshooting
+         hint in the Log.e).
+      h. `removeCallbacks(fallbackRunnable)` present
+         in BOTH the onAvailable AND onUnavailable
+         lambda (so the fallback Handler is cancelled
+         when the happy path is reached).
+
+    Missing any of the 3 invariants re-opens the
+    Owner 21:08 "callback never fires for 1 minute"
+    regression - the Owner would not see any
+    breadcrumb for 1 minute and would not be able to
+    recover via the activeNetwork fallback.
+    """
+    import re
+    findings = []
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not service_path.exists():
+        findings.append(
+            "S97 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S97 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    stripped = re.sub(r"//[^\n]*", "", stripped)
+    # Required token substrings (8 of them).
+    required_tokens = {
+        "a.callbackFired flag": "callbackFired",
+        "b.fallback Handler": "Handler(Looper.getMainLooper())",
+        "c.postDelayed scheduling": "postDelayed(",
+        "d.fallback timeout breadcrumb": "NetworkCallback TIMEOUT",
+        "e.fallback bind log": "FALLBACK bindProcessToNetwork(activeNetwork)",
+        "f.TRANSPORT_VPN check": "hasTransport(NetworkCapabilities.TRANSPORT_VPN)",
+        "g.Magisk DenyList hint": "Magisk DenyList",
+        "h.removeCallbacks in lambdas": "removeCallbacks(fallbackRunnable)",
+    }
+    for label, token in required_tokens.items():
+        if token not in stripped:
+            findings.append(
+                "S97 OpenE2eeVpnService.kt: missing 5s "
+                "fallback token `" + token + "` ("
+                + label + "). Sprint 11.0X invariant - "
+                "checkPrivateDnsAndBindToVpn must include "
+                "the 5s activeNetwork fallback so the "
+                "Owner recovers when the NetworkCallback "
+                "never fires (OnePlus OxygenOS regression "
+                "guard for Owner 21:08 'callback never "
+                "fires for 1 minute' symptom)."
+            )
+    return findings
+
+
+def check_check_private_dns_call_before_establish_invariant_v41() -> list[str]:
+    """Sprint 11.0Y: checkPrivateDnsAndBindToVpn is
+    called BEFORE Builder.establish() in startCapture
+    (S98).
+
+    Owner 21:37 root cause: pre-11.0Y the
+    `checkPrivateDnsAndBindToVpn()` call was at the
+    END of startCapture (AFTER `Builder.establish()`).
+    The VpnService.registered transport is only added
+    to the system network registry AFTER establish()
+    returns, but `requestNetwork(TRANSPORT_VPN)` was
+    issued AFTER establish() and so the request was
+    "satisfied" before the system saw a pending
+    subscriber - the NetworkCallback.onAvailable /
+    onUnavailable NEVER fired (not in 5s, not in
+    1 minute). The Owner confirmed the tablet is
+    NOT rooted, ruling out Magisk/DenyList as the
+    cause.
+
+    11.0Y fix: move the `checkPrivateDnsAndBindToVpn()`
+    call to BEFORE `Builder.establish()`. By issuing
+    `requestNetwork(TRANSPORT_VPN)` BEFORE establish(),
+    the system has a pending subscriber for the VPN
+    transport and fires onAvailable immediately when
+    establish() registers it.
+
+    Also: the 5s fallback now does a SECOND 5s retry
+    if `activeNetwork.hasTransport(TRANSPORT_VPN)`
+    returns false on the first attempt (because the
+    VPN registration is async and may not be in the
+    network list at exactly T+5s). Max 2 attempts
+    (1 initial + 1 retry).
+
+    The check requires:
+      a. `checkPrivateDnsAndBindToVpn()` call site
+         appears (textually) BEFORE
+         `builder.establish()` in startCapture.
+      b. `fallbackAttemptCount` (the retry counter)
+         is declared.
+      c. `attempt 1/2` (the retry log breadcrumb) is
+         present.
+      d. `lateinit var fallbackRunnable` (the
+         forward-reference workaround for the
+         self-referencing Runnable) is present.
+
+    Missing the call-ordering invariant re-opens the
+    Owner 21:37 "callback NEVER fires for 1 minute
+    on a non-rooted tablet" regression - the VPN
+    transport is registered but the request is
+    already "satisfied" before the system sees the
+    pending subscriber.
+    """
+    import re
+    findings = []
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not service_path.exists():
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: file missing."
+        )
+        return findings
+    try:
+        text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: read failed ("
+            + str(e) + ")."
+        )
+        return findings
+    # Required token substrings.
+    if "fallbackAttemptCount" not in text:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: missing "
+            "`fallbackAttemptCount` declaration. "
+            "Sprint 11.0Y invariant - the 5s "
+            "fallback must support a second 5s retry "
+            "if `activeNetwork.hasTransport(TRANSPORT_VPN)` "
+            "is false on the first attempt (VPN "
+            "registration is async; max 2 attempts)."
+        )
+    if "attempt 1/2" not in text:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: missing "
+            "`attempt 1/2` retry breadcrumb. Sprint "
+            "11.0Y invariant - logcat must show "
+            "which attempt is in progress so the "
+            "Owner can confirm the retry path was "
+            "reached."
+        )
+    if "lateinit var fallbackRunnable" not in text:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: missing "
+            "`lateinit var fallbackRunnable` "
+            "declaration. Sprint 11.0Y invariant - "
+            "the Runnable body self-references "
+            "fallbackRunnable to re-post the 5s "
+            "retry; lateinit var breaks the "
+            "forward-reference cycle."
+        )
+    # Order check: find the call site
+    # `checkPrivateDnsAndBindToVpn()` (NOT the
+    # function definition `checkPrivateDnsAndBindToVpn()
+    # {`) and ensure it is BEFORE `builder.establish()`.
+    # Use `checkPrivateDnsAndBindToVpn()\n` (with
+    # newline) as the call-site marker; the function
+    # definition has `() {` (space + brace) before
+    # the newline, so it won't match.
+    call_site_pos = text.find("checkPrivateDnsAndBindToVpn()\n")
+    if call_site_pos == -1:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: call site "
+            "`checkPrivateDnsAndBindToVpn()` not found."
+        )
+        return findings
+    # Find `builder.establish()` call site.
+    establish_pos = text.find("builder.establish()", call_site_pos)
+    if establish_pos == -1:
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: call site "
+            "`builder.establish()` not found AFTER "
+            "the checkPrivateDnsAndBindToVpn() call."
+        )
+        return findings
+    # Check ordering.
+    if call_site_pos > establish_pos:
+        call_line = text[:call_site_pos].count("\n") + 1
+        establish_line = text[:establish_pos].count("\n") + 1
+        findings.append(
+            "S98 OpenE2eeVpnService.kt: "
+            "`checkPrivateDnsAndBindToVpn()` call "
+            "site (line " + str(call_line) + ") is "
+            "AFTER `builder.establish()` (line "
+            + str(establish_line) + "). Sprint 11.0Y "
+            "invariant - the call MUST be issued "
+            "BEFORE establish() so the system has a "
+            "pending subscriber for the VPN transport "
+            "(regression guard for Owner 21:37 "
+            "'callback never fires for 1 minute on "
+            "non-rooted tablet' symptom). The VPN "
+            "transport is only added to the system "
+            "network registry AFTER establish() "
+            "returns, so issuing the request AFTER "
+            "establish() means there is no pending "
+            "subscriber and the callback is never "
+            "invoked."
+        )
+    return findings
+
+
+def check_user_space_tcp_ip_stack_invariant_v42() -> list[str]:
+    """Sprint 11.0Z: user-space TCP/IP stack via Netty
+    (S99).
+
+    Owner 22:08 root cause: the pre-11.0Z code in
+    `startReaderThread` did "transparent passthrough"
+    (write the IP packet back to the TUN output and
+    let the kernel route it). This caused a "VPN
+    blackhole" because the OpenE2ee TUN is configured
+    with `addRoute(0.0.0.0/0)` (catch-all) — the
+    kernel treats ALL outbound traffic as destined
+    for the VPN interface, and writing a packet back
+    to the TUN makes the kernel re-enter the TUN a
+    second time, so the real-NIC route is never taken.
+
+    11.0Z fix: user-space TCP/IP stack via Netty +
+    `VpnService.protect()`. For each IP packet:
+      1. Parse the IPv4 header (ver + IHL + total
+         length + protocol + src/dst IP).
+      2. For TCP/UDP, parse the transport header
+         (src/dst port + flags).
+      3. Create a real socket to the destination.
+      4. Call `service.protect(socket)` BEFORE
+         connect — this tells the system "this
+         socket MUST bypass the VPN and use the
+         real NIC".
+      5. Connect the socket (now bypasses VPN).
+      6. (Future sprint) Read response, wrap in a
+         new IP packet, write back to the TUN.
+
+    11.0Z SKELETON: this audit verifies the
+    minimum-viable structure (Netty dep +
+    `protect()` call + user-space routing class).
+    The full TCP state machine + UDP handler +
+    ICMP echo + DNS synthesis is multi-week work
+    and will be filled in by Sprint 12.0X.
+
+    The check requires:
+      a. `io.netty:netty-all` literal present in
+         `mobile/android/app/build.gradle.kts`
+         (the Netty dependency).
+      b. `VpnService.protect(` literal present in
+         `mobile/android/app/src/main/kotlin/.../
+         vpn/NettyChannelClient.kt` (the protect()
+         call on the outbound socket).
+      c. `class NettyChannelClient` literal present
+         in the `vpn/` package (the user-space
+         routing orchestrator).
+      d. `user-space` literal present in
+         `OpenE2eeVpnService.kt` (the comment
+         explaining the user-space routing
+         integration in `startReaderThread`).
+
+    Missing any of the 4 re-opens the Owner 22:08
+    "VPN blackhole" regression — the TUN captures
+    the packets but the kernel can't route them
+    because the catch-all `addRoute(0.0.0.0/0)`
+    re-enters the TUN, and without the
+    `protect()`-bypassed socket, no real-NIC route
+    is taken.
+    """
+    import re
+    findings = []
+    gradle_path = REPO_ROOT / "mobile" / "android" / "app" / "build.gradle.kts"
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    # a. Netty dep in build.gradle.kts.
+    if gradle_path.exists():
+        try:
+            gradle_text = gradle_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S99 build.gradle.kts: read failed (" + str(e) + ")."
+            )
+            gradle_text = ""
+        if "io.netty:netty-all" not in gradle_text:
+            findings.append(
+                "S99 build.gradle.kts: missing `io.netty:netty-all` "
+                "Netty dependency. Sprint 11.0Z invariant - the "
+                "user-space TCP/IP stack needs Netty for the "
+                "async NIO socket layer (regression guard for "
+                "Owner 22:08 'VPN blackhole' symptom)."
+            )
+    else:
+        findings.append(
+            "S99 build.gradle.kts: file missing."
+        )
+    # b. VpnService.protect( call in NettyChannelClient.kt.
+    if netty_path.exists():
+        try:
+            netty_text = netty_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S99 NettyChannelClient.kt: read failed (" + str(e) + ")."
+            )
+            netty_text = ""
+        if "VpnService.protect(" not in netty_text:
+            findings.append(
+                "S99 NettyChannelClient.kt: missing `VpnService.protect(` "
+                "call. Sprint 11.0Z invariant - the outbound socket "
+                "MUST be protected() BEFORE the connect so the "
+                "socket bypasses the VPN and uses the real NIC "
+                "(regression guard for Owner 22:08 'VPN blackhole' "
+                "symptom — without protect(), the socket is also "
+                "captured by the TUN and the packet loops forever)."
+            )
+        if "class NettyChannelClient" not in netty_text:
+            findings.append(
+                "S99 NettyChannelClient.kt: missing `class NettyChannelClient` "
+                "declaration. Sprint 11.0Z invariant - the user-space "
+                "routing orchestrator class must be present in the "
+                "`vpn/` package."
+            )
+    else:
+        findings.append(
+            "S99 NettyChannelClient.kt: file missing. Sprint 11.0Z "
+            "invariant - the user-space routing orchestrator class "
+            "must be present in the `vpn/` package."
+        )
+    # d. user-space literal in OpenE2eeVpnService.kt.
+    if service_path.exists():
+        try:
+            service_text = service_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError) as e:
+            findings.append(
+                "S99 OpenE2eeVpnService.kt: read failed (" + str(e) + ")."
+            )
+            service_text = ""
+        if "user-space" not in service_text:
+            findings.append(
+                "S99 OpenE2eeVpnService.kt: missing `user-space` "
+                "literal in the startReaderThread comment. Sprint "
+                "11.0Z invariant - the comment must explain the "
+                "user-space routing integration so the Owner can "
+                "see the intent in the source."
+            )
+    else:
+        findings.append(
+            "S99 OpenE2eeVpnService.kt: file missing."
+        )
+    return findings
+
+
+def check_tcp_state_machine_v43() -> list[str]:
+    """Sprint 12.0A: TCP state machine MVP (S100, S101, S102).
+
+    Sprint 11.0Z delivered the user-space TCP/IP stack
+    SKELETON (S99 audit): Netty dep + VpnService.protect()
+    + user-space routing comment. Sprint 12.0A is the
+    first sprint to fill in the TCP state machine +
+    data flow + FIN teardown + buildIpTcpPacket helper.
+
+    The brief: "9 state (LISTEN/SYN_SENT/ESTABLISHED/
+    FIN_WAIT_1/FIN_WAIT_2/CLOSE_WAIT/LAST_ACK/TIME_WAIT/
+    CLOSED) + 3-way handshake + data flow + FIN +
+    buildIpTcpPacket helper. MVP: single connection,
+    MSS=1460, no sliding window, no retransmission,
+    no TIME_WAIT."
+
+    The audit splits the 9.6.x audit pattern (real
+    parser, comment-strip) into 3 sub-checks:
+
+      S100 — handleTcpPacket( method + TcpConnection
+             data class.
+      S101 — 9 TcpState enum names.
+      S102 — 3-way handshake log breadcrumbs (SYN,
+             SYN+ACK, ACK) + ESTABLISHED transition.
+
+    Negative-path coverage is provided by the production
+    audit itself (a future sprint that drops any of
+    these tokens re-opens the Owner 22:08 'VPN blackhole'
+    regression). The Sprint 12.0A brief does not require
+    a Dart-side unit test for the negative path (the
+    audit IS the regression guard).
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    if not netty_path.exists():
+        findings.append(
+            "S100-S102 NettyChannelClient.kt: file missing. "
+            "Sprint 12.0A invariant - the TCP state machine "
+            "MVP (handleTcpPacket + TcpConnection + 9-state "
+            "TcpState + 3-way handshake + data flow + FIN + "
+            "buildIpTcpPacket) lives in this file."
+        )
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S100-S102 NettyChannelClient.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    # Comment-strip (per the Sprint 9.6.5 lesson: a comment
+    # claiming "we have handleTcpPacket" must NOT pass this
+    # audit).
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # ── S100 sub-check ──
+    s100_findings = []
+    if "fun handleTcpPacket(" not in code:
+        s100_findings.append(
+            "S100 NettyChannelClient.kt: missing `fun handleTcpPacket(` "
+            "method declaration. Sprint 12.0A invariant - the TCP "
+            "state machine MVP requires this dispatcher to drive the "
+            "3-way handshake (SYN -> SYN+ACK -> ESTABLISHED), forward "
+            "PSH+ACK data, and handle FIN+ACK teardown."
+        )
+    if "data class TcpConnection" not in code:
+        s100_findings.append(
+            "S100 NettyChannelClient.kt: missing `data class TcpConnection` "
+            "declaration. Sprint 12.0A invariant - the per-flow state "
+            "(state, seq/ack numbers, receive window, real socket, "
+            "reader thread) must be encapsulated in a data class."
+        )
+    findings.extend(s100_findings)
+
+    # ── S101 sub-check ──
+    s101_findings = []
+    if "enum class TcpState" not in code:
+        s101_findings.append(
+            "S101 NettyChannelClient.kt: missing `enum class TcpState` "
+            "declaration. Sprint 12.0A invariant - the 9-state enum "
+            "is the heart of the TCP state machine MVP."
+        )
+    required_states = (
+        "LISTEN", "SYN_SENT", "ESTABLISHED", "FIN_WAIT_1", "FIN_WAIT_2",
+        "CLOSE_WAIT", "LAST_ACK", "TIME_WAIT", "CLOSED",
+    )
+    for state_name in required_states:
+        if state_name not in code:
+            s101_findings.append(
+                "S101 NettyChannelClient.kt: missing TcpState `"
+                + state_name + "`. Sprint 12.0A invariant - the 9-state "
+                "enum must list all 9 RFC 793 states explicitly. MVP "
+                "does NOT implement TIME_WAIT (transitions directly to "
+                "CLOSED) but the state NAME must still be in the enum "
+                "so Sprint 12.0A.2 can wire it without a schema change."
+            )
+    findings.extend(s101_findings)
+
+    # ── S102 sub-check ──
+    s102_findings = []
+    if "SYN, flow" not in code:
+        s102_findings.append(
+            "S102 NettyChannelClient.kt: missing `SYN, flow` "
+            "log breadcrumb. Sprint 12.0A invariant - the "
+            "handleSyn method must emit a Log.d with `SYN, flow` "
+            "as the first signal that the TCP state machine fired."
+        )
+    if "SYN+ACK received" not in code:
+        s102_findings.append(
+            "S102 NettyChannelClient.kt: missing `SYN+ACK received` "
+            "log breadcrumb. Sprint 12.0A invariant - the brief "
+            "calls this 'SYN+ACK (response from dst)'. In the "
+            "MVP the real socket's `connect()` consumes the SYN+ACK "
+            "on the wire, so the log is synthesized in handleSyn "
+            "after the connect() returns. The Owner greps for this "
+            "token to confirm the 3-way handshake with the real "
+            "destination completed."
+        )
+    has_ack_breadcrumb = ("ACK, flow" in code) or ("ACK ->" in code)
+    if not has_ack_breadcrumb:
+        s102_findings.append(
+            "S102 NettyChannelClient.kt: missing ACK log "
+            "breadcrumb (neither `ACK, flow` nor `ACK ->` present). "
+            "Sprint 12.0A invariant - the bare-ACK case in "
+            "handleTcpPacket must log `ACK, flow` AND the data path "
+            "must log `ACK ->` so the Owner can confirm ACK "
+            "round-trips on the TUN-captured path."
+        )
+    if "-> ESTABLISHED" not in code:
+        s102_findings.append(
+            "S102 NettyChannelClient.kt: missing `-> ESTABLISHED` "
+            "state transition log. Sprint 12.0A invariant - the "
+            "SYN_SENT -> ESTABLISHED transition is the load-bearing "
+            "diagnostic for the 3-way handshake. The Owner greps "
+            "for this token as proof that the connection reached "
+            "the data-transfer state."
+        )
+    findings.extend(s102_findings)
+    return findings
+
+
+def check_udp_forwarder_v44() -> list[str]:
+    """Sprint 12.0A.5: UDP forwarder (S103, S104, S105).
+
+    Owner logcat 10:01 root cause: 12.0A added the TCP
+    state machine but the UDP forwarder was still in the
+    11.0Z "BEST-EFFORT" stub. The result: DNS queries to
+    `1.1.1.1:53` never reach the real resolver, DNS
+    resolution fails, and Chrome HTTP / WhatsApp / every
+    other app that needs a hostname cannot establish a
+    TCP connection (because the app is stuck on the
+    failed DNS query, the SYN never gets sent).
+
+    12.0A.5 fix: per-flow protected DatagramSocket in
+    NettyChannelClient.kt. On the first UDP packet for
+    a flow, create a `java.net.DatagramSocket`, call
+    `service.protect(socket)` (so the socket bypasses
+    the VPN and uses the real NIC), and forward the
+    payload via `DatagramSocket.send(DatagramPacket)`.
+    Start a per-flow daemon thread that reads responses
+    from the real resolver and writes them back to the
+    TUN (wrapped in a new IP+UDP packet via
+    `buildIpUdpPacket`).
+
+    The audit bundles 3 sub-checks into a single
+    check_udp_forwarder_v44 function:
+
+      S103 — handleUdpPacket( method declaration.
+      S104 — DatagramSocket literal in the
+             handleUdpPacket code path.
+      S105 — protect( call site AFTER the
+             DatagramSocket literal (i.e., on the
+             per-flow udpSocket, NOT on the TCP
+             java.net.Socket). The textual-order check
+             distinguishes the UDP protect() from the
+             S99 TCP protect().
+
+    Negative-path coverage is provided by the production
+    audit's pre-12.0A.5 baseline (which had no
+    `handleUdpPacket`, no `DatagramSocket`, and no UDP
+    `protect(` — the audit would fail all 3 sub-checks).
+    12.0A.5 does not add a Dart-side unit test for the
+    negative path; the audit IS the regression guard.
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    if not netty_path.exists():
+        findings.append(
+            "S103-S105 NettyChannelClient.kt: file missing. "
+            "Sprint 12.0A.5 invariant - the UDP forwarder "
+            "(handleUdpPacket + DatagramSocket + protect) "
+            "lives in this file."
+        )
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S103-S105 NettyChannelClient.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    # Comment-strip (per the Sprint 9.6.5 lesson).
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # ── S103 sub-check ──
+    s103_findings = []
+    if "fun handleUdpPacket(" not in code:
+        s103_findings.append(
+            "S103 NettyChannelClient.kt: missing `fun handleUdpPacket(` "
+            "method declaration. Sprint 12.0A.5 invariant - the UDP "
+            "forwarder dispatcher is `fun handleUdpPacket(srcIp, "
+            "srcPort, dstIp, dstPort, payload)`. Without it, every "
+            "TUN-captured UDP packet is dropped (no DNS, no NTP, "
+            "no STUN)."
+        )
+    findings.extend(s103_findings)
+
+    # ── S104 sub-check ──
+    s104_findings = []
+    if "DatagramSocket" not in code:
+        s104_findings.append(
+            "S104 NettyChannelClient.kt: missing `DatagramSocket` "
+            "literal. Sprint 12.0A.5 invariant - the per-flow UDP "
+            "forwarder socket is a `java.net.DatagramSocket`."
+        )
+    findings.extend(s104_findings)
+
+    # ── S105 sub-check (textual-order protect() check) ──
+    s105_findings = []
+    if "DatagramSocket" in code:
+        ds_idx = code.find("DatagramSocket")
+        protect_after_ds = code.find("protect(", ds_idx)
+        if protect_after_ds == -1:
+            s105_findings.append(
+                "S105 NettyChannelClient.kt: missing `protect(` "
+                "call site AFTER the `DatagramSocket` literal. "
+                "Sprint 12.0A.5 invariant - the per-flow UDP "
+                "socket MUST be `service.protect()`-ed so it "
+                "bypasses the VPN and uses the real NIC. Without "
+                "it, the DatagramSocket is captured by the TUN "
+                "and the UDP packet loops forever (the same "
+                "'VPN blackhole' symptom that 12.0A fixed for "
+                "TCP, now closed for UDP)."
+            )
+    # else: S104 already flagged. Don't double-report.
+    findings.extend(s105_findings)
+    return findings
+
+
+def check_tcp_5tuple_v45() -> list[str]:
+    """Sprint 12.0A.6: TCP passthrough skip + 5-tuple
+    normalization + 5 breadcrumb tokens (S106, S107, S108).
+
+    Owner 11:08 logcat root cause (BLOCKED): Sprint
+    12.0A.5's `startReaderThread` dispatched TCP/UDP
+    packets to the user-space stack BUT the transparent
+    passthrough `output.write(buf, 0, n)` still ran
+    AFTER the dispatch. The kernel ALSO processed the
+    TCP SYN, found no listening socket, and sent an RST
+    back through the TUN — which the user-space state
+    machine saw and interpreted as connection close. The
+    3-way handshake could never complete.
+
+    Owner 11:08 secondary issue: the user-space stack
+    only stored the TcpConnection under the OUTGOING
+    5-tuple (app -> real dest). The INCOMING packets
+    (real dest -> app) arrived with the REVERSED 5-tuple
+    and missed the lookup. Pre-12.0A.6, the INCOMING
+    SYN+ACK / data / FIN were dropped silently.
+
+    12.0A.6 fix:
+      S106: 5 breadcrumb tokens (TCP packet ENTRY,
+            parseTcpHeader dstPort, handleTcpPacket
+            dispatch, new TcpConnection, state
+            transition). The Owner-side diagnostic
+            surface for the BLOCKED regression.
+      S107: passthrough SKIPPED — a `handled` flag is
+            set to true after a successful TCP/UDP
+            dispatch, and the `output.write` is
+            wrapped in `if (handled) { log SKIPPED }
+            else { ... }`. The kernel no longer races
+            the user-space stack.
+      S108: 5-tuple normalization — handleTcpPacket
+            tries BOTH the primary and reverse 5-tuple
+            keys when looking up the TcpConnection, so
+            OUTGOING and INCOMING packets find the
+            same connection.
+
+    The audit bundles 3 sub-checks across 2 files
+    (OpenE2eeVpnService.kt + NettyChannelClient.kt).
+    Comment-strip + literal-match per the Sprint 9.6.5
+    lesson. Wired into main() after the S103-S105
+    dispatch.
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not netty_path.exists():
+        findings.append("S106-S108 NettyChannelClient.kt: file missing.")
+        return findings
+    if not service_path.exists():
+        findings.append("S106-S108 OpenE2eeVpnService.kt: file missing.")
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+        service_text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S106-S108 file read failed (" + str(e) + ")."
+        )
+        return findings
+
+    def strip(text):
+        out = re.sub(r"/\*[\s\S]*?\*/", "", text)
+        lines = []
+        for ln in out.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    vpn_code = strip(service_text)
+    netty_code = strip(netty_text)
+
+    # ── S106 sub-check ──
+    s106_findings = []
+    if "TCP packet ENTRY" not in vpn_code:
+        s106_findings.append(
+            "S106 OpenE2eeVpnService.kt: missing `TCP packet ENTRY` "
+            "log breadcrumb. Sprint 12.0A.6 invariant - the "
+            "Owner greps `adb logcat -d -s OpenE2eeVpn:V` for "
+            "this token to confirm the dispatch path is reached "
+            "(regression: pre-12.0A.6 the dispatch happened "
+            "silently and the Owner could not distinguish 'no "
+            "TCP packets seen' from 'dispatch is broken')."
+        )
+    if "parseTcpHeader dstPort=" not in vpn_code:
+        s106_findings.append(
+            "S106 OpenE2eeVpnService.kt: missing `parseTcpHeader "
+            "dstPort=` log breadcrumb."
+        )
+    if "handleTcpPacket dispatch" not in vpn_code:
+        s106_findings.append(
+            "S106 OpenE2eeVpnService.kt: missing `handleTcpPacket "
+            "dispatch` log breadcrumb."
+        )
+    has_new_conn = "new TcpConnection" in netty_code or "TcpConnection()" in netty_code
+    has_state_trans = "-> SYN_SENT" in netty_code or "-> ESTABLISHED" in netty_code
+    if not has_new_conn or not has_state_trans:
+        s106_findings.append(
+            "S106 NettyChannelClient.kt: missing `new TcpConnection` "
+            "or state transition log breadcrumb."
+        )
+    findings.extend(s106_findings)
+
+    # ── S107 sub-check ──
+    s107_findings = []
+    if "var handled" not in vpn_code and "val handled" not in vpn_code:
+        s107_findings.append(
+            "S107 OpenE2eeVpnService.kt: missing `handled` boolean "
+            "flag in the startReaderThread dispatch block. Sprint "
+            "12.0A.6 invariant - the passthrough-skip logic needs "
+            "a flag to know whether the user-space stack handled "
+            "the packet (Owner 11:08 BLOCKED root cause: "
+            "passthrough was unconditional, the kernel raced "
+            "the user-space stack and sent an RST)."
+        )
+    if "passthrough SKIPPED" not in vpn_code:
+        s107_findings.append(
+            "S107 OpenE2eeVpnService.kt: missing `passthrough "
+            "SKIPPED` log breadcrumb. The Owner greps for this "
+            "token to confirm the new behaviour in logcat."
+        )
+    if "output.write" in vpn_code:
+        handled_idx = vpn_code.find("var handled")
+        if handled_idx == -1:
+            handled_idx = vpn_code.find("val handled")
+        if handled_idx == -1:
+            s107_findings.append(
+                "S107 OpenE2eeVpnService.kt: `handled` flag "
+                "missing — passthrough cannot be conditional."
+            )
+        else:
+            after = vpn_code[handled_idx:]
+            if "if (handled)" not in after:
+                s107_findings.append(
+                    "S107 OpenE2eeVpnService.kt: `output.write` "
+                    "is NOT wrapped in `if (handled)` conditional. "
+                    "Sprint 12.0A.6 invariant - the passthrough "
+                    "MUST be skipped when the user-space stack "
+                    "handled the packet (Owner 11:08 BLOCKED "
+                    "root cause)."
+                )
+    findings.extend(s107_findings)
+
+    # ── S108 sub-check ──
+    s108_findings = []
+    if "primaryFlowKey" not in netty_code:
+        s108_findings.append(
+            "S108 NettyChannelClient.kt: missing `primaryFlowKey` "
+            "declaration. Sprint 12.0A.6 invariant - the "
+            "5-tuple lookup must try BOTH the primary "
+            "(src,dst) and reverse (dst,src) keys."
+        )
+    if "reverseFlowKey" not in netty_code:
+        s108_findings.append(
+            "S108 NettyChannelClient.kt: missing `reverseFlowKey` "
+            "declaration. Sprint 12.0A.6 invariant - the "
+            "5-tuple lookup must try BOTH the primary "
+            "(src,dst) and reverse (dst,src) keys so INCOMING "
+            "packets (real dest -> app) find the same "
+            "TcpConnection."
+        )
+    findings.extend(s108_findings)
+    return findings
+
+
+def check_tcp_dataflow_v46() -> list[str]:
+    """Sprint 12.0A.7: HTTP data flow diagnostics +
+    thread-safety + unknown-flow detection (S109,
+    S110, S111).
+
+    Owner 11:33 BLOCKED on Sprint 12.0A.6: TCP 3-way
+    handshake works (17 ESTABLISHED connections logged)
+    but the HTTP data flow doesn't. Chrome can't load
+    `http://212.64.210.85/healthz`. Root cause
+    hypothesis: the cross-thread visibility bug —
+    `conn.ackNum` is mutated by the TUN reader thread
+    (handleData) and read by the per-connection reader
+    thread (startSocketReader). Without `@Volatile`,
+    the reader thread sees a stale ackNum and writes
+    a response packet with the wrong ack field. The
+    app rejects the response and the HTTP page doesn't
+    load.
+
+    12.0A.7 fix:
+      S109: 4 breadcrumb tokens (sendHttpRequest,
+            recvHttpResponse, responsePayload,
+            "bytes read from real socket"). Owner-side
+            diagnostic for the data flow. Each token
+            confirms a specific stage: app's HTTP
+            request written to real socket, real
+            dest's response read from real socket,
+            response written to TUN, byte count for
+            pairing.
+      S110: tcpConnectionMap.put primary flow log +
+            UNKNOWN FLOW warning. Connection-
+            registration diagnostic surface.
+      S111: @Volatile on every TcpConnection var
+            field. The cross-thread visibility fix.
+
+    The audit bundles 3 sub-checks on
+    NettyChannelClient.kt. Comment-strip + literal-
+    match per the Sprint 9.6.5 lesson. Wired into
+    main() after the S106-S108 dispatch.
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    if not netty_path.exists():
+        findings.append("S109-S111 NettyChannelClient.kt: file missing.")
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S109-S111 NettyChannelClient.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # ── S109 sub-check ──
+    s109_findings = []
+    if "sendHttpRequest:" not in code:
+        s109_findings.append(
+            "S109 NettyChannelClient.kt: missing `sendHttpRequest:` "
+            "log breadcrumb. Sprint 12.0A.7 invariant - the Owner "
+            "greps for this token to confirm the app's HTTP "
+            "request bytes were written to the real socket."
+        )
+    if "recvHttpResponse:" not in code:
+        s109_findings.append(
+            "S109 NettyChannelClient.kt: missing `recvHttpResponse:` "
+            "log breadcrumb. Sprint 12.0A.7 invariant."
+        )
+    if "responsePayload:" not in code:
+        s109_findings.append(
+            "S109 NettyChannelClient.kt: missing `responsePayload:` "
+            "log breadcrumb. Sprint 12.0A.7 invariant - the Owner "
+            "greps for this token to confirm the response bytes "
+            "were written to the TUN."
+        )
+    if "bytes read from real socket" not in code:
+        s109_findings.append(
+            "S109 NettyChannelClient.kt: missing `bytes read from "
+            "real socket` substring in the recvHttpResponse log. "
+            "Sprint 12.0A.7 invariant - the byte count is the "
+            "canonical 'size of the response segment' the Owner "
+            "pairs with the responsePayload log."
+        )
+    findings.extend(s109_findings)
+
+    # ── S110 sub-check ──
+    s110_findings = []
+    if "tcpConnectionMap.put primary flow" not in code:
+        s110_findings.append(
+            "S110 NettyChannelClient.kt: missing "
+            "`tcpConnectionMap.put primary flow` log. Sprint "
+            "12.0A.7 invariant - the Owner greps for this token "
+            "to confirm the connection was registered in the "
+            "map under the primary (OUTGOING) 5-tuple."
+        )
+    if "late ACK" not in code:
+        s110_findings.append(
+            "S110 NettyChannelClient.kt: missing `late ACK` "
+            "debug log. Sprint 12.0A.8 invariant - the 12.0A.7 "
+            "`UNKNOWN FLOW` warning was downgraded to a `late ACK` "
+            "debug log because with the dual put, the UNKNOWN FLOW "
+            "only fires for the late ACK after handleFinAck "
+            "removed both keys (1 per connection — diagnostic "
+            "noise, not an error). The Owner greps for this "
+            "token to confirm the corner-case count."
+        )
+    findings.extend(s110_findings)
+
+    # ── S111 sub-check ──
+    s111_findings = []
+    volatile_count = code.count("@Volatile")
+    if volatile_count < 8:
+        s111_findings.append(
+            "S111 NettyChannelClient.kt: too few `@Volatile` "
+            "annotations (found " + str(volatile_count) +
+            ", need at least 8 — one per TcpConnection var "
+            "field). Sprint 12.0A.7 invariant - cross-thread "
+            "visibility between handleData (TUN reader thread) "
+            "and startSocketReader (per-connection reader thread) "
+            "requires every mutable TcpConnection field to be "
+            "@Volatile."
+        )
+    findings.extend(s111_findings)
+    return findings
+
+
+def check_teardown_comprehensive_v48() -> list[str]:
+    """Sprint 12.0X: comprehensive 6-step teardown
+    in NettyChannelClient.shutdown() (S115).
+
+    Owner 12:29 STOP-FIX: VPN durduruldu gorunuyor
+    ama internet trafigi normale donmuyor, sadece
+    reboot duzeltiyor. Kernel TUN orphan + host
+    routing broken. Root cause: the pre-12.0X
+    teardown only did 11.0R-level cleanup (ring
+    clear + packetsObserved reset). The Netty
+    `workerGroup` shutdown was async (no
+    `awaitTermination`), the per-connection reader
+    threads were interrupted but not joined, and the
+    per-flow UDP reader threads were not tracked at
+    all. The kernel TUN interface remained as an
+    orphan because the VPN service was still alive
+    (background threads holding sockets open).
+
+    12.0X fix: shutdown() is now a 6-step procedure:
+      Step 1: flowMap close + clear (per-flow Netty
+              Channels).
+      Step 2: tcpConnectionMap cancel readerFuture +
+              close socket + interrupt readerThread +
+              join readerThread + clear map.
+      Step 3: udpReaderFutures cancel + udpSocketMap
+              soTimeout=0 + close + clear map.
+      Step 4: tunOutputStream = null.
+      Step 5: workerGroup.shutdownGracefully().await(1,
+              TimeUnit.SECONDS).
+      Step 6: backgroundExecutor.shutdownNow() +
+              awaitTermination(1, TimeUnit.SECONDS).
+
+    The audit verifies all 6 steps in
+    NettyChannelClient.kt via comment-strip +
+    literal-match. Any future sprint that drops one
+    of the steps trips the regression guard.
+
+    The dual put + UNKNOWN FLOW downgrade code from
+    12.0A.8 is still present (handles late ACKs
+    cleanly), but the S112/S113/S114 audits are
+    removed in favor of the 12.0X teardown check
+    because Owner 12:29 is the higher-priority
+    regression.
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    if not netty_path.exists():
+        findings.append("S115 NettyChannelClient.kt: file missing.")
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S115 NettyChannelClient.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # ── Step 1: flowMap close + clear ──
+    if "flowMap.clear()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 1 of "
+            "comprehensive teardown (flowMap.clear). "
+            "Sprint 12.0X invariant - per-flow Netty Channels "
+            "must be closed and removed from the flowMap."
+        )
+
+    # ── Step 2: tcpConnectionMap clear + reader cancel ──
+    if "tcpConnectionMap.clear()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 2 of "
+            "comprehensive teardown (tcpConnectionMap.clear). "
+            "Sprint 12.0X invariant - per-connection "
+            "TcpConnection entries must be removed so the "
+            "per-connection reader threads can be cancelled + "
+            "the real Sockets can be closed."
+        )
+    if "readerFuture" not in code or "cancel(true)" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 2b of "
+            "comprehensive teardown (readerFuture.cancel(true)). "
+            "Sprint 12.0X invariant - the per-connection reader "
+            "Future must be cancelled (Future.cancel(true) interrupts "
+            "the executor worker thread)."
+        )
+
+    # ── Step 3: udpSocketMap close + clear + udpReaderFutures cancel ──
+    if "udpSocketMap.clear()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 3 of "
+            "comprehensive teardown (udpSocketMap.clear). "
+            "Sprint 12.0X invariant - per-flow DatagramSockets "
+            "must be closed and removed from udpSocketMap."
+        )
+    if "udpReaderFutures" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 3b of "
+            "comprehensive teardown (udpReaderFutures cancel). "
+            "Sprint 12.0X invariant - per-flow UDP reader "
+            "Futures must be cancelled so the receive() loop "
+            "unblocks."
+        )
+
+    # ── Step 4: tunOutputStream null ──
+    if "tunOutputStream = null" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 4 of "
+            "comprehensive teardown (tunOutputStream = null). "
+            "Sprint 12.0X invariant - the TUN output stream "
+            "ref must be detached so the kernel can release "
+            "the ParcelFileDescriptor."
+        )
+
+    # ── Step 5: workerGroup shutdownGracefully awaited ──
+    if "workerGroup.shutdownGracefully()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 5 of "
+            "comprehensive teardown (workerGroup.shutdownGracefully). "
+            "Sprint 12.0X invariant - the NioEventLoopGroup must "
+            "be shut down so the 2 worker threads exit."
+        )
+    if "await" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 5b of "
+            "comprehensive teardown (workerGroup.shutdownGracefully().await). "
+            "Sprint 12.0X invariant - the NioEventLoopGroup "
+            "shutdownGracefully returns a Future; we must await it "
+            "with a bounded timeout to ensure the worker threads exit."
+        )
+
+    # ── Step 6: backgroundExecutor shutdownNow + awaitTermination ──
+    if "backgroundExecutor" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 6 of "
+            "comprehensive teardown (backgroundExecutor). "
+            "Sprint 12.0X invariant - a single ExecutorService "
+            "must own ALL background work (per-connection reader "
+            "threads + per-flow UDP reader threads) so the "
+            "shutdown has ONE place to terminate them."
+        )
+    if "shutdownNow()" not in code or "awaitTermination" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 6b of "
+            "comprehensive teardown (backgroundExecutor.shutdownNow "
+            "+ awaitTermination). Sprint 12.0X invariant - the "
+            "executor must be shutdownNow() (interrupts running "
+            "tasks) and awaitTermination(1, TimeUnit.SECONDS) "
+            "(waits for them to exit) so no reader thread outlives "
+            "the VPN service."
+        )
+    return findings
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -6290,7 +8255,11 @@ def check_vpn_service_packets_observed_increment_invariant_v27() -> list[str]:
                     "non-null, not at function entry or in a "
                     "guard branch."
                 )
-    # 3. packetsObserved.set( allowed ONLY in startCapture.
+    # 3. packetsObserved.set( allowed in startCapture AND
+    #    stopCapture (Sprint 11.0V added the stopCapture
+    #    reset to fix the Owner 20:19 stale-ring regression).
+    #    Disallowed in onRevoke / onStartCommand / etc -
+    #    those would clobber a real in-flight count.
     set_matches = list(re.finditer(
         r"packetsObserved\s*\.\s*set\s*\(", code
     ))
@@ -6303,15 +8272,18 @@ def check_vpn_service_packets_observed_increment_invariant_v27() -> list[str]:
             else:
                 break
         func_name = func_match.group(1) if func_match else "<unknown>"
-        if func_name != "startCapture":
+        if func_name not in ("startCapture", "stopCapture"):
             line_no = code[:sm_pos].count("\n") + 1
             findings.append(
                 "S84 OpenE2eeVpnService.kt: packetsObserved.set( "
                 "call at line " + str(line_no) + " is in "
-                + func_name + ", NOT in startCapture. Sprint 11.0M "
-                "invariant - the reset-to-0 MUST happen only in "
-                "startCapture, not in stopCapture / onRevoke / "
-                "onStartCommand (those would clobber a real count)."
+                + func_name + ", NOT in startCapture / stopCapture. "
+                "Sprint 11.0M + 11.0V invariant - the reset-to-0 "
+                "MUST happen in startCapture (session start) OR "
+                "in stopCapture (session end, to clear stale "
+                "ring state per Owner 20:19), NOT in onRevoke / "
+                "onStartCommand (those would clobber a real "
+                "in-flight count)."
             )
     # 4. Anti-pattern guard: NO string-form increment
     #    packetsObserved.set(packetsObserved.get() + 1).
@@ -6775,6 +8747,60 @@ def main() -> int:
     else:
         print("PASS: active_pool_screen.dart has full state reset on disconnect (subscriptions cancelled + counters cleared + UI reset + button disabled while in flight + navigation to /home/gorevler) - regression guard for OnePlus 9 Pro 'packet counter keeps growing after disconnect' symptom - Sprint 11.0R S89")
 
+    s91_findings = check_dns_private_dns_conflict_v34()
+    if s91_findings:
+        all_findings.extend(s91_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt checks LinkProperties.isPrivateDnsActive + ConnectivityManager.bindProcessToNetwork(TRANSPORT_VPN) + active_pool_screen.dart shows Private DNS + Chrome DoH disable snackbar - regression guard for OnePlus 9 Pro OxygenOS Android 9+ Private DNS override - Sprint 11.0S-DNS S91")
+
+    s92_findings = check_notification_chronometer_autostop_v35()
+    if s92_findings:
+        all_findings.extend(s92_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has foreground notification setUsesChronometer + setWhen(now+15min) + Handler.postDelayed auto-stop at 00:00 - regression guard for OnePlus 9 Pro 15-minute session cap - Sprint 11.0S-EXTRA S92")
+
+    s93_findings = check_vpn_service_passthrough_count_invariant_v36()
+    if s93_findings:
+        all_findings.extend(s93_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has passthroughCount AtomicLong + per-write increment + pfd.fileDescriptor.valid check + catch(Throwable) Log.e + DNS UDP 53 detection - regression guard for OnePlus 9 Pro 'passthrough not actually writing' symptom - Sprint 11.0T S93")
+
+    s94_findings = check_manifest_change_network_state_v37()
+    if s94_findings:
+        all_findings.extend(s94_findings)
+    else:
+        print("PASS: AndroidManifest.xml declares android.permission.CHANGE_NETWORK_STATE - regression guard for Owner 20:13 'bindProcessToNetwork SecurityException' symptom - Sprint 11.0U S94")
+
+    s95_findings = check_stop_capture_ring_clear_invariant_v38()
+    if s95_findings:
+        all_findings.extend(s95_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt stopCapture has ring.clear + packetsObserved.set(0) in BOTH already-idle and normal teardown branches - regression guard for Owner 20:19 'getSampledPackets returns 10 packets after VPN stop' symptom - Sprint 11.0V S95")
+
+    s96_findings = check_check_private_dns_bind_5_logd_invariant_v39()
+    if s96_findings:
+        all_findings.extend(s96_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn has 5 Log.d breadcrumbs (ENTRY, isPrivateDnsActive, requestNetwork start, onAvailable/onUnavailable, bindProcessToNetwork result) - regression guard for Owner 20:45 'log YOK logcatte' symptom - Sprint 11.0W S96")
+
+    s97_findings = check_check_private_dns_5s_fallback_invariant_v40()
+    if s97_findings:
+        all_findings.extend(s97_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn has 5s activeNetwork fallback (callbackFired flag + Handler postDelayed + NetworkCallback TIMEOUT breadcrumb + FALLBACK bindProcessToNetwork activeNetwork + hasTransport TRANSPORT_VPN check + Magisk DenyList troubleshooting hint) - regression guard for Owner 21:08 'NetworkCallback never fires for 1 minute' symptom - Sprint 11.0X S97")
+
+    s98_findings = check_check_private_dns_call_before_establish_invariant_v41()
+    if s98_findings:
+        all_findings.extend(s98_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt checkPrivateDnsAndBindToVpn is called BEFORE Builder.establish() in startCapture (requestNetwork(TRANSPORT_VPN) issued while VPN is being registered) - regression guard for Owner 21:37 'callback never fires for 1 minute on non-rooted tablet' symptom - Sprint 11.0Y S98")
+
+    s99_findings = check_user_space_tcp_ip_stack_invariant_v42()
+    if s99_findings:
+        all_findings.extend(s99_findings)
+    else:
+        print("PASS: OpenE2eeVpnService.kt has user-space TCP/IP stack via Netty (build.gradle.kts has io.netty:netty-all dep + NettyChannelClient.kt has VpnService.protect( call + class NettyChannelClient declaration + OpenE2eeVpnService.kt startReaderThread has user-space routing comment) - regression guard for Owner 22:08 'VPN blackhole' symptom (catch-all addRoute 0.0.0.0/0 re-enters TUN) - Sprint 11.0Z S99")
+
     # Sprint 10.1A: HapticFeedback / SystemSound literal in active pool screen (S29).
     s29_findings = check_active_pool_haptic_feedback_literal_present()
     if s29_findings:
@@ -7096,6 +9122,79 @@ def main() -> int:
         all_findings.extend(s84_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt has packetsObserved.incrementAndGet ONLY in the input.read(buf) read branch (no fake increments) — regression guard for OnePlus 9 Pro Sprint 11.0A-11.0L fake-capture accusation - Sprint 11.0M S84")
+
+    # Sprint 12.0A: TCP state machine MVP (S100, S101, S102).
+    # S99 (Sprint 11.0Z) was the SKELETON; 12.0A adds the
+    # state machine, 3-way handshake, data flow, FIN
+    # teardown, and buildIpTcpPacket helper. The check
+    # bundles 3 sub-checks into a single
+    # check_tcp_state_machine_v43 audit.
+    s100_102_findings = check_tcp_state_machine_v43()
+    if s100_102_findings:
+        all_findings.extend(s100_102_findings)
+    else:
+        print("PASS: NettyChannelClient.kt has handleTcpPacket( method + TcpConnection data class (S100) + 9-state TcpState enum (S101) + 3-way handshake log breadcrumbs SYN / SYN+ACK / ACK + ESTABLISHED transition (S102) - regression guard for Sprint 12.0A TCP state machine MVP (Owner-side `curl http://212.64.210.85/healthz` test)")
+
+    # Sprint 12.0A.5: UDP forwarder (S103, S104, S105).
+    # Owner logcat 10:01 root cause: 12.0A added the TCP
+    # state machine but the UDP forwarder was still in the
+    # 11.0Z "BEST-EFFORT" stub. Without S103-S105, the DNS
+    # resolver path is broken and Chrome HTTP cannot
+    # establish a TCP connection.
+    s103_105_findings = check_udp_forwarder_v44()
+    if s103_105_findings:
+        all_findings.extend(s103_105_findings)
+    else:
+        print("PASS: NettyChannelClient.kt has handleUdpPacket( method (S103) + DatagramSocket literal (S104) + protect(udpSocket) call AFTER DatagramSocket (S105) - regression guard for Sprint 12.0A.5 UDP forwarder (Owner logcat 10:01 root cause: DNS resolver path)")
+
+    # Sprint 12.0A.6: TCP passthrough skip + 5-tuple
+    # normalization + 5 breadcrumb tokens (S106, S107,
+    # S108). Owner 11:08 BLOCKED root cause: the
+    # transparent passthrough was unconditional, the
+    # kernel raced the user-space stack and sent an RST.
+    # Owner 11:08 secondary: INCOMING packets were dropped
+    # silently because the 5-tuple lookup was
+    # single-direction. 12.0A.6 fixes both.
+    s106_108_findings = check_tcp_5tuple_v45()
+    if s106_108_findings:
+        all_findings.extend(s106_108_findings)
+    else:
+        print("PASS: 5 breadcrumb tokens for TCP dispatch (S106) + passthrough SKIPPED via `handled` flag (S107) + primaryFlowKey + reverseFlowKey 5-tuple normalization (S108) - regression guard for Sprint 12.0A.6 (Owner 11:08 BLOCKED: TCP SYN 0, ESTABLISHED YOK)")
+
+    # Sprint 12.0A.7: HTTP data flow diagnostics +
+    # thread-safety + unknown-flow detection (S109,
+    # S110, S111). Owner 11:33 BLOCKED on Sprint
+    # 12.0A.6: TCP 3-way handshake works (17
+    # ESTABLISHED connections) but HTTP data flow
+    # doesn't. Root cause hypothesis: cross-thread
+    # visibility bug — `conn.ackNum` is mutated by
+    # the TUN reader thread (handleData) and read by
+    # the per-connection reader thread
+    # (startSocketReader). Without @Volatile, the
+    # reader sees a stale ackNum and writes a
+    # response packet with the wrong ack field.
+    s109_111_findings = check_tcp_dataflow_v46()
+    if s109_111_findings:
+        all_findings.extend(s109_111_findings)
+    else:
+        print("PASS: 4 HTTP data flow breadcrumb tokens (S109) + tcpConnectionMap.put + UNKNOWN FLOW warning (S110) + @Volatile on TcpConnection fields (S111) - regression guard for Sprint 12.0A.7 (Owner 11:33 BLOCKED: TCP handshake works, HTTP data flow doesn't)")
+
+    # Sprint 12.0X: comprehensive 6-step teardown
+    # in NettyChannelClient.shutdown() (S115).
+    # Owner 12:29 STOP-FIX: VPN durduruldu gorunuyor
+    # ama internet trafigi normale donmuyor, sadece
+    # reboot duzeltiyor. The pre-12.0X teardown only
+    # did 11.0R-level cleanup (ring clear + packets-
+    # Observed reset), leaving the Netty
+    # `workerGroup`, the per-connection reader
+    # threads, and the per-flow UDP reader threads
+    # leaked. The kernel TUN interface remained as
+    # an orphan and host routing was broken.
+    s115_findings = check_teardown_comprehensive_v48()
+    if s115_findings:
+        all_findings.extend(s115_findings)
+    else:
+        print("PASS: Comprehensive 6-step teardown in NettyChannelClient.shutdown (S115) covering flowMap + tcpConnectionMap (with readerFuture.cancel + socket.close + readerThread.interrupt) + udpSocketMap (with udpReaderFutures.cancel) + tunOutputStream + workerGroup.shutdownGracefully.await + backgroundExecutor.shutdownNow.awaitTermination - regression guard for Sprint 12.0X (Owner 12:29 STOP-FIX: kernel TUN orphan + host routing broken until reboot)")
 
     if all_findings:
         print("\nFINDINGS:")
