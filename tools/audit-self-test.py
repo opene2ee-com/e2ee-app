@@ -4073,6 +4073,198 @@ def run_s119_check(opene2ee_vpn_service_text):
     return findings
 
 
+def run_s120_check(config_text, active_pool_screen_text):
+    """S120: Version display in AppBar (Sprint 12.0F).
+
+    Owner 15:04 doesn't believe the new APK is
+    installed (the install dialog auto-dismisses
+    and the logcat is ambiguous about which APK is
+    running). The Owner will take a screenshot of
+    the active pool screen and compare the AppBar
+    version display against the git log + APK SHA
+    to confirm the new build is actually running.
+
+    The fix is in 2 places:
+      A. mobile/lib/config.dart — new
+         AppConfig.versionName (default
+         '12.0E') + AppConfig.versionCode
+         (default '06bd4d7') static const
+         fields. Both can be overridden at
+         build time via `--dart-define
+         VERSION_NAME=12.0F --dart-define
+         VERSION_CODE=06bd4d7`. The Coder
+         pipeline reads the sprint name +
+         commit SHA from the build script
+         and injects them.
+      B. mobile/lib/screens/active_pool_screen
+         .dart — the AppBar `actions: [...]`
+         array contains a Text widget that
+         displays `v${kVersionName}
+         (${kVersionCode})` so the Owner
+         can take a screenshot and confirm
+         the new APK is running.
+
+    The audit strips `/* ... */` block comments
+    and `//` line comments (preserving strings),
+    then checks for the 4 mandatory token
+    substrings in the Dart source files:
+      (1) `versionName` field in AppConfig
+          (Dart class const + String.from
+          Environment).
+      (2) `versionCode` field in AppConfig
+          (Dart class const + String.from
+          Environment).
+      (3) `kVersionName` alias at the file
+          scope (the AppBar uses the alias,
+          not the AppConfig field directly).
+      (4) `kVersionCode` alias at the file
+          scope.
+      (5) `v${kVersionName}` token in the
+          AppBar `actions: [...]` array.
+      (6) `(${kVersionCode})` token in the
+          AppBar `actions: [...]` array.
+
+    Sprint 12.0F target: 166 + 1 = 167 audit
+    cases total (S120 is the 167th).
+    """
+    import re
+    findings = []
+    if config_text is None:
+        findings.append(
+            "S120 config.dart: file text missing. "
+            "Sprint 12.0F invariant - the AppConfig "
+            "class MUST have `versionName` and "
+            "`versionCode` static const fields so "
+            "the active_pool_screen.dart AppBar can "
+            "display the version. Without these "
+            "constants the Owner cannot confirm "
+            "the new APK is actually running (the "
+            "install dialog auto-dismisses and the "
+            "logcat is ambiguous about which APK is "
+            "running)."
+        )
+    if active_pool_screen_text is None:
+        findings.append(
+            "S120 active_pool_screen.dart: file text "
+            "missing. Sprint 12.0F invariant - the "
+            "AppBar `actions: [...]` array MUST "
+            "contain a Text widget that displays "
+            "`v${kVersionName} (${kVersionCode})` "
+            "so the Owner can take a screenshot to "
+            "confirm the new APK is running."
+        )
+    if config_text is None or active_pool_screen_text is None:
+        return findings
+    # Strip /* ... */ block comments.
+    stripped_config = re.sub(r"/\*[\s\S]*?\*/", "", config_text)
+    stripped_active = re.sub(r"/\*[\s\S]*?\*/", "", active_pool_screen_text)
+    # Strip // line comments (preserving strings).
+    def strip_line_comments(text):
+        lines = []
+        for ln in text.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    config_code = strip_line_comments(stripped_config)
+    active_code = strip_line_comments(stripped_active)
+
+    # (1) AppConfig.versionName field.
+    if "versionName" not in config_code:
+        findings.append(
+            "S120 config.dart: missing `versionName` "
+            "field on AppConfig. Sprint 12.0F "
+            "invariant - the AppConfig class MUST "
+            "have a `versionName` static const "
+            "field (the semantic version tag like "
+            "`12.0F`) so the active_pool_screen "
+            ".dart AppBar can display the version."
+        )
+    # (2) AppConfig.versionCode field.
+    if "versionCode" not in config_code:
+        findings.append(
+            "S120 config.dart: missing `versionCode` "
+            "field on AppConfig. Sprint 12.0F "
+            "invariant - the AppConfig class MUST "
+            "have a `versionCode` static const "
+            "field (the 7-char git commit SHA like "
+            "`06bd4d7`) so the active_pool_screen "
+            ".dart AppBar can display the version."
+        )
+    # (3) kVersionName file-scope alias.
+    if "kVersionName" not in config_code:
+        findings.append(
+            "S120 config.dart: missing `kVersionName` "
+            "file-scope alias. Sprint 12.0F invariant "
+            "- the AppConfig.versionName field is "
+            "the canonical constant, but the AppBar "
+            "uses the `kVersionName` file-scope "
+            "alias (matches the existing kDeviceId / "
+            "kApiKey / kApiBase pattern in the same "
+            "file). Without the alias, the AppBar "
+            "must reach into AppConfig directly, "
+            "which breaks the Sprint 10.1C "
+            "backwards-compat pattern."
+        )
+    # (4) kVersionCode file-scope alias.
+    if "kVersionCode" not in config_code:
+        findings.append(
+            "S120 config.dart: missing `kVersionCode` "
+            "file-scope alias. Sprint 12.0F invariant "
+            "- the AppConfig.versionCode field is "
+            "the canonical constant, but the AppBar "
+            "uses the `kVersionCode` file-scope "
+            "alias (matches the existing kDeviceId / "
+            "kApiKey / kApiBase pattern in the same "
+            "file)."
+        )
+    # (5) v${kVersionName} token in AppBar actions.
+    if "v${kVersionName}" not in active_code:
+        findings.append(
+            "S120 active_pool_screen.dart: missing "
+            "`v${kVersionName}` token in the AppBar "
+            "`actions: [...]` array. Sprint 12.0F "
+            "invariant - the AppBar MUST display the "
+            "version name as `v${kVersionName}` "
+            "(the `v` prefix is the standard Flutter "
+            "AppBar action badge pattern; the "
+            "interpolation uses the kVersionName "
+            "alias so the Owner can match the AppBar "
+            "display against the config.dart default "
+            "value)."
+        )
+    # (6) (${kVersionCode}) token in AppBar actions.
+    if "(${kVersionCode})" not in active_code:
+        findings.append(
+            "S120 active_pool_screen.dart: missing "
+            "`(${kVersionCode})` token in the AppBar "
+            "`actions: [...]` array. Sprint 12.0F "
+            "invariant - the AppBar MUST display "
+            "the version code as `(${kVersionCode})` "
+            "(the parenthesized 7-char git commit "
+            "SHA). The Owner greps for this token to "
+            "match the AppBar display against the "
+            "`git log --oneline -1` output (the "
+            "same 7-char SHA at the start of the "
+            "commit message)."
+        )
+    return findings
+
+
 def run_s93_check(opene2ee_vpn_service_text):
     """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
     counter invariant (S93).
@@ -9850,6 +10042,61 @@ cases = [
          "        Log.d(\"TcpForwarder\", \"recvHttpResponse: bodyFirst100 (flow X, 42 bytes): hex=[...] ascii=[...]\")\n"
          "        Log.w(\"TcpForwarder\", \"recvHttpResponse: MISMATCH for status=200 + content-type=text/plain (flow X, bodyBytes=42 != content-length=43) — text/plain body does not match declared length\")\n"
          "    }\n"
+         "}\n",
+     ),
+     []),
+    # S120 case (Sprint 12.0F - new) - version display
+    # in AppBar. Owner 15:04 doesn't believe the
+    # new APK is installed; the Owner will take a
+    # screenshot to confirm. The audit verifies the
+    # 6 mandatory tokens:
+    #   (1) `versionName` field in AppConfig
+    #       (config.dart).
+    #   (2) `versionCode` field in AppConfig
+    #       (config.dart).
+    #   (3) `kVersionName` file-scope alias
+    #       (config.dart).
+    #   (4) `kVersionCode` file-scope alias
+    #       (config.dart).
+    #   (5) `v${kVersionName}` token in AppBar
+    #       actions (active_pool_screen.dart).
+    #   (6) `(${kVersionCode})` token in AppBar
+    #       actions (active_pool_screen.dart).
+    # Total selftest: 166 + 1 = 167.
+    ("S120 PASS (version display in AppBar - versionName + versionCode in AppConfig + kVersionName + kVersionCode file-scope aliases + v${kVersionName} + (${kVersionCode}) in AppBar actions - regression guard for Sprint 12.0F, Owner 15:04 install-confirmation screenshot)",
+     run_s120_check,
+     (
+         # config.dart (must include the 4 AppConfig + kVersion* tokens)
+         "import 'package:flutter/foundation.dart';\n"
+         "class AppConfig {\n"
+         "  AppConfig._();\n"
+         "  static const String versionName = String.fromEnvironment('VERSION_NAME', defaultValue: '12.0E');\n"
+         "  static const String versionCode = String.fromEnvironment('VERSION_CODE', defaultValue: '06bd4d7');\n"
+         "  static const String deviceId = String.fromEnvironment('DEVICE_ID', defaultValue: 'a1b2c3d4e5f60718a1b2c3d4');\n"
+         "}\n"
+         "const String kDeviceId = AppConfig.deviceId;\n"
+         "const String kVersionName = AppConfig.versionName;\n"
+         "const String kVersionCode = AppConfig.versionCode;\n",
+         # active_pool_screen.dart (must include the v${kVersionName} + (${kVersionCode}) tokens in AppBar actions)
+         "import 'package:flutter/material.dart';\n"
+         "import '../config.dart';\n"
+         "Widget build() {\n"
+         "  return Scaffold(\n"
+         "    appBar: AppBar(\n"
+         "      title: const Text('Aktif Nöbet'),\n"
+         "      actions: [\n"
+         "        Center(\n"
+         "          child: Padding(\n"
+         "            padding: const EdgeInsets.symmetric(horizontal: 12),\n"
+         "            child: Text(\n"
+         "              'v${kVersionName} (${kVersionCode})',\n"
+         "              style: const TextStyle(fontSize: 12, color: Colors.white70),\n"
+         "            ),\n"
+         "          ),\n"
+         "        ),\n"
+         "      ],\n"
+         "    ),\n"
+         "  );\n"
          "}\n",
      ),
      []),

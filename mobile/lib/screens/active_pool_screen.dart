@@ -484,6 +484,43 @@ class _ActivePoolScreenState extends ConsumerState<ActivePoolScreen>
           icon: const Icon(Icons.arrow_back),
           onPressed: () => context.go('/home/gorevler'),
         ),
+        // Sprint 12.0F — version display in AppBar
+        // actions. The Owner takes a screenshot
+        // to confirm the new APK is actually
+        // running (the install dialog
+        // auto-dismisses and the logcat is
+        // ambiguous about which APK is
+        // running). The actions array shows
+        // `v12.0F (06bd4d7)` on the right side
+        // of the AppBar. The values come from
+        // AppConfig.versionName + AppConfig
+        // .versionCode (Sprint 12.0F
+        // constants) which are injected at
+        // build time via `--dart-define
+        // VERSION_NAME=12.0F --dart-define
+        // VERSION_CODE=06bd4d7`. The Coder
+        // pipeline reads the commit SHA +
+        // sprint name from the build script
+        // and injects them so the Owner can
+        // match the AppBar display against
+        // `git log --oneline -1`. The
+        // `Center` widget + `TextStyle
+        // (fontSize: 12, color: white70)` is
+        // the standard AppBar action badge
+        // pattern (small + grey on the dark
+        // AppBar background, easy to read on
+        // any device).
+        actions: [
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Text(
+                'v${kVersionName} (${kVersionCode})',
+                style: const TextStyle(fontSize: 12, color: Colors.white70),
+              ),
+            ),
+          ),
+        ],
       ),
       body: ListView(
         padding: const EdgeInsets.only(bottom: 96),
