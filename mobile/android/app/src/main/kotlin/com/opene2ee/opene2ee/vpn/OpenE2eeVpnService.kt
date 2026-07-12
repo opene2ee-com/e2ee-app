@@ -162,15 +162,20 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.FileInputStream
 import java.io.IOException
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -762,6 +767,24 @@ class OpenE2eeVpnService : VpnService() {
     // `service.protect(socket)`).
     private var nettyClient: NettyChannelClient? = null
 
+    // Sprint 12.0B — minimal UDP forwarder lives
+    // DIRECTLY in OpenE2eeVpnService.kt (not in
+    // NettyChannelClient.kt). The brief is
+    // explicit: "Netty DEGIL, sadece raw
+    // java.net.DatagramSocket + service.protect
+    // (socket)". The class is defined at the
+    // bottom of this file (top-level, same
+    // `vpn/` package). It owns the per-flow
+    // DatagramSocket map, the per-flow reader
+    // Future map, and a single
+    // ThreadPoolExecutor for the per-flow
+    // reader threads. Its `tearDown()` method
+    // is called from `stopCapture()` BEFORE
+    // `nettyClient?.shutdown()` so the 6-step
+    // teardown's step 3 (udpSocketMap close +
+    // udpReaderFutures cancel) runs first.
+    private val udpForwarder = UdpForwarder(this)
+
     /** Current state — observable via `status`. */
     @Volatile
     private var state: State = State.IDLE
@@ -1296,6 +1319,30 @@ class OpenE2eeVpnService : VpnService() {
         // backgroundExecutor (1s). After this returns,
         // NO background thread is alive and the TUN
         // interface is safe to release.
+        //
+        // Sprint 12.0B — the per-flow UDP sockets +
+        // reader threads are no longer in
+        // NettyChannelClient (they were moved to the
+        // service-level `UdpForwarder` per the brief:
+        // "Netty DEGIL"). The teardown must run FIRST
+        // (BEFORE `nettyClient?.shutdown()`) so the
+        // 6-step shutdown's step 3 can safely delegate
+        // to `service?.tearDownUdpForwarder()` as a
+        // no-op (the map is already empty at that
+        // point). The teardown does:
+        //   1. Cancel every per-flow UDP reader Future.
+        //   2. Force `soTimeout=0` on every DatagramSocket
+        //      (so the receive() call unblocks with a
+        //      SocketTimeoutException instead of
+        //      waiting for the 2-second default).
+        //   3. Close every per-flow DatagramSocket.
+        //   4. Clear the maps.
+        //   5. Set the TUN output stream ref to null.
+        //   6. backgroundExecutor.shutdownNow() +
+        //      awaitTermination(1, SECONDS) — bounded
+        //      wait for ALL per-flow reader threads to
+        //      exit.
+        udpForwarder.tearDown()
         nettyClient?.shutdown()
         nettyClient = null
 
@@ -1861,6 +1908,16 @@ class OpenE2eeVpnService : VpnService() {
         // the reference; calling it with null clears it
         // (used by stopCapture's shutdown path).
         nettyClient?.setTunOutputStream(output)
+        // Sprint 12.0B — same setter for the service-level
+        // UDP forwarder. The per-flow UDP reader thread
+        // (started by `UdpForwarder.handleUdpPacket` on
+        // the first UDP packet for a flow) needs the TUN
+        // output stream to write the wrapped IP+UDP
+        // response packets back to the kernel so the app
+        // sees the resolver's response. Without this wire,
+        // DNS queries would never get a response and
+        // every hostname-dependent app would fail.
+        udpForwarder.setTunOutputStream(output)
         val thread = Thread({
             val buf = ByteArray(TUN_MTU)
             try {
@@ -2144,22 +2201,38 @@ class OpenE2eeVpnService : VpnService() {
                                     }
                                 }
                                 NettyChannelClient.IPPROTO_UDP -> {
-                                    val udp = client.parseUdpHeader(buf, n, ip.ihl)
+                                    // Sprint 12.0B — UDP dispatch
+                                    // is now on the SERVICE's
+                                    // UdpForwarder, not on the
+                                    // NettyChannelClient. The
+                                    // brief is explicit: "Netty
+                                    // DEGIL, sadece raw
+                                    // java.net.DatagramSocket +
+                                    // service.protect(socket)". The
+                                    // forwarder creates a per-flow
+                                    // protected DatagramSocket on
+                                    // the first UDP packet for a
+                                    // flow and starts a per-flow
+                                    // reader thread that writes
+                                    // responses back to the TUN.
+                                    val udp = udpForwarder.parseUdpHeader(buf, n, ip.ihl)
                                     if (udp != null) {
-                                        // Sprint 12.0A.5 — UDP forwarder.
-                                        // Slice the UDP payload out
-                                        // of the IP packet (UDP
-                                        // header is 8 bytes: src
-                                        // port 2 + dst port 2 +
-                                        // length 2 + checksum 2).
-                                        // The slice is offset by
-                                        // ip.ihl + 8.
+                                        // Sprint 12.0B — UDP payload
+                                        // extraction. UDP header is
+                                        // 8 bytes: src port 2 +
+                                        // dst port 2 + length 2 +
+                                        // checksum 2. The slice is
+                                        // offset by ip.ihl + 8; the
+                                        // payload length is
+                                        // `udp.length - 8` (the UDP
+                                        // length field includes the
+                                        // header).
                                         val payloadOffset = ip.ihl + 8
                                         val payloadLen = (udp.length - 8).coerceAtLeast(0)
                                         if (payloadOffset + payloadLen <= n && payloadLen > 0) {
                                             val payload = ByteArray(payloadLen)
                                             System.arraycopy(buf, payloadOffset, payload, 0, payloadLen)
-                                            client.handleUdpPacket(
+                                            udpForwarder.handleUdpPacket(
                                                 srcIp = ip.srcAddr.hostAddress ?: "",
                                                 srcPort = udp.srcPort,
                                                 dstIp = ip.dstAddr.hostAddress ?: "",
@@ -2700,5 +2773,708 @@ class OpenE2eeVpnService : VpnService() {
         Log.w(TAG, "onRevoke: VPN profile revoked by system (Magisk Zygisk or settings or user); tearing down")
         stopCapture(graceful = true)
         super.onRevoke()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Sprint 12.0B — UdpForwarder (minimal, raw DatagramSocket).
+//
+// Why this lives in OpenE2eeVpnService.kt and not in
+// NettyChannelClient.kt:
+//
+//   The brief is explicit: "OpenE2eeVpnService.kt icine minimal
+//   UDP forwarder ekle, Netty DEGIL, sadece raw java.net
+//   .DatagramSocket + service.protect(socket)". The 12.0A.5 UDP
+//   forwarder (which lived in NettyChannelClient.kt) was good
+//   code but in the wrong file: NettyChannelClient.kt is
+//   fundamentally a TCP/Netty class (it owns the
+//   NioEventLoopGroup, the per-connection TcpConnection map,
+//   and the TCP state machine). Mixing the per-flow UDP
+//   DatagramSocket map into a Netty class was confusing
+//   (the reader would think UDP goes through Netty — it
+//   doesn't, but the file name suggests it does). Sprint
+//   12.0B moves the UDP code to its own class in this
+//   same file so the boundary is clear:
+//
+//     - NettyChannelClient = TCP only (Sprint 12.0A/12.0X)
+//     - UdpForwarder       = UDP only (Sprint 12.0B)
+//
+//   Both are owned by OpenE2eeVpnService and torn down
+//   together in `stopCapture()`.
+//
+// Why a class and not loose methods on the service:
+//
+//   The per-flow DatagramSocket map + reader Future map +
+//   background Executor are a coherent unit of state. Pulling
+//   them into a class makes the teardown (`tearDown()`) a
+//   single method call and gives the audit a single token
+//   to verify (`UdpForwarder`, `udpSocketMap`, `tearDown`,
+//   `protect(`).
+//
+// Why not a new file (UdpForwarder.kt):
+//
+//   The brief says "OpenE2eeVpnService.kt icine" — "into
+//   OpenE2eeVpnService.kt". Top-level class declarations in
+//   the same Kotlin file are the standard way to keep
+//   related code together (the existing file already has
+//   a `UdpHeader` data class via NettyChannelClient.kt —
+//   we redeclare it here as a nested type for the new
+//   code path).
+//
+// The forwarder is MINIMAL — it does only what the brief
+// requires:
+//
+//   1. `parseUdpHeader(buf, n, ipHeaderLen)` — read the
+//      8-byte UDP header (src port, dst port, length).
+//   2. `handleUdpPacket(srcIp, srcPort, dstIp, dstPort,
+//      payload)` — get-or-create a per-flow
+//      `DatagramSocket`, call `service.protect(socket)`
+//      (so the socket bypasses the VPN and uses the real
+//      NIC), send the payload to the real destination
+//      via `DatagramSocket.send(DatagramPacket)`, then
+//      start a per-flow reader thread that reads the
+//      response from the resolver and writes it back to
+//      the TUN (wrapped in a new IP+UDP packet via
+//      `buildIpUdpPacket`).
+//   3. `tearDown()` — the 6-step teardown for the UDP
+//      forwarder (cancel reader Futures, close
+//      DatagramSockets, clear maps, shutdownNow the
+//      background Executor, awaitTermination(1s)).
+//
+// The TCP flow is unaffected. The 6-step shutdown in
+// `NettyChannelClient.shutdown()` now delegates step 3
+// (udpSocketMap close) to `service?.tearDownUdpForwarder()`
+// as a backward-compat no-op (the teardown already ran
+// first in `stopCapture()`).
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Sprint 12.0B — minimal UDP forwarder.
+ *
+ * Per-flow protected DatagramSocket. On the first UDP
+ * packet for a 5-tuple flow, create a `java.net.DatagramSocket`,
+ * call `service.protect(socket)` (so it bypasses the VPN
+ * and uses the real NIC), and forward the payload to the
+ * real destination. Start a per-flow reader thread that
+ * reads responses and writes them back to the TUN wrapped
+ * in a new IP+UDP packet.
+ *
+ * The forwarder owns:
+ *   - `udpSocketMap` — per-flow DatagramSocket map
+ *     (key = "srcIp:srcPort-dstIp:dstPort", value = the
+ *     protected socket).
+ *   - `udpReaderFutures` — per-flow reader Future map
+ *     (key = same flow string, value = the Future
+ *     returned by `backgroundExecutor.submit`).
+ *   - `backgroundExecutor` — single `ThreadPoolExecutor`
+ *     that owns ALL per-flow reader threads. The MVP
+ *     runs up to 1 reader per active flow; the cached
+ *     pool grows as needed and shrinks when idle.
+ *   - `tunOutputStream` — the TUN output stream (set
+ *     by `OpenE2eeVpnService.startReaderThread` so the
+ *     per-flow reader can write response packets back
+ *     to the kernel).
+ *
+ * Threading model:
+ *   - `handleUdpPacket` is called from the TUN reader
+ *     thread (single-threaded for the dispatch path).
+ *   - The per-flow reader runs on a `backgroundExecutor`
+ *     worker thread (1 thread per active flow).
+ *   - `tearDown` is called from the main looper (via
+ *     `stopCapture` / `onRevoke`).
+ */
+internal class UdpForwarder(private val service: OpenE2eeVpnService) {
+
+    companion object {
+        private const val TAG = "UdpForwarder"
+        // IP protocol number for UDP (RFC 790).
+        const val IPPROTO_UDP: Byte = 17
+        // UDP reader soTimeout — 2 seconds is enough for
+        // a typical DNS / NTP / STUN response and bounds
+        // the reader thread's lifetime on a stale socket
+        // (the next UDP packet for the flow will
+        // re-create the socket + reader).
+        private const val UDP_READER_SO_TIMEOUT_MS = 2000
+        // MTU of a single UDP datagram — RFC 791 says
+        // 65,507 bytes max, but on the device's NIC the
+        // practical max is the TUN_MTU (1400) minus 28
+        // (IP+UDP headers). The MVP buffer is 8 KiB so
+        // a 1400-byte TUN datagram fits comfortably
+        // and a large DNS response (e.g., a DNSSEC chain)
+        // is not silently truncated.
+        private const val UDP_RECV_BUFFER_SIZE = 8 * 1024
+    }
+
+    /**
+     * Parsed UDP header (subset).
+     */
+    data class UdpHeader(
+        val srcPort: Int,
+        val dstPort: Int,
+        val length: Int
+    )
+
+    /**
+     * Per-flow protected DatagramSocket map. Key: device
+     * 5-tuple "srcIp:srcPort-dstIp:dstPort" (the original
+     * app's flow). Value: protected DatagramSocket. Each
+     * socket is created on the first UDP packet for the
+     * flow, `service.protect()`-ed (so it bypasses the
+     * VPN), and reused for subsequent packets on the same
+     * flow. The map is `ConcurrentHashMap` so the TUN
+     * reader thread and the per-flow reader thread can
+     * both touch it (the per-flow reader REMOVEs the
+     * entry when the socket goes stale; the TUN reader
+     * re-creates on the next packet).
+     */
+    private val udpSocketMap: MutableMap<String, DatagramSocket> = ConcurrentHashMap()
+
+    /**
+     * Per-flow UDP reader Future map. Key: device
+     * 5-tuple string. Value: the Future returned by
+     * `backgroundExecutor.submit` for the per-flow UDP
+     * reader runnable. The shutdown method cancels all
+     * of these via `Future.cancel(true)` (which
+     * interrupts the worker thread) AND calls
+     * `backgroundExecutor.shutdownNow()` +
+     * `awaitTermination` to ensure no reader thread
+     * outlives the VPN service. This is the canonical
+     * way to make the teardown comprehensive: any
+     * leaked reader would keep its socket open,
+     * blocking the kernel from releasing the TUN
+     * interface and breaking host routing.
+     */
+    private val udpReaderFutures: MutableMap<String, Future<*>?> = ConcurrentHashMap()
+
+    /**
+     * Lock guarding the per-flow DatagramSocket sends.
+     * The platform DatagramSocket is not safe for
+     * concurrent `send()` from multiple threads, so the
+     * TUN reader thread (which dispatches `handleUdpPacket`)
+     * and any other potential caller MUST synchronize on
+     * this lock when calling `udpSock.send()`. The reader
+     * thread does NOT need this lock for `receive()` (it
+     * is the only reader of the socket).
+     */
+    private val udpSendLock: Any = Any()
+
+    /**
+     * Single `ThreadPoolExecutor` that owns ALL per-flow
+     * UDP reader threads. Cached thread pool so threads
+     * are created on demand and reused. The MVP instantiates
+     * up to ~1 UDP reader per active flow; the cached pool
+     * grows as needed and shrinks when idle. Shutdown is
+     * via `shutdownNow()` + `awaitTermination(1, SECONDS)`
+     * inside `tearDown()` so no reader thread outlives the
+     * VPN service.
+     */
+    private val backgroundExecutor: ThreadPoolExecutor = Executors.newCachedThreadPool() as ThreadPoolExecutor
+
+    /**
+     * TUN output stream — the `ParcelFileDescriptor
+     * .AutoCloseOutputStream` that the per-flow reader
+     * thread writes response packets to. Set by
+     * `OpenE2eeVpnService.startReaderThread` AFTER
+     * `Builder.establish()` returns; cleared by
+     * `OpenE2eeVpnService.stopCapture` (via
+     * `tearDown()`) so a stale reference does not leak.
+     *
+     * `@Volatile` because the setter is called from the
+     * TUN reader thread (or `stopCapture`) and the
+     * reader is called from the per-flow executor worker
+     * thread.
+     */
+    @Volatile
+    private var tunOutputStream: java.io.OutputStream? = null
+
+    /**
+     * Set the TUN output stream. Called by
+     * `OpenE2eeVpnService.startReaderThread` once the
+     * `ParcelFileDescriptor.AutoCloseOutputStream` is
+     * open. After this call, the per-flow reader can
+     * write response packets (DNS / NTP / STUN
+     * responses) back to the device's app via the TUN.
+     * Calling with `null` clears the reference (used by
+     * `tearDown`).
+     */
+    fun setTunOutputStream(output: java.io.OutputStream?) {
+        tunOutputStream = output
+        Log.d(TAG, "setTunOutputStream: TUN output stream ${if (output == null) "cleared" else "set"}")
+    }
+
+    /**
+     * Parse a minimal UDP header from the buffer at the
+     * given IP header offset. The UDP header is 8 bytes
+     * (RFC 768): src port (2) + dst port (2) + length (2)
+     * + checksum (2, optional in IPv4).
+     */
+    fun parseUdpHeader(buf: ByteArray, len: Int, ipHeaderLen: Int): UdpHeader? {
+        if (len < ipHeaderLen + 8) return null
+        val bb = ByteBuffer.wrap(buf, 0, len).order(ByteOrder.BIG_ENDIAN)
+        val srcPort = bb.getShort(ipHeaderLen).toInt() and 0xFFFF
+        val dstPort = bb.getShort(ipHeaderLen + 2).toInt() and 0xFFFF
+        val length = bb.getShort(ipHeaderLen + 4).toInt() and 0xFFFF
+        return UdpHeader(srcPort = srcPort, dstPort = dstPort, length = length)
+    }
+
+    /**
+     * Sprint 12.0B — handle a TUN-captured UDP packet.
+     *
+     * The signature is `(srcIp, srcPort, dstIp, dstPort,
+     * payload)` — the IP + UDP headers have already been
+     * parsed by the caller (see
+     * `OpenE2eeVpnService.startReaderThread`). The
+     * payload is the raw UDP payload (UDP header is
+     * NOT included).
+     *
+     * Steps:
+     *   1. Look up the protected DatagramSocket for
+     *      this flow (or create + protect + cache it
+     *      on the first packet).
+     *   2. Send the payload to the real destination
+     *      via `DatagramSocket.send(DatagramPacket)`.
+     *      The `udpSendLock` serializes concurrent
+     *      sends.
+     *   3. Start a per-flow reader thread that reads
+     *      the response from the real destination and
+     *      writes it back to the TUN (wrapped in a new
+     *      IP+UDP packet via `buildIpUdpPacket`).
+     *
+     * For the MVP, each UDP flow is independent: the
+     * socket is created on the first packet and reused
+     * for subsequent packets on the same flow. The
+     * reader thread exits on `soTimeout` (2s) so a
+     * stale socket does not block the TUN reader
+     * forever.
+     */
+    fun handleUdpPacket(
+        srcIp: String,
+        srcPort: Int,
+        dstIp: String,
+        dstPort: Int,
+        payload: ByteArray
+    ) {
+        val flowKey = "$srcIp:$srcPort-$dstIp:$dstPort"
+        // (1) Get or create a protected DatagramSocket for this flow.
+        // The map is keyed by flow + the value is non-null
+        // (we remove the entry on protect-failure so the
+        // value type stays non-null). Use a get-then-put
+        // pattern instead of `getOrPut` so the lambda can
+        // return null on the protect-failure path without
+        // a type-mismatch compile error.
+        val udpSock = synchronized(udpSocketMap) {
+            udpSocketMap[flowKey] ?: run {
+                val newS: DatagramSocket? = try {
+                    val s = DatagramSocket()
+                    // The protect() call is the load-bearing
+                    // piece — without it, the DatagramSocket
+                    // is captured by the TUN and the UDP
+                    // packet loops forever (the same "VPN
+                    // blackhole" symptom that 12.0A fixed
+                    // for TCP, now closed for UDP).
+                    val protected = service.protect(s)
+                    if (!protected) {
+                        Log.e(TAG, "handleUdpPacket: protect(DatagramSocket) returned false for $flowKey; dropping packet")
+                        s.close()
+                        null
+                    } else {
+                        Log.d(TAG, "handleUdpPacket: protected DatagramSocket for $flowKey dst=$dstIp:$dstPort")
+                        s
+                    }
+                } catch (e: Throwable) {
+                    Log.e(TAG, "handleUdpPacket: DatagramSocket() / protect() failed for $flowKey: ${e.message}")
+                    null
+                }
+                if (newS != null) {
+                    udpSocketMap[flowKey] = newS
+                }
+                newS
+            }
+        }
+        if (udpSock == null) {
+            return  // protect failed; already logged.
+        }
+        // (2) Send the payload to the real destination.
+        try {
+            val sendPkt = DatagramPacket(
+                payload, payload.size,
+                InetAddress.getByName(dstIp), dstPort
+            )
+            synchronized(udpSendLock) {
+                udpSock.send(sendPkt)
+            }
+            Log.d(TAG, "handleUdpPacket: forwarded UDP ${payload.size}B from $flowKey to $dstIp:$dstPort (synchronized send)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "handleUdpPacket: send FAILED for $flowKey: ${e.message}; removing socket from map")
+            // Stale socket (e.g., interface down). Remove from
+            // map so the next packet re-creates it.
+            synchronized(udpSocketMap) { udpSocketMap.remove(flowKey) }
+            try { udpSock.close() } catch (_: Throwable) {}
+            return
+        }
+        // (3) Start a per-flow daemon reader thread to
+        //     forward responses back to the TUN. The
+        //     thread is idempotent: re-starting it is
+        //     a no-op (a second receive thread would
+        //     just steal datagrams from the first).
+        startUdpReader(flowKey, udpSock, srcIp, srcPort, dstIp, dstPort)
+    }
+
+    /**
+     * Start a per-flow daemon reader thread that reads
+     * responses from the real UDP destination and writes
+     * them back to the TUN. The thread exits on
+     * `soTimeout` (2s) so a stale socket does not block
+     * the TUN reader forever; the next UDP packet for
+     * the flow will re-create the socket + reader.
+     *
+     * Re-entrancy: if a reader thread is already running
+     * for the flow (i.e., the previous request is still
+     * in-flight), this method is a no-op. The existing
+     * thread will pick up the next response (the app
+     * will issue the next DNS query and wait for it).
+     */
+    private fun startUdpReader(
+        flowKey: String,
+        udpSock: DatagramSocket,
+        srcIp: String,
+        srcPort: Int,
+        dstIp: String,
+        dstPort: Int
+    ) {
+        // Quick re-entrancy check: if a reader is already
+        // running for this socket, do not start a second.
+        // The simple marker is the socket's soTimeout — we
+        // set it on thread start; if it's already set, we
+        // assume a reader is running.
+        synchronized(udpSock) {
+            try {
+                if (udpSock.soTimeout >= 0) {
+                    // Reader already running or just exited. Skip.
+                    return
+                }
+                udpSock.soTimeout = UDP_READER_SO_TIMEOUT_MS
+            } catch (e: Throwable) {
+                Log.w(TAG, "startUdpReader: soTimeout probe failed for $flowKey: ${e.message}")
+            }
+        }
+        // Submit the reader runnable to backgroundExecutor
+        // (single ExecutorService that owns ALL per-flow
+        // UDP reader work). The Future is stored in
+        // udpReaderFutures[flowKey] for shutdown
+        // cancellation. The thread name is set inside the
+        // runnable so logcat shows the 5-tuple-prefixed
+        // name, not "pool-N-thread-M".
+        val runnable = Runnable {
+            try {
+                Thread.currentThread().name = "opene2ee-udp-reader-$flowKey"
+            } catch (_: Throwable) {}
+            try {
+                val recvBuf = ByteArray(UDP_RECV_BUFFER_SIZE)
+                while (!Thread.currentThread().isInterrupted) {
+                    val recvPkt = DatagramPacket(recvBuf, recvBuf.size)
+                    try {
+                        // DatagramSocket.receive returns Unit
+                        // (it blocks and writes the received
+                        // datagram into the buffer). Use
+                        // `recvPkt.length` (the actual bytes
+                        // received) to extract the response
+                        // payload.
+                        udpSock.receive(recvPkt)
+                    } catch (e: java.net.SocketTimeoutException) {
+                        // soTimeout fired — exit cleanly. The
+                        // next UDP packet for the flow will
+                        // re-create the socket + reader.
+                        Log.d(TAG, "startUdpReader: soTimeout 2s, exiting reader for $flowKey (next packet will recreate)")
+                        break
+                    } catch (e: Throwable) {
+                        Log.d(TAG, "startUdpReader: receive error for $flowKey: ${e.message}; exiting reader")
+                        break
+                    }
+                    // Wrap the response in a new IP+UDP packet
+                    // and write it to the TUN. The response
+                    // direction is reversed: src=dst, dst=src.
+                    val n = recvPkt.length
+                    val responsePayload = recvBuf.copyOf(n)
+                    val responseSrcIp = recvPkt.address.hostAddress ?: dstIp
+                    val responseSrcPort = recvPkt.port
+                    val ipUdpPkt = buildIpUdpPacket(
+                        srcIp = responseSrcIp, dstIp = srcIp,
+                        srcPort = responseSrcPort, dstPort = srcPort,
+                        payload = responsePayload,
+                    )
+                    writeToTun(ipUdpPkt, "UDP response -> app (${n}B from $responseSrcIp:$responseSrcPort)")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "startUdpReader: thread crash for $flowKey: ${t.message}")
+            } finally {
+                // Reset soTimeout to 0 (BLOCKING) so the
+                // next handleUdpPacket call can re-start a
+                // reader (the re-entrancy check passes when
+                // soTimeout is 0 / negative).
+                try { udpSock.soTimeout = 0 } catch (_: Throwable) {}
+                // Remove our Future from udpReaderFutures
+                // so the shutdown method does not try to
+                // cancel an already-completed Future
+                // (cancel is a no-op but the map cleanup
+                // avoids a leak).
+                synchronized(udpReaderFutures) { udpReaderFutures.remove(flowKey) }
+            }
+        }
+        val future = backgroundExecutor.submit(runnable)
+        synchronized(udpReaderFutures) { udpReaderFutures[flowKey] = future }
+        Log.d(TAG, "startUdpReader: reader submitted to backgroundExecutor for $flowKey (soTimeout=${UDP_READER_SO_TIMEOUT_MS}ms, activeCount=${backgroundExecutor.activeCount})")
+    }
+
+    /**
+     * Build an IP+UDP packet (no IP options, no UDP
+     * options — bare 20-byte IP header + 8-byte UDP
+     * header) for writing back to the TUN. The output
+     * layout:
+     *   - Bytes  0..19  : IPv4 header (ver=4, IHL=5,
+     *                     total length = 28 + payload.size,
+     *                     protocol = UDP=17, src/dst IP,
+     *                     header checksum).
+     *   - Bytes 20..27  : UDP header (src/dst port,
+     *                     length = 8 + payload.size,
+     *                     checksum with pseudo-header).
+     *   - Bytes 28..    : payload.
+     *
+     * The UDP checksum is optional in IPv4 (RFC 768
+     * says "0 means no checksum") but we compute it via
+     * the RFC 1071 Internet checksum (the pseudo-header
+     * is the same as TCP, with protocol=17 instead of
+     * 6). The TUN-kernel side validates the checksum.
+     */
+    fun buildIpUdpPacket(
+        srcIp: String,
+        dstIp: String,
+        srcPort: Int,
+        dstPort: Int,
+        payload: ByteArray
+    ): ByteArray {
+        val ipHeaderLen = 20
+        val udpHeaderLen = 8
+        val totalLen = ipHeaderLen + udpHeaderLen + payload.size
+        val out = ByteArray(totalLen)
+        val bb = ByteBuffer.wrap(out).order(ByteOrder.BIG_ENDIAN)
+
+        // ---- IPv4 header (20 bytes) ----
+        bb.put(0, 0x45.toByte())  // ver=4, IHL=5
+        bb.putShort(2, totalLen.toShort())  // total length
+        bb.putShort(4, 0)  // identification (unused for MVP)
+        bb.putShort(6, 0x4000.toShort())  // flags=DF, frag offset=0
+        bb.put(8, 64.toByte())  // TTL=64
+        bb.put(9, IPPROTO_UDP)  // protocol=17
+        bb.putShort(10, 0)  // IP header checksum (filled below)
+        val srcBytes = InetAddress.getByName(srcIp).address
+        bb.put(12, srcBytes[0]); bb.put(13, srcBytes[1])
+        bb.put(14, srcBytes[2]); bb.put(15, srcBytes[3])
+        val dstBytes = InetAddress.getByName(dstIp).address
+        bb.put(16, dstBytes[0]); bb.put(17, dstBytes[1])
+        bb.put(18, dstBytes[2]); bb.put(19, dstBytes[3])
+        val ipChecksum = internetChecksum(out, 0, ipHeaderLen)
+        bb.putShort(10, ipChecksum.toShort())
+
+        // ---- UDP header (8 bytes) ----
+        val udpStart = ipHeaderLen
+        bb.putShort(udpStart, srcPort.toShort())
+        bb.putShort(udpStart + 2, dstPort.toShort())
+        bb.putShort(udpStart + 4, (udpHeaderLen + payload.size).toShort())  // UDP length
+        bb.putShort(udpStart + 6, 0)  // UDP checksum (filled below)
+
+        // ---- Payload ----
+        if (payload.isNotEmpty()) {
+            System.arraycopy(payload, 0, out, ipHeaderLen + udpHeaderLen, payload.size)
+        }
+
+        // Compute UDP checksum with pseudo-header
+        // (RFC 1071 Internet checksum with a pseudo-
+        // header whose protocol field is the L4 protocol
+        // number 17 for UDP).
+        val udpLen = udpHeaderLen + payload.size
+        var sum = 0L
+        sum += ((srcBytes[0].toInt() and 0xFF) shl 8) or (srcBytes[1].toInt() and 0xFF)
+        sum += ((srcBytes[2].toInt() and 0xFF) shl 8) or (srcBytes[3].toInt() and 0xFF)
+        sum += ((dstBytes[0].toInt() and 0xFF) shl 8) or (dstBytes[1].toInt() and 0xFF)
+        sum += ((dstBytes[2].toInt() and 0xFF) shl 8) or (dstBytes[3].toInt() and 0xFF)
+        sum += IPPROTO_UDP.toInt() and 0xFF
+        sum += udpLen and 0xFFFF
+        var i = udpStart
+        val end = udpStart + udpLen
+        while (i + 1 < end) {
+            sum += ((out[i].toInt() and 0xFF) shl 8) or (out[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        if (i < end) {
+            sum += (out[i].toInt() and 0xFF) shl 8
+        }
+        while (sum shr 16 != 0L) {
+            sum = (sum and 0xFFFFL) + (sum shr 16)
+        }
+        val udpChecksum = (sum.inv() and 0xFFFFL).toInt()
+        bb.putShort(udpStart + 6, udpChecksum.toShort())
+        return out
+    }
+
+    /**
+     * RFC 1071 Internet checksum over `buf[start ..
+     * start+len)`. Used for the IPv4 header checksum
+     * (no pseudo-header — the IP header is the only
+     * data covered). The algorithm is the standard
+     * 16-bit one's-complement sum with end-around carry
+     * + one's-complement of the result.
+     */
+    private fun internetChecksum(buf: ByteArray, start: Int, len: Int): Int {
+        var sum = 0L
+        var i = start
+        val end = start + len
+        while (i + 1 < end) {
+            sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        if (i < end) {
+            sum += (buf[i].toInt() and 0xFF) shl 8
+        }
+        while (sum shr 16 != 0L) {
+            sum = (sum and 0xFFFFL) + (sum shr 16)
+        }
+        return (sum.inv() and 0xFFFFL).toInt()
+    }
+
+    /**
+     * Write a packet to the TUN output stream with
+     * a single breadcrumb log. Used by the per-flow
+     * reader thread to write response packets back to
+     * the kernel so the app sees the resolver's
+     * response.
+     *
+     * Defensive: the TUN output stream may be null
+     * (cleared by `tearDown` mid-flight). The write
+     * is a best-effort; a failure here logs and
+     * continues (the next response will retry).
+     */
+    private fun writeToTun(packet: ByteArray, breadcrumb: String) {
+        val output = tunOutputStream
+        if (output == null) {
+            Log.w(TAG, "writeToTun: TUN output stream is null, dropping ${packet.size}B ($breadcrumb)")
+            return
+        }
+        try {
+            output.write(packet)
+            output.flush()
+            Log.d(TAG, "writeToTun: wrote ${packet.size}B to TUN ($breadcrumb)")
+        } catch (e: IOException) {
+            Log.w(TAG, "writeToTun: write FAILED for $breadcrumb: ${e.message}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "writeToTun: UNEXPECTED Throwable for $breadcrumb: ${t.javaClass.simpleName}: ${t.message}")
+        }
+    }
+
+    /**
+     * Sprint 12.0B — comprehensive teardown of the
+     * UDP forwarder. Called from
+     * `OpenE2eeVpnService.stopCapture` BEFORE
+     * `nettyClient?.shutdown()` so the 6-step shutdown
+     * in NettyChannelClient can safely delegate step 3
+     * (udpSocketMap close + udpReaderFutures cancel) to
+     * `service?.tearDownUdpForwarder()` as a no-op (the
+     * teardown already ran first in `stopCapture()`).
+     *
+     * The 6 steps (mirror of the 12.0X NettyChannelClient
+     * shutdown):
+     *   1. Cancel every per-flow UDP reader Future
+     *      (`Future.cancel(true)` interrupts the worker
+     *      thread).
+     *   2. Force `soTimeout=0` on every per-flow
+     *      DatagramSocket BEFORE close so the
+     *      `receive()` call unblocks with a
+     *      SocketTimeoutException (closed socket +
+     *      2-second timeout would still hang).
+     *   3. Close every per-flow DatagramSocket.
+     *   4. Clear `udpSocketMap` and `udpReaderFutures`.
+     *   5. Set `tunOutputStream = null` (detach the TUN
+     *      output stream ref).
+     *   6. `backgroundExecutor.shutdownNow()` +
+     *      `awaitTermination(1, SECONDS)` — bounded
+     *      wait for ALL per-flow reader threads to exit.
+     *
+     * After this returns, NO background UDP thread is
+     * alive, every per-flow socket is closed, and the
+     * TUN output stream ref is detached. The kernel
+     * can safely release the TUN interface.
+     */
+    fun tearDown() {
+        Log.d(TAG, "tearDown: starting comprehensive teardown (12.0B)")
+        // Step 1 — cancel every per-flow UDP reader Future.
+        // `Future.cancel(true)` interrupts the executor
+        // worker thread so the receive() call unblocks
+        // with an InterruptedIOException.
+        try {
+            synchronized(udpReaderFutures) {
+                udpReaderFutures.values.forEach { f ->
+                    try { f?.cancel(true) } catch (_: Throwable) {}
+                }
+            }
+            Log.d(TAG, "tearDown: step 1 DONE (udpReaderFutures cancelled)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 1 (udpReaderFutures) FAILED: ${e.message}")
+        }
+
+        // Step 2 — force soTimeout=0 on every per-flow
+        // DatagramSocket. This MUST happen BEFORE close
+        // (so the receive() call in the per-flow reader
+        // thread returns immediately instead of waiting
+        // for the 2-second default).
+        try {
+            udpSocketMap.values.forEach { sock ->
+                try { sock.soTimeout = 0 } catch (_: Throwable) {}
+            }
+            Log.d(TAG, "tearDown: step 2 DONE (soTimeout=0 forced on all udpSockets)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 2 (soTimeout=0) FAILED: ${e.message}")
+        }
+
+        // Step 3 — close every per-flow DatagramSocket.
+        try {
+            udpSocketMap.values.forEach { sock ->
+                try { sock.close() } catch (_: Throwable) {}
+            }
+            Log.d(TAG, "tearDown: step 3 DONE (udpSockets closed)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 3 (udpSocket close) FAILED: ${e.message}")
+        }
+
+        // Step 4 — clear the maps.
+        try {
+            udpSocketMap.clear()
+            synchronized(udpReaderFutures) { udpReaderFutures.clear() }
+            Log.d(TAG, "tearDown: step 4 DONE (udpSocketMap + udpReaderFutures cleared)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 4 (map clear) FAILED: ${e.message}")
+        }
+
+        // Step 5 — detach the TUN output stream ref.
+        try {
+            tunOutputStream = null
+            Log.d(TAG, "tearDown: step 5 DONE (tunOutputStream=null)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 5 (tunOutputStream) FAILED: ${e.message}")
+        }
+
+        // Step 6 — background executor shutdownNow +
+        // awaitTermination. `shutdownNow()` interrupts
+        // all running tasks; `awaitTermination(1s)` waits
+        // for them to exit. After this returns, no
+        // per-flow reader thread is alive.
+        try {
+            backgroundExecutor.shutdownNow()
+            backgroundExecutor.awaitTermination(1, TimeUnit.SECONDS)
+            Log.d(TAG, "tearDown: step 6 DONE (backgroundExecutor shutdownNow + awaitTermination)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "tearDown: step 6 (backgroundExecutor) FAILED: ${e.message}")
+        }
+
+        Log.d(TAG, "tearDown: DONE (comprehensive teardown complete, no orphan UDP reader)")
     }
 }

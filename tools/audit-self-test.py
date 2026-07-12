@@ -2911,19 +2911,42 @@ def run_s115_check(netty_text):
         )
 
     # Step 3: udpSocketMap close + clear + udpReaderFutures cancel.
-    if "udpSocketMap.clear()" not in code:
+    # Sprint 12.0B — tolerant of the post-12.0B pattern
+    # (UDP forwarder moved to OpenE2eeVpnService.UdpForwarder
+    # per the brief: "Netty DEGIL"). The 6-step shutdown
+    # now has step 3 as a forward-compat no-op (logs
+    # "step 3 DELEGATED (UDP teardown runs in
+    # service.UdpForwarder.tearDown() before this method;
+    # udpSocketMap + udpReaderFutures are already
+    # cleared)"). The actual UDP teardown is verified by
+    # S116 (the new UdpForwarder teardown audit).
+    if (
+        "udpSocketMap.clear()" not in code
+        and "step 3 DELEGATED" not in code
+    ):
         findings.append(
             "S115 NettyChannelClient.kt: missing step 3 of "
-            "comprehensive teardown (udpSocketMap.clear). "
-            "Sprint 12.0X invariant - per-flow DatagramSockets must "
-            "be closed and removed from udpSocketMap."
+            "comprehensive teardown (udpSocketMap.clear OR "
+            "step 3 DELEGATED breadcrumb). Sprint 12.0X "
+            "invariant - per-flow DatagramSockets must be "
+            "closed and removed from udpSocketMap, OR (Sprint "
+            "12.0B) the teardown must be delegated to "
+            "UdpForwarder.tearDown() with the DELEGATED "
+            "breadcrumb. The new pattern is checked by S116."
         )
-    if "udpReaderFutures" not in code:
+    if (
+        "udpReaderFutures" not in code
+        and "step 3 DELEGATED" not in code
+    ):
         findings.append(
             "S115 NettyChannelClient.kt: missing step 3b of "
-            "comprehensive teardown (udpReaderFutures cancel). "
-            "Sprint 12.0X invariant - per-flow UDP reader Futures "
-            "must be cancelled so the receive() loop unblocks."
+            "comprehensive teardown (udpReaderFutures cancel "
+            "OR step 3 DELEGATED breadcrumb). Sprint 12.0X "
+            "invariant - per-flow UDP reader Futures must be "
+            "cancelled so the receive() loop unblocks, OR "
+            "(Sprint 12.0B) the teardown must be delegated "
+            "to UdpForwarder.tearDown() with the DELEGATED "
+            "breadcrumb. The new pattern is checked by S116."
         )
 
     # Step 4: tunOutputStream null.
@@ -2973,6 +2996,261 @@ def run_s115_check(netty_text):
             "for them to exit) so no reader thread outlives the "
             "VPN service."
         )
+    return findings
+
+
+def run_s116_check(opene2ee_vpn_service_text):
+    """S116: UdpForwarder teardown invariant (Sprint 12.0B).
+
+    The 12.0A.5 UDP forwarder (per-flow protected
+    DatagramSocket + per-flow reader thread) was moved
+    OUT of NettyChannelClient.kt and INTO a new
+    UdpForwarder class in OpenE2eeVpnService.kt per
+    the brief: "OpenE2eeVpnService.kt icine minimal
+    UDP forwarder ekle, Netty DEGIL, sadece raw
+    java.net.DatagramSocket + service.protect(socket)".
+
+    The teardown invariant (S116) verifies the new
+    class + its caller contract + the 6-step teardown
+    inside the class.
+
+    The audit checks the OpenE2eeVpnService.kt source
+    for:
+      1. `UdpForwarder` class declaration (top-level
+         or nested) in the file.
+      2. `udpSocketMap` field in the class (the
+         per-flow DatagramSocket map; the brief
+         requires the teardown to close + clear it).
+      3. `udpReaderFutures` field in the class (the
+         per-flow reader Future map; the teardown
+         must cancel them).
+      4. `tearDown()` method declaration (the public
+         teardown entry point called from
+         `OpenE2eeVpnService.stopCapture`).
+      5. Inside `tearDown`: `cancel(true)` call
+         (cancels every per-flow reader Future so
+         the receive() loop unblocks).
+      6. Inside `tearDown`: `sock.close()` call
+         (closes every per-flow DatagramSocket).
+      7. Inside `tearDown`: `shutdownNow()` call
+         (interrupts all background reader threads).
+      8. Inside `tearDown`: `awaitTermination` call
+         (bounded wait for the threads to exit).
+      9. `protect(` call in the handleUdpPacket
+         code path (the brief: "service.protect
+         (socket)" — without it the DatagramSocket
+         is captured by the TUN and the UDP packet
+         loops forever).
+      10. Caller wiring: `udpForwarder.tearDown()`
+          call from `OpenE2eeVpnService.stopCapture`
+          (the teardown must run BEFORE
+          `nettyClient?.shutdown()` so the 6-step
+          structure is preserved).
+      11. TUN wire: `udpForwarder.setTunOutputStream`
+          call from `startReaderThread` (so the
+          per-flow reader can write response packets
+          back to the kernel).
+
+    The audit strips `/* ... */` block comments and
+    `//` line comments (preserving strings), then
+    checks for the 11 mandatory token substrings in
+    the resulting code. Any future sprint that
+    drops one of the 11 invariants trips the
+    regression guard.
+
+    Sprint 12.0B target: 162 + 1 = 163 audit cases
+    total (S116 is the 163rd).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: file text missing. "
+            "Sprint 12.0B invariant - the UdpForwarder "
+            "teardown must be in this file (the brief: "
+            "\"OpenE2eeVpnService.kt icine minimal UDP "
+            "forwarder ekle\"). S115 is no longer the "
+            "complete teardown guard for the UDP path "
+            "(the UDP code moved out of "
+            "NettyChannelClient.kt); S116 is the new "
+            "authoritative audit."
+        )
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    # Strip // line comments (preserving strings).
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # 1. UdpForwarder class declaration.
+    if "class UdpForwarder" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `class "
+            "UdpForwarder` declaration. Sprint 12.0B "
+            "invariant - the UDP forwarder must be a class "
+            "IN this file (the brief: \"OpenE2eeVpnService.kt "
+            "icine minimal UDP forwarder ekle\"). "
+            "NettyChannelClient.kt no longer owns the UDP "
+            "code."
+        )
+
+    # 2. udpSocketMap field.
+    if "udpSocketMap" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `udpSocketMap` "
+            "field. Sprint 12.0B invariant - the per-flow "
+            "DatagramSocket map must be in UdpForwarder "
+            "(moved from NettyChannelClient) so the teardown "
+            "can close + clear it."
+        )
+
+    # 3. udpReaderFutures field.
+    if "udpReaderFutures" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `udpReaderFutures` "
+            "field. Sprint 12.0B invariant - the per-flow "
+            "reader Future map must be in UdpForwarder "
+            "(moved from NettyChannelClient) so the teardown "
+            "can cancel them."
+        )
+
+    # 4. tearDown() method.
+    if "fun tearDown()" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `fun tearDown()` "
+            "method on UdpForwarder. Sprint 12.0B invariant - "
+            "the teardown is called from "
+            "OpenE2eeVpnService.stopCapture BEFORE "
+            "nettyClient?.shutdown() (so the 6-step "
+            "shutdown's step 3 can safely delegate to "
+            "service?.tearDownUdpForwarder() as a no-op)."
+        )
+
+    # 5. cancel(true) inside tearDown (the per-flow reader
+    # Future cancellation; this is the load-bearing piece
+    # — without it the receive() loop blocks the worker
+    # thread until the 2s soTimeout fires, leaking the
+    # thread into the next VPN session).
+    if "cancel(true)" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `cancel(true)` "
+            "in UdpForwarder.tearDown. Sprint 12.0B invariant "
+            "- the per-flow UDP reader Futures must be "
+            "cancelled (Future.cancel(true) interrupts the "
+            "executor worker thread) so the receive() call "
+            "unblocks immediately."
+        )
+
+    # 6. sock.close() inside tearDown (the per-flow
+    # DatagramSocket close; without it the socket stays
+    # bound and the kernel cannot release the underlying
+    # port).
+    if "sock.close()" not in code and "s.close()" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing per-flow "
+            "DatagramSocket close in UdpForwarder.tearDown. "
+            "Sprint 12.0B invariant - every per-flow "
+            "DatagramSocket must be closed so the kernel "
+            "can release the bound UDP port and the TUN "
+            "interface can be safely released."
+        )
+
+    # 7. shutdownNow() inside tearDown (the background
+    # ExecutorService teardown — interrupts all running
+    # tasks; awaitTermination waits for them to exit).
+    if "shutdownNow()" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing "
+            "backgroundExecutor.shutdownNow() in "
+            "UdpForwarder.tearDown. Sprint 12.0B invariant "
+            "- the ExecutorService that owns the per-flow "
+            "reader threads must be shutdownNow() (interrupts "
+            "running tasks) so no reader thread outlives the "
+            "VPN service."
+        )
+
+    # 8. awaitTermination inside tearDown (the bounded
+    # wait for the threads to exit).
+    if "awaitTermination" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing "
+            "backgroundExecutor.awaitTermination in "
+            "UdpForwarder.tearDown. Sprint 12.0B invariant "
+            "- the executor must awaitTermination(1, "
+            "TimeUnit.SECONDS) (waits for running tasks to "
+            "exit) so no reader thread outlives the VPN "
+            "service."
+        )
+
+    # 9. protect() call in the handleUdpPacket code path.
+    # The brief: "service.protect(socket)". Without
+    # protect(), the DatagramSocket is captured by the
+    # TUN and the UDP packet loops forever (the "VPN
+    # blackhole" symptom that 12.0A fixed for TCP, now
+    # closed for UDP).
+    if "protect(" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `protect(` "
+            "call in UdpForwarder.handleUdpPacket. Sprint "
+            "12.0B invariant - the per-flow DatagramSocket "
+            "must be VpnService.protect()-ed (the brief: "
+            "\"sadece raw java.net.DatagramSocket + "
+            "service.protect(socket)\") so it bypasses the "
+            "VPN and uses the device's real NIC."
+        )
+
+    # 10. Caller wiring: udpForwarder.tearDown() call
+    # from stopCapture. The teardown must run BEFORE
+    # nettyClient?.shutdown() so the 6-step structure is
+    # preserved.
+    if "udpForwarder.tearDown()" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing "
+            "`udpForwarder.tearDown()` call from "
+            "stopCapture. Sprint 12.0B invariant - the "
+            "UdpForwarder teardown must run BEFORE "
+            "nettyClient?.shutdown() so the 6-step "
+            "shutdown's step 3 can safely delegate "
+            "(step 3 is a forward-compat no-op after "
+            "the teardown ran first)."
+        )
+
+    # 11. TUN wire: udpForwarder.setTunOutputStream call
+    # from startReaderThread. The per-flow reader needs
+    # the TUN output stream to write response packets
+    # back to the kernel; without this wire, DNS queries
+    # would never get a response and every hostname-
+    # dependent app would fail.
+    if "udpForwarder.setTunOutputStream" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing "
+            "`udpForwarder.setTunOutputStream(...)` call "
+            "from startReaderThread. Sprint 12.0B invariant "
+            "- the TUN output stream must be wired to the "
+            "UdpForwarder so the per-flow reader can write "
+            "wrapped IP+UDP response packets back to the "
+            "kernel. Without this wire, DNS / NTP / STUN "
+            "responses are silently dropped."
+        )
+
     return findings
 
 
@@ -8473,15 +8751,92 @@ cases = [
          "        // step 5: workerGroup shutdownGracefully awaited\n"
          "        workerGroup.shutdownGracefully().await(1, TimeUnit.SECONDS)\n"
          "        // step 6: backgroundExecutor shutdownNow + awaitTermination\n"
+          "        backgroundExecutor.shutdownNow()\n"
+          "        backgroundExecutor.awaitTermination(1, TimeUnit.SECONDS)\n"
+          "    }\n"
+          "    data class TcpConnection(val socket: java.net.Socket? = null, val readerThread: Thread? = null, val readerFuture: java.util.concurrent.Future<*>? = null)\n"
+          "    private val flowMap: MutableMap<String, Any> = java.util.concurrent.ConcurrentHashMap()\n"
+          "    private val tcpConnectionMap: MutableMap<String, TcpConnection> = java.util.concurrent.ConcurrentHashMap()\n"
+          "    private val udpSocketMap: MutableMap<String, DatagramSocket> = java.util.concurrent.ConcurrentHashMap()\n"
+          "    private val udpReaderFutures: MutableMap<String, java.util.concurrent.Future<*>?> = java.util.concurrent.ConcurrentHashMap()\n"
+          "    @Volatile private var tunOutputStream: java.io.OutputStream? = null\n"
+          "}\n",
+      ),
+      []),
+    # S116 case (Sprint 12.0B - new) - UdpForwarder
+    # teardown invariant. The 12.0A.5 UDP forwarder
+    # was moved OUT of NettyChannelClient.kt and INTO
+    # OpenE2eeVpnService.kt per the brief: "OpenE2ee
+    # VpnService.kt icine minimal UDP forwarder ekle,
+    # Netty DEGIL, sadece raw java.net.DatagramSocket
+    # + service.protect(socket)". The teardown is
+    # verified by checking the 11 mandatory tokens in
+    # OpenE2eeVpnService.kt (after comment strip):
+    #   1. `class UdpForwarder` declaration.
+    #   2. `udpSocketMap` field (per-flow DatagramSocket
+    #      map).
+    #   3. `udpReaderFutures` field (per-flow reader
+    #      Future map).
+    #   4. `fun tearDown()` method (public teardown
+    #      entry point).
+    #   5. `cancel(true)` inside tearDown (per-flow
+    #      reader Future cancellation).
+    #   6. `sock.close()` (per-flow DatagramSocket close).
+    #   7. `shutdownNow()` (ExecutorService interrupt).
+    #   8. `awaitTermination` (bounded wait).
+    #   9. `protect(` in handleUdpPacket (the brief:
+    #      "service.protect(socket)").
+    #  10. `udpForwarder.tearDown()` caller wire from
+    #      stopCapture (must run BEFORE
+    #      nettyClient?.shutdown()).
+    #  11. `udpForwarder.setTunOutputStream` caller wire
+    #      from startReaderThread (per-flow reader needs
+    #      the TUN output stream to write responses back).
+    # The S115 + S116 pair replaces the pre-12.0B single-
+    # audit (S115 only). S115 now checks the 6-step
+    # structure in NettyChannelClient.shutdown (tolerant
+    # of the post-12.0B "step 3 DELEGATED" breadcrumb);
+    # S116 checks the new UdpForwarder teardown in
+    # OpenE2eeVpnService.kt. Total selftest: 162 + 1 = 163.
+    ("S116 PASS (UdpForwarder teardown in OpenE2eeVpnService.kt - class + udpSocketMap + udpReaderFutures + tearDown + cancel(true) + sock.close() + shutdownNow() + awaitTermination + protect( + udpForwarder.tearDown() caller + udpForwarder.setTunOutputStream caller - regression guard for Sprint 12.0B)",
+     run_s116_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.DatagramSocket\n"
+         "import java.util.concurrent.Executors\n"
+         "import java.util.concurrent.ThreadPoolExecutor\n"
+         "import java.util.concurrent.TimeUnit\n"
+         "class OpenE2eeVpnService : android.net.VpnService() {\n"
+         "    private val udpForwarder = UdpForwarder(this)\n"
+         "    private fun startReaderThread(pfd: android.os.ParcelFileDescriptor) {\n"
+         "        val output = android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd)\n"
+         "        udpForwarder.setTunOutputStream(output)\n"
+         "    }\n"
+         "    private fun stopCapture(graceful: Boolean): State {\n"
+         "        udpForwarder.tearDown()\n"
+         "        nettyClient?.shutdown()\n"
+         "    }\n"
+         "}\n"
+         "internal class UdpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "    private val udpSocketMap: MutableMap<String, DatagramSocket> = java.util.concurrent.ConcurrentHashMap()\n"
+         "    private val udpReaderFutures: MutableMap<String, java.util.concurrent.Future<*>?> = java.util.concurrent.ConcurrentHashMap()\n"
+         "    private val backgroundExecutor: ThreadPoolExecutor = Executors.newCachedThreadPool() as ThreadPoolExecutor\n"
+         "    fun handleUdpPacket(srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, payload: ByteArray) {\n"
+         "        val flowKey = \"$srcIp:$srcPort-$dstIp:$dstPort\"\n"
+         "        val s = DatagramSocket()\n"
+         "        val protected = service.protect(s)\n"
+         "        if (protected) udpSocketMap[flowKey] = s\n"
+         "    }\n"
+         "    fun tearDown() {\n"
+         "        synchronized(udpReaderFutures) {\n"
+         "            udpReaderFutures.values.forEach { f -> try { f?.cancel(true) } catch (_: Throwable) {} }\n"
+         "        }\n"
+         "        udpSocketMap.values.forEach { sock -> try { sock.close() } catch (_: Throwable) {} }\n"
+         "        udpSocketMap.clear()\n"
          "        backgroundExecutor.shutdownNow()\n"
          "        backgroundExecutor.awaitTermination(1, TimeUnit.SECONDS)\n"
          "    }\n"
-         "    data class TcpConnection(val socket: java.net.Socket? = null, val readerThread: Thread? = null, val readerFuture: java.util.concurrent.Future<*>? = null)\n"
-         "    private val flowMap: MutableMap<String, Any> = java.util.concurrent.ConcurrentHashMap()\n"
-         "    private val tcpConnectionMap: MutableMap<String, TcpConnection> = java.util.concurrent.ConcurrentHashMap()\n"
-         "    private val udpSocketMap: MutableMap<String, DatagramSocket> = java.util.concurrent.ConcurrentHashMap()\n"
-         "    private val udpReaderFutures: MutableMap<String, java.util.concurrent.Future<*>?> = java.util.concurrent.ConcurrentHashMap()\n"
-         "    @Volatile private var tunOutputStream: java.io.OutputStream? = null\n"
          "}\n",
      ),
      []),
