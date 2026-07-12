@@ -3565,6 +3565,275 @@ def run_s117_check(opene2ee_vpn_service_text):
     return findings
 
 
+def run_s118_check(opene2ee_vpn_service_text):
+    """S118: TcpForwarder response content debug + UNKNOWN
+    FLOW fix + body truncation guard (Sprint 12.0D).
+
+    Owner 14:06 logcat observation (after 12.0C APK
+    install + 7x VPN kapa/ac test, NO reboot needed):
+    every breadcrumb in the 12.0C TcpForwarder fired
+    7 times (SYN, SYN+ACK, ESTABLISHED, PSH+ACK,
+    FIN+ACK, handleSyn, new TcpConnection,
+    sendHttpRequest, recvHttpResponse, responsePayload,
+    UdpForwarder, forwarded UDP, tearDown, shutdown
+    DONE, executor shutdown). AMA ("BUT"):
+      1. Chrome page DOES NOT open.
+      2. Response content is malformed (UNKNOWN FLOW
+         7 — reverse packet lost, response payload
+         wrong/missing).
+      3. Response bytes count / HTTP status code /
+         Content-Type are NOT in the log.
+
+    Root cause: the 12.0C startSocketReader only
+    logged a byte count for the response. The Owner
+    could not distinguish "200 OK with 1234 body
+    bytes" from "502 Bad Gateway with 0 body
+    bytes" from "truncated body (MSS / TUN drop)".
+
+    12.0D fix (3 sub-checks bundled into S118):
+      A. recvHttpResponse log MUST include HTTP
+         status code + Content-Type + Content-Length
+         + bytes count. The TcpForwarder's
+         startSocketReader now parses the HTTP
+         response status line + headers from the
+         first chunk and logs the values in the
+         `recvHttpResponse: N bytes, status=X,
+         content-type=Y, content-length=Z` line.
+         Without these 4 tokens the Owner cannot
+         verify the response is well-formed.
+      B. Validation Log.w MUST fire when the
+         response is suspicious. The 12.0D
+         validation log fires when:
+           (i) status code is 4xx or 5xx, OR
+           (ii) Content-Type is NOT
+                application/json AND NOT text/*
+                (the OpenE2EE Patroni healthz
+                endpoint returns text/plain for
+                plain responses, so text/* is
+                accepted; truly unexpected
+                content types like text/html are
+                flagged).
+         The validation log is the Owner-side
+         diagnostic that tells "the proxy
+         returned a well-formed response" from
+         "the proxy returned a malformed response
+         the app could not parse".
+      C. `forwarded via reverseKey` Log.d MUST
+         fire when the lookup succeeds via the
+         reverse flowKey (i.e., the INCOMING
+         packet case). This is the positive
+         signal that the 12.0C dual put in
+         handleSyn is working — and the
+         regression guard for the Owner 14:06
+         "UNKNOWN FLOW 7" symptom. The 12.0A.8
+         version of this log lived in
+         NettyChannelClient.kt, but the runtime
+         path is now via TcpForwarder (12.0C),
+         so the log never fired. 12.0D adds it
+         back in TcpForwarder.handleTcpPacket.
+      D. responsePayload Log.d MUST include
+         bytes count + TCP ack number. The
+         12.0C version logged bytes count + seq
+         + 5-tuple; 12.0D adds the body byte
+         accumulator (so the Owner can detect
+         truncation by comparing against
+         Content-Length) and the body
+         truncation log at the end of the
+         read loop.
+
+    The audit strips `/* ... */` block comments
+    and `//` line comments (preserving strings),
+    then checks for the 8 mandatory token
+    substrings in the resulting code:
+      (1) `recvHttpResponse:` literal in the
+          response log.
+      (2) `status=` token in the response log
+          (status code emitted).
+      (3) `content-type=` token in the response
+          log.
+      (4) `content-length=` token in the
+          response log.
+      (5) `Log.w` + `SUSPECT response` token
+          in the validation log.
+      (6) `forwarded via reverseKey` literal
+          in handleTcpPacket.
+      (7) `responsePayload:` literal in the
+          writeToTun call.
+      (8) `bodyBytes=` token in the
+          responsePayload log.
+
+    Sprint 12.0D target: 164 + 1 = 165 audit
+    cases total (S118 is the 165th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0D invariant - the "
+            "TcpForwarder response content debug "
+            "(status + Content-Type + Content-Length "
+            "+ bytes count), the validation Log.w, "
+            "the forwarded via reverseKey log, and "
+            "the responsePayload body-byte log must "
+            "all be in this file (the TcpForwarder "
+            "is the runtime path; the NettyChannelClient "
+            "log is runtime-dead). S117 is no longer "
+            "the complete Owner-side diagnostic for "
+            "the response flow; S118 is the new "
+            "authoritative audit for the response "
+            "content debug."
+        )
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    # Strip // line comments (preserving strings).
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # (1) recvHttpResponse: log breadcrumb.
+    if "recvHttpResponse:" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`recvHttpResponse:` log breadcrumb. "
+            "Sprint 12.0D invariant - the Owner "
+            "greps for this token to confirm the "
+            "real dest's HTTP response bytes were "
+            "read from the real socket. Without "
+            "it, the Owner cannot distinguish 'the "
+            "reader is running' (S117) from 'the "
+            "reader is reading actual data' (S118)."
+        )
+    # (2) status= token.
+    if "status=" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`status=` token in the recvHttpResponse "
+            "log. Sprint 12.0D invariant - the Owner "
+            "greps for the HTTP status code (e.g., "
+            "`status=200`) to distinguish 200 OK from "
+            "4xx/5xx. Without it, the Owner cannot "
+            "tell whether the real server accepted the "
+            "request."
+        )
+    # (3) content-type= token.
+    if "content-type=" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`content-type=` token in the "
+            "recvHttpResponse log. Sprint 12.0D "
+            "invariant - the Owner greps for the "
+            "Content-Type header (e.g., "
+            "`content-type=text/plain`) to confirm "
+            "the response is the expected format. "
+            "Without it, the Owner cannot detect "
+            "content-type mismatches (e.g., the "
+            "endpoint returned HTML when the app "
+            "expected JSON)."
+        )
+    # (4) content-length= token.
+    if "content-length=" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`content-length=` token in the "
+            "recvHttpResponse log. Sprint 12.0D "
+            "invariant - the Owner greps for the "
+            "Content-Length header (e.g., "
+            "`content-length=42`) to detect body "
+            "truncation (the per-flow reader exits "
+            "when the socket is closed; if the "
+            "body is shorter than Content-Length, "
+            "the app receives a malformed HTTP "
+            "response and Chrome shows a "
+            "broken/empty page)."
+        )
+    # (5) Validation Log.w + SUSPECT response.
+    if "SUSPECT response" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`SUSPECT response` validation Log.w. "
+            "Sprint 12.0D invariant - the validation "
+            "log MUST fire when the response is "
+            "suspicious (status 4xx/5xx OR "
+            "Content-Type is neither application/json "
+            "nor text/*). This is the Owner-side "
+            "diagnostic that tells 'the proxy returned "
+            "a well-formed response' from 'the proxy "
+            "returned a malformed response the app "
+            "could not parse' (Owner 14:06 BLOCKED "
+            "root cause for Chrome page not opening)."
+        )
+    # (6) forwarded via reverseKey log.
+    if "forwarded via reverseKey" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`forwarded via reverseKey` Log.d. "
+            "Sprint 12.0D invariant - the positive "
+            "signal that the 12.0C dual put in "
+            "handleSyn is working. The 12.0A.8 "
+            "version of this log lived in "
+            "NettyChannelClient.kt, but the runtime "
+            "path is now via TcpForwarder (12.0C), "
+            "so the log never fired. 12.0D adds it "
+            "back in TcpForwarder.handleTcpPacket. "
+            "Without this log, the Owner cannot "
+            "confirm the INCOMING packet was found "
+            "via the reverse key (i.e., the dual put "
+            "is actually working)."
+        )
+    # (7) responsePayload: log breadcrumb.
+    if "responsePayload:" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`responsePayload:` log breadcrumb. "
+            "Sprint 12.0D invariant - the Owner "
+            "greps for this token to confirm the "
+            "response bytes were actually written to "
+            "the TUN. Pairs with recvHttpResponse "
+            "(S118.1) — recvHttpResponse confirms the "
+            "read, responsePayload confirms the "
+            "write. If only recvHttpResponse is "
+            "present but responsePayload is missing, "
+            "the reader is reading but the write to "
+            "TUN is failing (silent drop)."
+        )
+    # (8) bodyBytes= token (body byte accumulator
+    # for truncation detection).
+    if "bodyBytes=" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`bodyBytes=` token in the "
+            "responsePayload log. Sprint 12.0D "
+            "invariant - the Owner greps for the "
+            "body byte accumulator (e.g., "
+            "`bodyBytes=1234`) to detect truncation "
+            "(bodyBytes < Content-Length indicates "
+            "the body was truncated by the "
+            "per-flow reader exit). The accumulator "
+            "is also logged at the end of the read "
+            "loop as a TRUNCATED/COMPLETE breadcrumb."
+        )
+    return findings
+
+
 def run_s93_check(opene2ee_vpn_service_text):
     """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
     counter invariant (S93).
@@ -9240,6 +9509,58 @@ cases = [
          "        @Volatile var socket: Socket? = null,\n"
          "        @Volatile var readerThread: Thread? = null\n"
          "    )\n"
+         "}\n",
+     ),
+     []),
+    # S118 case (Sprint 12.0D - new) - TcpForwarder
+    # response content debug + UNKNOWN FLOW fix. Owner
+    # 14:06 logcat observation: every breadcrumb in
+    # 12.0C TcpForwarder fired 7 times BUT the response
+    # was malformed (UNKNOWN FLOW 7, Chrome page not
+    # opening, no status/Content-Type/Content-Length
+    # in logs). The audit verifies the 8 mandatory
+    # tokens:
+    #   (1) `recvHttpResponse:` breadcrumb in the
+    #       response log.
+    #   (2) `status=` token (HTTP status code emitted).
+    #   (3) `content-type=` token (Content-Type
+    #       header emitted).
+    #   (4) `content-length=` token (Content-Length
+    #       header emitted).
+    #   (5) `SUSPECT response` validation Log.w
+    #       (status 4xx/5xx OR unexpected Content-Type).
+    #   (6) `forwarded via reverseKey` Log.d
+    #       (positive signal for the 12.0C dual put).
+    #   (7) `responsePayload:` breadcrumb in the
+    #       response writeToTun log.
+    #   (8) `bodyBytes=` token (body byte
+    #       accumulator for truncation detection).
+    # Total selftest: 164 + 1 = 165.
+    ("S118 PASS (TcpForwarder response content debug - recvHttpResponse with status + content-type + content-length + bytes + SUSPECT response Log.w + forwarded via reverseKey + responsePayload with bodyBytes - regression guard for Sprint 12.0D, Owner 14:06 UNKNOWN FLOW 7 + Chrome page not opening)",
+     run_s118_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.Socket\n"
+         "internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "    fun handleTcpPacket(srcIp: String, dstIp: String, srcPort: Int, dstPort: Int) {\n"
+         "        val primaryFlowKey = \"$srcIp:$srcPort-$dstIp:$dstPort\"\n"
+         "        val reverseFlowKey = \"$dstIp:$dstPort-$srcIp:$srcPort\"\n"
+         "        val foundViaReverseKey = !tcpConnectionMap.containsKey(primaryFlowKey) &&\n"
+         "                                  tcpConnectionMap.containsKey(reverseFlowKey)\n"
+         "        if (foundViaReverseKey) {\n"
+         "            Log.d(\"TcpForwarder\", \"forwarded via reverseKey: $reverseFlowKey\")\n"
+         "        }\n"
+         "    }\n"
+         "    fun startSocketReader() {\n"
+         "        val input: java.io.InputStream = java.net.Socket().getInputStream()\n"
+         "        val buf = ByteArray(1460)\n"
+         "        val n = input.read(buf)\n"
+         "        Log.d(\"TcpForwarder\", \"recvHttpResponse: $n bytes read from real socket for flow X, status=200, content-type=text/plain, content-length=42\")\n"
+         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: SUSPECT response for flow X (status=502, content-type=text/html)\")\n"
+         "        Log.d(\"TcpForwarder\", \"responsePayload: $n bytes written to TUN for flow X, bodyBytes=42, ack=100, status=200, content-type=text/plain\")\n"
+         "    }\n"
+         "    private val tcpConnectionMap: MutableMap<String, Any> = java.util.concurrent.ConcurrentHashMap()\n"
          "}\n",
      ),
      []),

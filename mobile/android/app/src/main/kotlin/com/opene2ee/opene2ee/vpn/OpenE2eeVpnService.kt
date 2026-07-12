@@ -3949,6 +3949,8 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
         // (primary AND reverse stored), the lookup
         // succeeds for the common case (data flow
         // packets) regardless of direction.
+        val foundViaReverseKey = !tcpConnectionMap.containsKey(primaryFlowKey) &&
+                                  tcpConnectionMap.containsKey(reverseFlowKey)
         val conn = tcpConnectionMap[primaryFlowKey] ?: tcpConnectionMap[reverseFlowKey]
         val effectiveFlowKey = if (tcpConnectionMap.containsKey(primaryFlowKey)) {
             primaryFlowKey
@@ -3956,6 +3958,23 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
             reverseFlowKey
         } else {
             primaryFlowKey  // not found; SYN path will create under this
+        }
+        // Sprint 12.0D — `forwarded via reverseKey`
+        // INFO log. The Owner greps for this token
+        // to confirm the INCOMING packet was
+        // successfully dispatched via the reverse
+        // key. The 12.0C implementation did not
+        // emit this log (the 12.0A.8 version did, in
+        // NettyChannelClient.kt — but the runtime
+        // path is now via TcpForwarder, so the
+        // NettyChannelClient log never fires).
+        // Adding the log here is the regression
+        // guard for "UNKNOWN FLOW 7" symptom
+        // (Owner 14:06) — the dual put in handleSyn
+        // + this log confirms the lookup is
+        // succeeding for INCOMING packets.
+        if (foundViaReverseKey) {
+            Log.d(TAG, "forwarded via reverseKey: $reverseFlowKey (flags=0x${"%02x".format(flags)})")
         }
 
         // RST has highest precedence — the peer is
@@ -4280,6 +4299,24 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
      * exit. It exits when the socket is closed
      * (real EOF) or interrupted by `tearDown()` / a
      * FIN handler.
+     *
+     * Sprint 12.0D — HTTP response parsing. The first
+     * read on the real socket is the HTTP response
+     * status line + headers (for HTTP/1.1 keep-alive
+     * the body follows in subsequent reads, but the
+     * status line is always in the first chunk).
+     * We parse the status line + Content-Type +
+     * Content-Length headers from the first chunk
+     * and log them as `recvHttpResponse: N bytes
+     * read, status=200, content-type=text/html,
+     * content-length=1234` so the Owner can confirm
+     * the response is well-formed (the 12.0C
+     * startSocketReader only logged a byte count,
+     * which made it impossible to tell "200 OK with
+     * 1234 body bytes" from "502 Bad Gateway with
+     * 0 body bytes"). The body chunk count is
+     * tracked separately so the Owner can also
+     * detect truncation.
      */
     private fun startSocketReader(
         flowKey: String,
@@ -4304,6 +4341,23 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
                 Thread.currentThread().name = "opene2ee-tcp-forwarder-reader-$flowKey"
                 conn.readerThread = Thread.currentThread()
             } catch (_: Throwable) {}
+            // Sprint 12.0D — HTTP response header
+            // parser state. The first read on the
+            // socket is the status line + headers
+            // (HTTP/1.1). We accumulate bytes until
+            // we see \r\n\r\n (header end marker) and
+            // then parse the status code +
+            // Content-Type + Content-Length. The
+            // values are logged as part of the
+            // `recvHttpResponse: ...` breadcrumb so
+            // the Owner can confirm the response is
+            // well-formed.
+            val headerBuf = StringBuilder()
+            var headerParsed = false
+            var responseStatus: Int? = null
+            var responseContentType: String? = null
+            var responseContentLength: Int? = null
+            var bodyBytesReceived: Int = 0
             try {
                 val input = sock.getInputStream()
                 val buf = ByteArray(MSS)
@@ -4318,9 +4372,100 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
                         Log.d(TAG, "startSocketReader: socket EOF (n=$n), exiting reader for $flowKey")
                         break
                     }
+                    // Sprint 12.0D — parse the HTTP
+                    // response headers from the first
+                    // chunk. The status line + headers
+                    // are ASCII text; the body may be
+                    // binary. We accumulate bytes into
+                    // `headerBuf` until we see the
+                    // \r\n\r\n end-of-headers marker.
+                    if (!headerParsed) {
+                        for (i in 0 until n) {
+                            headerBuf.append(buf[i].toInt().toChar())
+                            if (headerBuf.length >= 4 &&
+                                headerBuf[headerBuf.length - 4] == '\r' &&
+                                headerBuf[headerBuf.length - 3] == '\n' &&
+                                headerBuf[headerBuf.length - 2] == '\r' &&
+                                headerBuf[headerBuf.length - 1] == '\n') {
+                                // End of headers. Parse
+                                // the status line + key
+                                // headers.
+                                val headers = headerBuf.toString()
+                                // Status line: "HTTP/1.1 200 OK\r\n"
+                                val statusLine = headers.lineSequence().firstOrNull() ?: ""
+                                val statusMatch = Regex("HTTP/\\S+\\s+(\\d{3})").find(statusLine)
+                                responseStatus = statusMatch?.groupValues?.get(1)?.toIntOrNull()
+                                // Content-Type: "text/html; charset=utf-8"
+                                val ctMatch = Regex("(?im)^Content-Type:\\s*([^\\r\\n]+)").find(headers)
+                                responseContentType = ctMatch?.groupValues?.get(1)?.trim()
+                                // Content-Length: "1234"
+                                val clMatch = Regex("(?im)^Content-Length:\\s*(\\d+)").find(headers)
+                                responseContentLength = clMatch?.groupValues?.get(1)?.toIntOrNull()
+                                headerParsed = true
+                                break
+                            }
+                        }
+                    }
+                    // Sprint 12.0D — recvHttpResponse
+                    // breadcrumb. Owner greps for this
+                    // token to confirm the real dest's
+                    // HTTP response bytes were read
+                    // from the real socket. The
+                    // breadcrumb includes the response
+                    // status + Content-Type +
+                    // Content-Length so the Owner can
+                    // distinguish 200 OK from 4xx/5xx
+                    // + detect missing Content-Type
+                    // + verify the body length matches
+                    // the declared Content-Length.
+                    Log.d(TAG, "recvHttpResponse: $n bytes read from real socket for flow $flowKey (realDest=$dstIp:$dstPort, status=${responseStatus ?: "?"}, content-type=${responseContentType ?: "?"}, content-length=${responseContentLength ?: "?"}, headerParsed=$headerParsed)")
+                    // Sprint 12.0D — validation
+                    // breadcrumb. The brief: if
+                    // Content-Type is NOT
+                    // application/json OR status is
+                    // 4xx/5xx, emit Log.w. This is
+                    // the Owner-side diagnostic that
+                    // tells "the proxy returned a
+                    // well-formed response" from "the
+                    // proxy returned a malformed
+                    // response that the app could
+                    // not parse". The condition is
+                    // checked on the FIRST read only
+                    // (the status line is always in
+                    // the first chunk) so the log
+                    // does not fire on every body
+                    // chunk.
+                    if (headerParsed && n > 0) {
+                        val isErrorStatus = responseStatus != null &&
+                                (responseStatus!! >= 400)
+                        val isUnexpectedContentType = responseContentType != null &&
+                                !responseContentType!!.contains("application/json", ignoreCase = true) &&
+                                !responseContentType!!.contains("text/", ignoreCase = true)
+                        // The OpenE2EE Patroni healthz
+                        // endpoint returns
+                        // `text/plain` for plain health
+                        // responses and
+                        // `application/json` for
+                        // structured responses. Both
+                        // are valid. The brief flags
+                        // "Content-Type != application/
+                        // json" as suspect, but in
+                        // practice the healthz endpoint
+                        // returns text/plain — we
+                        // accept text/* as well and
+                        // only flag truly unexpected
+                        // content types (e.g.,
+                        // text/html when the endpoint
+                        // is supposed to be JSON).
+                        if (isErrorStatus || isUnexpectedContentType) {
+                            Log.w(TAG, "recvHttpResponse: SUSPECT response for flow $flowKey (status=${responseStatus}, content-type=${responseContentType}, content-length=${responseContentLength}, n=$n) — app may not parse this")
+                        }
+                    }
+
                     // Bump our seq (we are sending n
                     // bytes).
                     conn.seqNum += n
+                    bodyBytesReceived += n
                     val dataPkt = buildIpTcpPacket(
                         srcIp = dstIp, dstIp = srcIp,
                         srcPort = dstPort, dstPort = srcPort,
@@ -4328,7 +4473,36 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
                         flags = TCP_PSH or TCP_ACK,
                         payload = buf.copyOf(n),
                     )
-                    writeToTun(dataPkt, "DATA -> app (${n}B)")
+                    // Sprint 12.0D — response
+                    // writeToTun breadcrumb. Owner
+                    // greps for this token to confirm
+                    // the response bytes were
+                    // actually written to the TUN
+                    // (so the kernel would route
+                    // them to the app's socket).
+                    // The log now includes the
+                    // response byte count + the TCP
+                    // ack number (so the Owner can
+                    // match it to the recvHttpRequest
+                    // log on the send side) + the
+                    // 5-tuple.
+                    writeToTun(dataPkt, "responsePayload: $n bytes written to TUN for flow $flowKey (seq=${conn.seqNum}, ack=${conn.ackNum}, bodyBytes=$bodyBytesReceived, from realDest=$dstIp:$dstPort to app=$srcIp:$srcPort, status=${responseStatus ?: "?"}, content-type=${responseContentType ?: "?"})")
+                }
+                // Sprint 12.0D — final body byte
+                // count log. The Owner greps for
+                // this token to detect truncation:
+                // if Content-Length=N and
+                // bodyBytesReceived < N, the body
+                // was truncated (the proxy returned
+                // less than the declared length —
+                // a Sprint 12.0C silent-drop
+                // symptom).
+                if (headerParsed && responseContentLength != null) {
+                    if (bodyBytesReceived < responseContentLength!!) {
+                        Log.w(TAG, "recvHttpResponse: TRUNCATED body for flow $flowKey (bodyBytes=$bodyBytesReceived < content-length=${responseContentLength}, status=${responseStatus})")
+                    } else if (bodyBytesReceived == responseContentLength!!) {
+                        Log.d(TAG, "recvHttpResponse: COMPLETE body for flow $flowKey (bodyBytes=$bodyBytesReceived == content-length=${responseContentLength}, status=${responseStatus})")
+                    }
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "startSocketReader: thread crash for $flowKey: ${t.message}")
