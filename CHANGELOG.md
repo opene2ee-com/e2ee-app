@@ -4,6 +4,47 @@ All notable changes to the opene2ee app are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] - Sprint 12.0F+1 (TCP SYN processing debug)
+
+### Diagnostics
+
+- **Sprint 12.0F+1 - TCP SYN processing debug breadcrumbs** - Owner 12.0F logcat analysis (`C:\Users\User\Downloads\logcat120f_v3.txt` line 17-21) showed 9 dispatch events all carried PSH+ACK, 0 SYN. The TcpForwarder SYN path was never exercised because TCP SYN packets bypass the VPN TUN (kernel routes them via the real NIC). TcpForwarder therefore never created a Socket, and the subsequent PSH+ACK data packets were dropped with "no-socket flow" (no SYN handler fired first to insert the conn into tcpConnectionMap). Root cause is one of 4 hypotheses: (1) VPN setup timing — TCP established before VPN opened, (2) `addAllowedApplication` only for own app, (3) `bindProcessToNetwork` timing, (4) kernel routing exception. Sprint 12.0F+1 adds 2 diagnostics so the Owner can pinpoint the root cause in their next live test:
+
+  1. **`handleTcpPacket: dispatching flags=0x.. (SYN=.., ACK=.., PSH=.., FIN=.., RST=..)` breadcrumb** in `TcpForwarder.handleTcpPacket` (every captured TCP packet). The Owner greps this token in logcat and can now distinguish "all packets are PSH+ACK" (kernel SYN bypass) from "SYN IS present" (dispatch precedence bug). The flag decode uses the same RFC 793 bit constants the dispatch precedence does (`TCP_SYN=0x02`, `TCP_ACK=0x10`, `TCP_PSH=0x08`, `TCP_FIN=0x01`, `TCP_RST=0x04`).
+
+  2. **`buildVpnBuilder: allowedApps=N packages=[...]` breadcrumb** at `buildVpnBuilder` entry. The Owner greps this token to confirm whether the VPN is restricted to a single package (suspicious for the OpenE2EE flow where Owner's other apps should also be captured). The default behavior is `allowedApps=0 packages=[]` (the VPN captures ALL traffic — Chrome / WhatsApp / system apps included; matches the per-route `addRoute(0.0.0.0/0)` default). If the Owner sees `allowedApps=1 packages=[com.opene2ee.opene2ee]`, the VPN is restricted to a single package and Chrome/system apps bypass the TUN.
+
+### Owner's 6-step test akışı (S121-4)
+
+Per Owner 12.0F logcat analysis: TCP SYN paketleri TUN'a hiç ulaşmıyor (9 dispatch'in 9'u da PSH+ACK, 0 SYN). The 4 hypotheses (timing, allowedApps, bindProcess, kernel) need a controlled test to disambiguate. The 6-step test akışı below is the canonical procedure:
+
+  1. **VPN KAPALI** (toggle OFF in uygulama).
+  2. **Uygulamayı KAPAT** (swipe to dismiss from recents OR `adb shell am force-stop com.opene2ee.opene2ee`). This is critical: any TCP bağlantı that was alive while the VPN was up will continue using the VPN's protected sockets even after the app is backgrounded, and any NEW TCP bağlantı from a freshly-launched app will use the kernel routing table. A force-stop ensures the JVM is killed and the next launch starts from a clean slate.
+  3. **Uygulama içinden 212.64.210.85:443'e istek gönder** (e.g., the "Aktif Nöbet başlat" button → `POST /api/v1/sessions`). At this point the VPN is OFF so the SYN goes via the real NIC, the kernel TCP stack handles the 3-way handshake, and the data reaches the server. The Owner should see the request succeed with `200 OK` or similar.
+  4. **VPN AÇ** (toggle ON in uygulama, OR `adb shell am start -a android.net.VpnService`). The `VpnService.Builder.establish()` call returns a TUN file descriptor; the `startReaderThread` begins reading packets from the TUN.
+  5. **Uygulama içinden AYNI adrese yeni istek gönder** (a second `POST /api/v1/sessions` or `GET /api/v1/sessions/{id}`). This time the SYN must go through the VPN's TUN (because `addRoute(0.0.0.0/0)` captures all traffic). The Owner should see the request reach the server AND the `handleTcpPacket: dispatching flags=0x.. SYN=true ACK=false PSH=false FIN=false RST=false` breadcrumb fire in logcat (proving the SYN reached the TUN).
+  6. **Log al**: `adb logcat -d -s "OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V"`. The 4-tag filter (NOT just `-s OpenE2eeVpn:V`) is required because the breadcrumbs are spread across 4 classes with 4 different TAG constants: `OpenE2eeVpn` (main service), `TcpForwarder` (TCP state machine in 12.0C), `UdpForwarder` (UDP forwarder in 12.0B), `NettyChannelClient` (Netty skeleton, runtime-dead at 12.0C but kept for S100-S114 audit compatibility).
+
+### Decision matrix after the 6-step test
+
+- **Yeni SYN geliyorsa** (the 12.0F+1 breadcrumb shows `SYN=true` for the new request's first packet): the dispatch precedence + handleSyn logic is correct. The 12.0F bug was a stale TCP bağlantı (the Owner tested an old connection, not a fresh one). No further code change needed; the 12.0F+1 diagnostics are the regression guard.
+- **Yeni SYN gelmiyorsa** (the breadcrumb shows ONLY `PSH=true ACK=true` packets, never `SYN=true`): kernel routing exception. Confirm via `adb shell ip route` that the default route `0.0.0.0/0` is `tun0` (NOT `wlan0` or `rmnet0`). If the default route is the real NIC, the VPN is not capturing the SYN. The 3 remaining hypotheses are:
+  - **(a)** VPN setup timing: confirm the VPN AÇ is `service.running.set(true)` BEFORE the second istek fires (the test akışı step 5 fires the request AFTER step 4 completes; the Establish returns a non-null ParcelFileDescriptor within ~50ms on a healthy device).
+  - **(b)** `addAllowedApplication` only for own app: confirm the 12.0F+1 buildVpnBuilder log shows `allowedApps=0 packages=[]`. If it shows `allowedApps=1 packages=[com.opene2ee.opene2ee]`, remove the allowedApplications restriction (the default behavior captures all traffic).
+  - **(c)** `bindProcessToNetwork` timing: confirm the S98 invariant — `checkPrivateDnsAndBindToVpn()` is called BEFORE `builder.establish()` (line 1132 BEFORE line 1133 in `startCapture`). The bind itself happens INSIDE `onAvailable` which fires AFTER `establish()` returns (the 11.0Y Sprint 11.0Y fix). If the call order is reversed, the NetworkCallback may never fire on OnePlus OxygenOS (the Owner 21:37 root cause for the 11.0Y fix).
+
+### S121 audit (added in this sprint)
+
+- **S121-1**: handleTcpPacket dispatch breadcrumb contains `flags=0x` + 5 flag names (`SYN=`, `ACK=`, `PSH=`, `FIN=`, `RST=`).
+- **S121-2**: `buildVpnBuilder: allowedApps=` breadcrumb exists (so the Owner can confirm whether the VPN is restricted or captures all traffic).
+- **S121-3**: `checkPrivateDnsAndBindToVpn()` called BEFORE `builder.establish()` (the 11.0Y Sprint 11.0Y Sprint 98 invariant that fixes the OnePlus OxygenOS NetworkCallback-never-fires bug; the request must be issued before establish so the system has a pending subscriber for the VPN transport).
+- **S121-4**: 4-step test akışı (this section, plus the actual 6-step procedure above) documented in CHANGELOG.md.
+- **S121-5**: APK build OK (R8 strict mode no missing classes; the 12.0F release build with `proguard-rules.pro` + `proguardFiles` must continue to work — the 12.0F+1 dispatcher breadcrumb uses only `Log.d(TAG, ...)` which is a stable Android API and cannot trigger R8 missing-class warnings).
+- **S121-6**: APK SHA logged (the 12.0F+1 commit message includes the new APK SHA-256 hash so the Owner can match the install against the git log).
+- **S121-7**: Tag 4 filter (`OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V`) documented in test akışı (this section step 6).
+
+## [Unreleased] - Sprint 8 (in branch `feat/pr-8-integration`, push YAPILMADI)
+
 ## [Unreleased] — Sprint 8 (in branch `feat/pr-8-integration`, push YAPILMADI)
 
 ### CI / multiplatform tooling

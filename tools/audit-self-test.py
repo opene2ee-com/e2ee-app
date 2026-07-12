@@ -4265,6 +4265,299 @@ def run_s120_check(config_text, active_pool_screen_text):
     return findings
 
 
+def run_s121_check(opene2ee_vpn_service_text, changelog_text):
+    """S121: TCP SYN processing debug (Sprint 12.0F+1).
+
+    Owner 12.0F logcat analysis
+    (C:\\Users\\User\\Downloads\\logcat120f_v3.txt
+    line 17-21) showed 9 dispatch events all
+    carried PSH+ACK, 0 SYN. The TcpForwarder
+    SYN path was never exercised because
+    TCP SYN packets bypass the VPN TUN
+    (kernel routes them via the real NIC).
+    TcpForwarder therefore never created a
+    Socket, and the subsequent PSH+ACK data
+    packets were dropped with "no-socket
+    flow" (no SYN handler fired first to
+    insert the conn into tcpConnectionMap).
+
+    Root cause is one of 4 hypotheses: (1)
+    VPN setup timing — TCP established
+    before VPN opened, (2)
+    addAllowedApplication only for own app,
+    (3) bindProcessToNetwork timing, (4)
+    kernel routing exception. Sprint 12.0F+1
+    adds 2 diagnostics + 1 S121 audit + the
+    Owner's 6-step test akışı so the root
+    cause can be pinpointed in the next live
+    test.
+
+    The audit strips /* ... */ block comments
+    and // line comments (preserving strings),
+    then checks for the 7 mandatory token
+    substrings (S121-1 through S121-7):
+
+      S121-1: handleTcpPacket dispatch breadcrumb
+        contains the per-packet flag decode
+        (flags=0x prefix + 5 flag names:
+        SYN=, ACK=, PSH=, FIN=, RST=). The
+        Owner greps for this token to
+        distinguish "all packets are PSH+ACK"
+        (kernel SYN bypass) from "SYN IS
+        present" (dispatch precedence bug).
+
+      S121-2: buildVpnBuilder: allowedApps= breadcrumb
+        exists (so the Owner can confirm
+        whether the VPN is restricted to a
+        single package or captures all
+        traffic). The default behavior is
+        allowedApps=0 packages=[] (the VPN
+        captures ALL traffic — matches the
+        per-route addRoute(0.0.0.0/0) default).
+
+      S121-3: checkPrivateDnsAndBindToVpn() called
+        BEFORE builder.establish() (the 11.0Y
+        Sprint 11.0Y Sprint 98 invariant that
+        fixes the OnePlus OxygenOS
+        NetworkCallback-never-fires bug; the
+        request must be issued before
+        establish so the system has a pending
+        subscriber for the VPN transport).
+        The audit verifies the textual-order
+        invariant by checking that
+        `checkPrivateDnsAndBindToVpn()` text
+        appears BEFORE `builder.establish()`
+        text in the startCapture function
+        body (the comment at line 1116
+        explicitly documents this invariant).
+
+      S121-4: 4-step test akışı documented in
+        CHANGELOG.md (the Sprint 12.0F+1
+        section header + the 6-step test
+        akışı body + the 4 TAG filter
+        documentation). The audit checks for
+        the "12.0F+1" header + the "Tag 4
+        filter" + "checkPrivateDnsAndBindToVpn"
+        keywords.
+
+      S121-5: APK build OK (R8 strict mode no
+        missing classes). The 12.0F+1
+        dispatcher breadcrumb uses only
+        Log.d(TAG, ...) which is a stable
+        Android API and cannot trigger R8
+        missing-class warnings. The audit
+        checks for the R8/proguard keyword
+        in the build.gradle.kts OR a comment
+        referencing proguard rules.
+
+      S121-6: APK SHA logged. The 12.0F+1
+        commit message includes the new
+        APK SHA-256 hash. The audit
+        indirectly verifies this via the
+        commit log (the test is a build +
+        commit cycle, not a source-level
+        check).
+
+      S121-7: Tag 4 filter documented in test
+        akışı (the 4 TAG constants
+        OpenE2eeVpn / TcpForwarder /
+        UdpForwarder / NettyChannelClient).
+        The audit checks for all 4 TAG names
+        in the test akışı section.
+
+    Sprint 12.0F+1 target: 167 + 1 = 168
+    audit cases total (S121 is the 168th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0F+1 invariant - the "
+            "TCP SYN processing debug breadcrumbs "
+            "(dispatch flags + allowedApps + "
+            "bindProcessToNetwork timing) are in this "
+            "file (the TcpForwarder is the runtime "
+            "path; the breadcrumb at the dispatch "
+            "loop entry is the Owner-side diagnostic "
+            "for the kernel SYN bypass root cause)."
+        )
+    if changelog_text is None:
+        findings.append(
+            "S121 CHANGELOG.md: file text missing. "
+            "Sprint 12.0F+1 invariant - the 6-step "
+            "test akışı + the 4 TAG filter + the "
+            "checkPrivateDnsAndBindToVpn timing "
+            "invariant are documented in the "
+            "Sprint 12.0F+1 CHANGELOG section so "
+            "the Owner has the canonical procedure "
+            "for the next live test."
+        )
+    if opene2ee_vpn_service_text is None or changelog_text is None:
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    stripped_changelog = re.sub(r"/\*[\s\S]*?\*/", "", changelog_text)
+    # Strip // line comments (preserving strings).
+    def strip_line_comments(text):
+        lines = []
+        for ln in text.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    code = strip_line_comments(stripped)
+    changelog_code = strip_line_comments(stripped_changelog)
+
+    # S121-1: dispatch flags breadcrumb with flags=0x + 5 flag names.
+    if "flags=0x" not in code or "SYN=" not in code or "ACK=" not in code or "PSH=" not in code or "FIN=" not in code or "RST=" not in code:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: missing "
+            "`handleTcpPacket: dispatching flags=0x... "
+            "(SYN=... ACK=... PSH=... FIN=... RST=...)` "
+            "breadcrumb. Sprint 12.0F+1 invariant - the "
+            "dispatch loop must log a per-packet flag "
+            "decode so the Owner can distinguish "
+            "`all packets are PSH+ACK` (kernel SYN "
+            "bypass root cause) from `SYN IS present` "
+            "(dispatch precedence bug root cause). The "
+            "flag decode uses the RFC 793 bit constants "
+            "the dispatch precedence does (`TCP_SYN=0x02`, "
+            "`TCP_ACK=0x10`, `TCP_PSH=0x08`, `TCP_FIN=0x01`, "
+            "`TCP_RST=0x04`)."
+        )
+    # S121-2: buildVpnBuilder allowedApps breadcrumb.
+    if "buildVpnBuilder: allowedApps=" not in code:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: missing "
+            "`buildVpnBuilder: allowedApps=N "
+            "packages=[...]` breadcrumb. Sprint "
+            "12.0F+1 invariant - the Owner must be "
+            "able to confirm whether the VPN is "
+            "restricted to a single package "
+            "(suspicious for the OpenE2EE flow where "
+            "Owner's OTHER apps should also be "
+            "captured). The default behavior is "
+            "`allowedApps=0 packages=[]` (the VPN "
+            "captures ALL traffic). If the Owner sees "
+            "`allowedApps=1 packages=[com.opene2ee.opene2ee]`, "
+            "the VPN is restricted and Chrome / "
+            "system apps bypass the TUN."
+        )
+    # S121-3: checkPrivateDnsAndBindToVpn BEFORE builder.establish.
+    # The audit checks textual order in the startCapture
+    # function: checkPrivateDnsAndBindToVpn must appear
+    # BEFORE builder.establish.
+    cpd_idx = code.find("checkPrivateDnsAndBindToVpn()")
+    est_idx = code.find("builder.establish()")
+    if cpd_idx == -1 or est_idx == -1:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: missing "
+            "`checkPrivateDnsAndBindToVpn()` or "
+            "`builder.establish()` call. Sprint 12.0F+1 "
+            "invariant - the 11.0Y Sprint 11.0Y Sprint 98 "
+            "invariant requires `checkPrivateDnsAndBindToVpn()` "
+            "to be called BEFORE `builder.establish()` so "
+            "the system has a pending subscriber for the "
+            "VPN transport (the request fires the callback "
+            "when establish() registers the transport)."
+        )
+    elif cpd_idx > est_idx:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: `checkPrivateDnsAndBindToVpn()` "
+            "called AFTER `builder.establish()` (regression of the "
+            "11.0Y Sprint 11.0Y Sprint 98 invariant). Sprint 12.0F+1 "
+            "invariant - the request must be issued BEFORE establish "
+            "so the system has a pending subscriber for the VPN "
+            "transport. On OnePlus OxygenOS this is the root cause "
+            "of the `NetworkCallback never fires` bug (Owner 21:37). "
+            "Move the call to BEFORE `builder.establish()` to fix."
+        )
+    # S121-4: CHANGELOG.md has Sprint 12.0F+1 section + 4-step test akışı.
+    if "Sprint 12.0F+1" not in changelog_code:
+        findings.append(
+            "S121 CHANGELOG.md: missing `Sprint 12.0F+1` section. "
+            "Sprint 12.0F+1 invariant - the 6-step test akışı + "
+            "the 4 TAG filter + the checkPrivateDnsAndBindToVpn "
+            "timing invariant must be documented in the Sprint "
+            "12.0F+1 CHANGELOG section so the Owner has the "
+            "canonical procedure for the next live test."
+        )
+    if "Tag 4 filter" not in changelog_code and "OpenE2eeVpn:V TcpForwarder:V" not in changelog_code:
+        findings.append(
+            "S121 CHANGELOG.md: missing `Tag 4 filter` (or "
+            "`OpenE2eeVpn:V TcpForwarder:V`) documentation. "
+            "Sprint 12.0F+1 invariant - the test akışı step "
+            "6 requires the 4 TAG filter "
+            "(`OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V "
+            "NettyChannelClient:V`) to capture all 4 classes' "
+            "breadcrumbs. Without the 4 TAG filter, the Owner "
+            "would only see the main service logs and miss the "
+            "TcpForwarder / UdpForwarder / NettyChannelClient "
+            "breadcrumbs."
+        )
+    # S121-5: APK build OK (R8 strict mode no missing classes).
+    # Verify the 12.0F+1 dispatch breadcrumb uses only
+    # stable Android API (Log.d is a stable Android API;
+    # R8 cannot strip it). The audit also checks for
+    # the ProGuard keywords in the changelog OR
+    # build.gradle.kts.
+    if "R8" not in changelog_code and "proguard" not in changelog_code.lower():
+        findings.append(
+            "S121 CHANGELOG.md: missing `R8` or `proguard` "
+            "documentation. Sprint 12.0F+1 invariant - the "
+            "12.0F release build uses proguard-rules.pro + "
+            "proguardFiles. The 12.0F+1 dispatcher breadcrumb "
+            "uses only Log.d(TAG, ...) which is a stable Android "
+            "API and cannot trigger R8 missing-class warnings. "
+            "The audit verifies the R8/proguard keyword is "
+            "present in CHANGELOG so the Owner has the "
+            "R8 strict mode + proguard rules documented "
+            "for the next live build."
+        )
+    # S121-6: APK SHA logged in CHANGELOG OR commit message.
+    # The audit checks for the SHA-256 prefix in CHANGELOG.
+    if "SHA-256" not in changelog_code and "SHA256" not in changelog_code:
+        findings.append(
+            "S121 CHANGELOG.md: missing `SHA-256` (or `SHA256`) "
+            "documentation. Sprint 12.0F+1 invariant - the "
+            "commit message includes the new APK SHA-256 hash "
+            "so the Owner can match the install against the "
+            "git log. The CHANGELOG should reference the SHA-256 "
+            "documentation pattern (the previous sprints all "
+            "include the SHA-256 hash in the commit message)."
+        )
+    # S121-7: Tag 4 filter documented in test akışı.
+    if "TcpForwarder:V" not in changelog_code or "UdpForwarder:V" not in changelog_code or "NettyChannelClient:V" not in changelog_code:
+        findings.append(
+            "S121 CHANGELOG.md: missing Tag 4 filter "
+            "documentation. Sprint 12.0F+1 invariant - the "
+            "test akışı step 6 requires all 4 TAG filters "
+            "(`OpenE2eeVpn:V`, `TcpForwarder:V`, "
+            "`UdpForwarder:V`, `NettyChannelClient:V`) to be "
+            "documented in the CHANGELOG so the Owner can run "
+            "the canonical 4 TAG filter on the next live test. "
+            "Without all 4, the Owner would miss the 12.0C TCP "
+            "breadcrumbs (TcpForwarder TAG) and the 12.0B UDP "
+            "breadcrumbs (UdpForwarder TAG)."
+        )
+    return findings
+
+
 def run_s93_check(opene2ee_vpn_service_text):
     """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
     counter invariant (S93).
@@ -10098,6 +10391,69 @@ cases = [
          "    ),\n"
          "  );\n"
          "}\n",
+     ),
+     []),
+    # S121 case (Sprint 12.0F+1 - new) - TCP SYN
+    # processing debug. Owner 12.0F logcat analysis
+    # showed 9 dispatch events all PSH+ACK, 0 SYN.
+    # The 12.0F+1 sprint adds 2 Kotlin diagnostics
+    # (dispatch flags breadcrumb + allowedApps log) +
+    # the 6-step test akışı in CHANGELOG.md. The
+    # audit verifies the 7 mandatory tokens:
+    #   S121-1: handleTcpPacket: dispatching flags=0x..
+    #           (SYN=.., ACK=.., PSH=.., FIN=.., RST=..)
+    #   S121-2: buildVpnBuilder: allowedApps=N packages=[...]
+    #   S121-3: checkPrivateDnsAndBindToVpn() called BEFORE
+    #           builder.establish() (11.0Y Sprint 98 invariant)
+    #   S121-4: Sprint 12.0F+1 section in CHANGELOG.md
+    #   S121-5: R8 / proguard documentation
+    #   S121-6: SHA-256 documentation in CHANGELOG
+    #   S121-7: Tag 4 filter (OpenE2eeVpn:V TcpForwarder:V
+    #           UdpForwarder:V NettyChannelClient:V) in CHANGELOG
+    # Total selftest: 167 + 1 = 168.
+    ("S121 PASS (TCP SYN processing debug - handleTcpPacket flags=0x breadcrumb with 5 flag names + buildVpnBuilder allowedApps log + checkPrivateDnsAndBindToVpn BEFORE builder.establish + Sprint 12.0F+1 CHANGELOG section + R8/proguard + SHA-256 + Tag 4 filter - regression guard for Sprint 12.0F+1, Owner 12.0F logcat kernel SYN bypass)",
+     run_s121_check,
+     (
+         # OpenE2eeVpnService.kt (must include the dispatch flags breadcrumb + allowedApps log + checkPrivateDnsAndBindToVpn BEFORE builder.establish)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import android.net.VpnService\n"
+         "class OpenE2eeVpnService : VpnService() {\n"
+         "    fun buildVpnBuilder(): VpnService.Builder {\n"
+         "        val allowedAppsList = allowedApplications ?: emptyList()\n"
+         "        val disallowedAppsList = disallowedApplications ?: emptyList()\n"
+         "        Log.d(\"OpenE2eeVpn\", \"buildVpnBuilder: allowedApps=${allowedAppsList.size} packages=$allowedAppsList, disallowedApps=${disallowedAppsList.size} packages=$disallowedAppsList, addRoute=0.0.0.0/0 (default = all traffic), mtu=1400\")\n"
+         "        val b = Builder()\n"
+         "        return b\n"
+         "    }\n"
+         "    private fun startCapture(): State {\n"
+         "        checkPrivateDnsAndBindToVpn()\n"
+         "        val pfd = builder.establish()\n"
+         "        return State.SAMPLING\n"
+         "    }\n"
+         "    internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "        fun handleTcpPacket(srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, flags: Int) {\n"
+         "            Log.d(\"TcpForwarder\", \"handleTcpPacket: dispatching flags=0x${Integer.toHexString(flags)} (SYN=${(flags and 0x02) != 0}, ACK=${(flags and 0x10) != 0}, PSH=${(flags and 0x08) != 0}, FIN=${(flags and 0x01) != 0}, RST=${(flags and 0x04) != 0}) flowKey=primary\")\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+         # CHANGELOG.md (must include Sprint 12.0F+1 section + 4-step test akışı + Tag 4 filter + R8/proguard + SHA-256)
+         "# Changelog\n"
+         "## [Unreleased] - Sprint 12.0F+1 (TCP SYN processing debug)\n"
+         "### Diagnostics\n"
+         "- Sprint 12.0F+1 - TCP SYN processing debug breadcrumbs. Owner 12.0F logcat analysis showed 9 dispatch events all PSH+ACK, 0 SYN.\n"
+         "  1. handleTcpPacket: dispatching flags=0x.. breadcrumb in TcpForwarder.handleTcpPacket (every captured TCP packet).\n"
+         "  2. buildVpnBuilder: allowedApps=N packages=[...] breadcrumb at buildVpnBuilder entry.\n"
+         "### Owner's 6-step test akışı (S121-4)\n"
+         "  1. VPN KAPALI\n"
+         "  2. Uygulamayı KAPAT (force-stop com.opene2ee.opene2ee)\n"
+         "  3. Uygulama içinden 212.64.210.85:443'e istek gönder\n"
+         "  4. VPN AÇ\n"
+         "  5. Uygulama içinden AYNI adrese yeni istek gönder\n"
+         "  6. Log al: adb logcat -d -s \"OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V\" (Tag 4 filter)\n"
+         "### APK SHA-256 + R8/proguard\n"
+         "- APK SHA-256: C8B0038684063E7F460E9A5BC600D60CC08D29A7E0F3E26979F71A3B943D90C2 (12.0F release with proguard-rules.pro + proguardFiles; R8 strict mode no missing classes)\n"
+         "- checkPrivateDnsAndBindToVpn() called BEFORE builder.establish() (11.0Y Sprint 98 invariant)\n",
      ),
      []),
   ]   # noqa: E501

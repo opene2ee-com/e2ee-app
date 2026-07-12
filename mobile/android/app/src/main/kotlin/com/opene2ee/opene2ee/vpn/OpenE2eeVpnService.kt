@@ -988,6 +988,39 @@ class OpenE2eeVpnService : VpnService() {
      */
     @RequiresApi(21)
     protected open fun buildVpnBuilder(): VpnService.Builder {
+        // Sprint 12.0F+1 — allowedApplications
+        // diagnostic breadcrumb. Owner 12.0F
+        // logcat analysis showed the TCP SYN
+        // packets never reached the TUN — 9
+        // dispatch events all carried PSH+ACK,
+        // 0 SYN. One of the 4 root-cause
+        // hypotheses is: the VPN is restricted
+        // to the OWN app package
+        // (`com.opene2ee.opene2ee`) via
+        // `addAllowedApplication`, so when the
+        // Owner opens Chrome / WhatsApp /
+        // system apps and tries to reach
+        // 212.64.210.85:443, those apps' TCP
+        // connections bypass the VPN entirely
+        // (Android kernel fast path) and the
+        // SYN never enters the TUN.
+        //
+        // The fix is a one-line diagnostic log
+        // that reports WHICH packages (if any)
+        // are added to the per-app VPN
+        // allowlist. The Owner greps for
+        // `buildVpnBuilder: allowedApps=` to
+        // confirm whether the VPN is
+        // restricted to a single package
+        // (suspicious for the OpenE2EE flow
+        // where Owner's OTHER apps should also
+        // be captured). If the result is an
+        // empty list, the VPN captures ALL
+        // traffic (the default — Chrome /
+        // WhatsApp / system apps included).
+        val allowedAppsList = allowedApplications ?: emptyList()
+        val disallowedAppsList = disallowedApplications ?: emptyList()
+        Log.d(TAG, "buildVpnBuilder: allowedApps=${allowedAppsList.size} packages=$allowedAppsList, disallowedApps=${disallowedAppsList.size} packages=$disallowedAppsList, addRoute=$CAPTURED_ROUTE_ADDRESS/$CAPTURED_ROUTE_PREFIX (default = all traffic), mtu=$TUN_MTU")
         val b = Builder()
             .setSession("OpenE2EE Network Diagnostic")
             // Sprint 11.0I — `addAddress(TUN_ADDRESS, 24)` is the
@@ -3942,6 +3975,44 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
         val tcp = parseTcpHeader(ipPacket, length, offset) ?: return
         val flags = tcp.flags
         val payloadLen = (length - offset - 20).coerceAtLeast(0)
+
+        // Sprint 12.0F+1 — flags debug breadcrumb.
+        // Owner 12.0F logcat analysis: 9 dispatch
+        // events all carried PSH+ACK, 0 SYN
+        // (https://.../logcat120f_v3.txt line 17-21).
+        // The TcpForwarder SYN path was never
+        // exercised because TCP SYN packets
+        // bypass the VPN TUN (kernel routes
+        // them via the real NIC). The
+        // TcpForwarder therefore never created
+        // a Socket, and the subsequent PSH+ACK
+        // data packets were dropped with
+        // "no-socket flow" (no SYN handler fired
+        // first to insert the conn into
+        // tcpConnectionMap).
+        //
+        // The fix is to add a per-packet
+        // breadcrumb at the dispatch entry
+        // that logs ALL 5 TCP flags (SYN, ACK,
+        // PSH, FIN, RST) as boolean state. The
+        // Owner greps for this token in logcat
+        // and can now distinguish:
+        //   - "all packets are PSH+ACK" →
+        //     kernel SYN bypass (the SYN path
+        //     is never reached, regardless of
+        //     how the dispatch logic is fixed).
+        //   - "SYN IS present in some packets"
+        //     → dispatch precedence bug (the
+        //     SYN path IS reached but the
+        //     handler is wrong).
+        //   - "mixed" → both bugs present.
+        //
+        // The 12.0F+1 log fires for EVERY
+        // captured TCP packet (no filtering)
+        // so the Owner can grep the
+        // per-packet flag state across the
+        // full TCP conversation.
+        Log.d(TAG, "handleTcpPacket: dispatching flags=0x${"%02x".format(flags)} (SYN=${(flags and TCP_SYN) != 0}, ACK=${(flags and TCP_ACK) != 0}, PSH=${(flags and TCP_PSH) != 0}, FIN=${(flags and TCP_FIN) != 0}, RST=${(flags and TCP_RST) != 0}) flowKey=$primaryFlowKey (src=$srcIp:$srcPort dst=$dstIp:$dstPort)")
 
         // Sprint 12.0C — bidir lookup. Try the primary
         // key first; if that misses, try the reverse
