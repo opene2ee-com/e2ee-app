@@ -893,12 +893,32 @@ class OpenE2eeVpnService : VpnService() {
      * holding an engine reference.
      */
     fun attachFlutterEngine(engine: FlutterEngine) {
+        // Sprint 12.0F+4 — call-chain debug breadcrumb.
+        // The Owner 12.0F+3 (release + debug) test
+        // showed 0 onMethodCall logs, which means EITHER
+        // MainActivity never called attachFlutterEngine
+        // (so the engine binaryMessenger is not wired),
+        // OR the companion methodChannel was null when
+        // onMethodCall fired (so the inbound handler
+        // delegate to OpenE2eeVpnService.dispatch found
+        // no channel to invoke on). This Log.d fires
+        // EVERY time MainActivity calls
+        // attachFlutterEngine so the Owner can grep
+        // logcat for "attachFlutterEngine: ch=" and
+        // confirm the binding succeeded.
+        Log.d(TAG, "attachFlutterEngine: ENTER, " +
+                "prev Companion.methodChannel=${Companion.methodChannel}, " +
+                "engine=${engine.hashCode()}")
         val ch = MethodChannel(engine.dartExecutor.binaryMessenger, METHOD_CHANNEL)
         // Publish the channel for OUTBOUND pushes from
         // `PacketDrain` (the 5-second `onPacketsSampled` event).
         // Do NOT install an inbound handler here — MainActivity
         // owns that side (see class doc + S73 invariant).
         Companion.methodChannel = ch
+        Log.d(TAG, "attachFlutterEngine: DONE, " +
+                "Companion.methodChannel=$ch, " +
+                "methodChannel=$ch (the channel IS published for OUTBOUND " +
+                "PacketDrain pushes; INBOUND handler lives in MainActivity)")
     }
 
     /**
@@ -906,6 +926,13 @@ class OpenE2eeVpnService : VpnService() {
      * we don't leak handlers across engine restarts.
      */
     fun detachFlutterEngine() {
+        // Sprint 12.0F+4 — call-chain debug breadcrumb.
+        // Pair with attachFlutterEngine: ch= above. Fires
+        // on engine teardown so the Owner can confirm the
+        // channel was actually cleaned up (no leak).
+        Log.d(TAG, "detachFlutterEngine: ENTER, " +
+                "prev methodChannel=$methodChannel, " +
+                "prev Companion.methodChannel=${Companion.methodChannel}")
         methodChannel?.setMethodCallHandler(null)
         methodChannel = null
         // Sprint 11.0A — clear the companion reference too so the
@@ -914,23 +941,55 @@ class OpenE2eeVpnService : VpnService() {
         if (Companion.methodChannel === methodChannel) {
             Companion.methodChannel = null
         }
+        Log.d(TAG, "detachFlutterEngine: DONE, " +
+                "methodChannel=null, Companion.methodChannel=${Companion.methodChannel}")
     }
 
     /**
      * Handle Dart → native commands.
      */
     private fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+        // Sprint 12.0F+4 — call-chain debug breadcrumb.
+        // The Owner 12.0F+3 (release + debug) test
+        // showed 0 dispatching flags=0x + 0
+        // buildVpnBuilder + 0 rebindProcessToNetwork
+        // + 0 dumpVpnRoutingState + 0 startCapture
+        // entry breadcrumbs. That means onMethodCall
+        // was NEVER called with method='start' on
+        // the service instance. This entry log fires
+        // for EVERY method so the Owner can grep
+        // logcat for "onMethodCall: received method='start'"
+        // and verify the Dart → MainActivity → dispatch
+        // → instance.onMethodCall chain reached this
+        // method. S124-1 audit verifies the literal.
+        Log.d(TAG, "onMethodCall: received method='${call.method}', " +
+                "running=${running.get()}, state=$state, " +
+                "args=${call.arguments}")
         try {
             when (call.method) {
                 "start" -> {
+                    // Sprint 12.0F+4 — branch entry
+                    // breadcrumb. Pairs with
+                    // onMethodCall: received above so
+                    // the Owner can verify the 'start'
+                    // branch was reached (vs e.g. the
+                    // 'status' branch).
+                    Log.d(TAG, "onMethodCall: 'start' branch ENTERED, " +
+                            "calling startCapture()")
                     val newState = startCapture()
+                    Log.d(TAG, "onMethodCall: 'start' branch DONE, " +
+                            "newState=$newState")
                     result.success(stateToMap(newState))
                 }
                 "stop" -> {
+                    Log.d(TAG, "onMethodCall: 'stop' branch ENTERED, " +
+                            "calling stopCapture(graceful=true)")
                     val newState = stopCapture(graceful = true)
                     result.success(stateToMap(newState))
                 }
                 "status" -> {
+                    Log.d(TAG, "onMethodCall: 'status' branch ENTERED, " +
+                            "returning currentStatusMap()")
                     result.success(currentStatusMap())
                 }
                 "getSampledPackets" -> {
@@ -943,18 +1002,24 @@ class OpenE2eeVpnService : VpnService() {
                     // live `packetStream` push (S45) are the two
                     // consumer paths.
                     val packets: List<Map<String, Any?>> = snapshotRing()
+                    Log.d(TAG, "onMethodCall: 'getSampledPackets' branch DONE, " +
+                            "returned ${packets.size} packets")
                     result.success(packets)
                 }
                 "setAllowedApplications" -> {
                     val pkgs = (call.argument<List<String>>("packages") ?: emptyList())
                     allowedApplications = pkgs
                     if (pkgs.isNotEmpty()) disallowedApplications = null
+                    Log.d(TAG, "onMethodCall: 'setAllowedApplications' branch DONE, " +
+                            "pkgs=$pkgs")
                     result.success(true)
                 }
                 "setDisallowedApplications" -> {
                     val pkgs = (call.argument<List<String>>("packages") ?: emptyList())
                     disallowedApplications = pkgs
                     if (pkgs.isNotEmpty()) allowedApplications = null
+                    Log.d(TAG, "onMethodCall: 'setDisallowedApplications' branch DONE, " +
+                            "pkgs=$pkgs")
                     result.success(true)
                 }
                 "requestPrepare" -> {
@@ -962,12 +1027,24 @@ class OpenE2eeVpnService : VpnService() {
                     // for to obtain RESULT_OK. We do NOT start the activity here because
                     // TODO(port-main-activity): MainActivity port (parallel sprint item) will own the actual startActivityForResult flow that consumes this ACTION.
                     // this runs in a Service context — MainActivity owns the flow.
+                    Log.d(TAG, "onMethodCall: 'requestPrepare' branch DONE, " +
+                            "returning android.net.VpnService")
                     result.success("android.net.VpnService")
                 }
-                else -> result.notImplemented()
+                else -> {
+                    Log.w(TAG, "onMethodCall: unknown method='${call.method}', " +
+                            "returning notImplemented")
+                    result.notImplemented()
+                }
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "MethodChannel error: ${call.method}", t)
+            // Sprint 12.0F+4 — catch log. The
+            // pre-12.0F+4 code only logged the error
+            // + result.error but did NOT log the
+            // method name that threw. The Owner
+            // greps for "onMethodCall: method='X'
+            // THREW" to find which branch failed.
+            Log.e(TAG, "onMethodCall: method='${call.method}' THREW", t)
             result.error("vpn_method_error", t.message, null)
         }
     }

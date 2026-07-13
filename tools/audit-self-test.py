@@ -4985,6 +4985,122 @@ def run_s123_check(opene2ee_vpn_service_text, changelog_text):
     return findings
 
 
+def run_s124_check(opene2ee_vpn_service_text, main_activity_text, vpn_service_dart_text):
+    """S124: MethodChannel call-chain debug (Sprint 12.0F+4).
+
+    Owner 12.0F+3 test (1387 satır release + 767 satır
+    debug) showed 0 breadcrumbs (vpnRoutingState, rebind,
+    DEBUG_MODE, buildVpnBuilder, dispatching flags,
+    writeTcpRstToTun — hepsi 0). Mavis kod analizi:
+    startCapture entry log 0 = startCapture synchronized
+    block'a hiç girmedi = "start" komutu
+    VpnService.onMethodCall'a hiç ulaşmadı. Call chain
+    break noktası bulunmalı.
+
+    The 4 call-chain debug breadcrumbs:
+      S124-1: `onMethodCall: received method='` in
+        OpenE2eeVpnService.kt (every method call).
+      S124-2: `attachFlutterEngine: ENTER, prev` in
+        OpenE2eeVpnService.kt (engine attach).
+      S124-3: `vpn_service.dart: start` in
+        mobile/lib/services/vpn_service.dart (Dart
+        invokeMethod).
+      S124-4: `MainActivity: configureFlutterEngine:
+        ENTER` in MainActivity.kt (handler register).
+
+    Sprint 12.0F+4 target: 170 + 1 = 171 audit cases
+    total (S124 is the 171st).
+    """
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S124 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0F+4 invariant - the "
+            "onMethodCall entry log + attachFlutterEngine "
+            "log + the catch log are in this file."
+        )
+    if main_activity_text is None:
+        findings.append(
+            "S124 MainActivity.kt: file text missing. "
+            "Sprint 12.0F+4 invariant - the "
+            "configureFlutterEngine: ENTER + DONE logs "
+            "+ the MethodChannel handler log are in this "
+            "file."
+        )
+    if vpn_service_dart_text is None:
+        findings.append(
+            "S124 vpn_service.dart: file text missing. "
+            "Sprint 12.0F+4 invariant - the start() "
+            "print breadcrumbs (3x) are in this file."
+        )
+    if opene2ee_vpn_service_text is None or main_activity_text is None or vpn_service_dart_text is None:
+        return findings
+    # S124-1: onMethodCall: received method=' literal
+    # in OpenE2eeVpnService.kt. This is a source-level
+    # check (the string is preserved in the DEX too,
+    # but the audit verifies the source).
+    if "onMethodCall: received method=" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S124 OpenE2eeVpnService.kt: missing "
+            "`onMethodCall: received method=` entry "
+            "log. Sprint 12.0F+4 invariant - Debug 1 "
+            "is the call-chain entry log that fires "
+            "for EVERY method invocation. The Owner "
+            "greps logcat for this literal to confirm "
+            "the Dart -> MainActivity -> dispatch -> "
+            "instance.onMethodCall chain reached this "
+            "method."
+        )
+    # S124-2: attachFlutterEngine: ENTER, prev literal
+    # in OpenE2eeVpnService.kt.
+    if "attachFlutterEngine: ENTER, prev Companion.methodChannel=" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S124 OpenE2eeVpnService.kt: missing "
+            "`attachFlutterEngine: ENTER, prev "
+            "Companion.methodChannel=` log. Sprint "
+            "12.0F+4 invariant - Debug 2 is the "
+            "MethodChannel binding log that fires "
+            "when MainActivity calls attachFlutterEngine. "
+            "Without this log the Owner cannot tell "
+            "whether the engine binaryMessenger was "
+            "wired to the service at app launch."
+        )
+    # S124-3: vpn_service.dart: start in Dart file.
+    # The Dart audit looks for the print() literal.
+    if "vpn_service.dart: start" not in vpn_service_dart_text:
+        findings.append(
+            "S124 vpn_service.dart: missing `vpn_service.dart: "
+            "start` print breadcrumb. Sprint 12.0F+4 "
+            "invariant - Debug 3 is the Dart-side "
+            "print() that fires for every start() "
+            "call. The Owner greps logcat for this "
+            "literal via `adb logcat -d -s flutter:V "
+            "| Select-String vpn_service.dart` to "
+            "verify the Dart side reached the "
+            "invokeMethod call. Note: `print()` is "
+            "stripped in release builds but PRESERVED "
+            "in debug APK builds (which is the "
+            "recommended build for the 9-step test)."
+        )
+    # S124-4: MainActivity: configureFlutterEngine:
+    # ENTER literal in MainActivity.kt.
+    if "configureFlutterEngine: ENTER" not in main_activity_text:
+        findings.append(
+            "S124 MainActivity.kt: missing "
+            "`configureFlutterEngine: ENTER` log. "
+            "Sprint 12.0F+4 invariant - Debug 4 is "
+            "the call-chain entry log that fires "
+            "when the Flutter engine attaches to the "
+            "Activity. The Owner greps logcat for "
+            "this literal to confirm the handler "
+            "registration path is live. Without this "
+            "log the Owner cannot tell whether "
+            "MainActivity ever bound the inbound "
+            "handler."
+        )
+    return findings
+
+
 def run_s93_check(opene2ee_vpn_service_text):
     """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
     counter invariant (S93).
@@ -11046,6 +11162,94 @@ cases = [
          "  S123-3: addAllowedApplication comment-out\n"
          "  S123-4: dumpVpnRoutingState function exists\n"
          "  S123-5: vpnRoutingState: ip route in CHANGELOG 8-step test akisi\n",
+     ),
+     []),
+    # S124 case (Sprint 12.0F+4 - new) - MethodChannel
+    # call-chain debug. Owner 12.0F+3 test (release
+    # 1387 satır + debug 767 satır) showed 0 breadcrumbs
+    # everywhere. startCapture entry log 0 = call chain
+    # break. 4 debug breadcrumbs added:
+    #   S124-1: onMethodCall: received method= literal
+    #   S124-2: attachFlutterEngine: ENTER, prev literal
+    #   S124-3: vpn_service.dart: start print literal
+    #   S124-4: MainActivity: configureFlutterEngine: ENTER
+    # Total selftest: 170 + 1 = 171.
+    ("S124 PASS (MethodChannel call-chain debug - onMethodCall: received method= + attachFlutterEngine: ENTER, prev + vpn_service.dart: start print + MainActivity: configureFlutterEngine: ENTER - regression guard for Sprint 12.0F+4, Owner 12.0F+3 1387 satır release + 767 satır debug 'durum değişmedi' + 0 breadcrumbs)",
+     run_s124_check,
+     (
+         # OpenE2eeVpnService.kt (must have onMethodCall + attachFlutterEngine entry logs)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "class OpenE2eeVpnService {\n"
+         "    companion object { const val TAG = \"OpenE2eeVpn\" }\n"
+         "    fun attachFlutterEngine(engine: io.flutter.embedding.engine.FlutterEngine) {\n"
+         "        Log.d(TAG, \"attachFlutterEngine: ENTER, prev Companion.methodChannel=${Companion.methodChannel}, engine=${engine.hashCode()}\")\n"
+         "        val ch = io.flutter.plugin.common.MethodChannel(engine.dartExecutor.binaryMessenger, \"opene2ee/vpn\")\n"
+         "        Companion.methodChannel = ch\n"
+         "        Log.d(TAG, \"attachFlutterEngine: DONE, Companion.methodChannel=$ch\")\n"
+         "    }\n"
+         "    fun detachFlutterEngine() {\n"
+         "        Log.d(TAG, \"detachFlutterEngine: ENTER, prev methodChannel=$methodChannel\")\n"
+         "        methodChannel?.setMethodCallHandler(null)\n"
+         "        methodChannel = null\n"
+         "        Log.d(TAG, \"detachFlutterEngine: DONE\")\n"
+         "    }\n"
+         "    private fun onMethodCall(call: io.flutter.plugin.common.MethodCall, result: io.flutter.plugin.common.MethodChannel.Result) {\n"
+         "        Log.d(TAG, \"onMethodCall: received method='${call.method}', running=${running.get()}, state=$state, args=${call.arguments}\")\n"
+         "        try {\n"
+         "            when (call.method) {\n"
+         "                \"start\" -> {\n"
+         "                    Log.d(TAG, \"onMethodCall: 'start' branch ENTERED, calling startCapture()\")\n"
+         "                    val newState = startCapture()\n"
+         "                    Log.d(TAG, \"onMethodCall: 'start' branch DONE, newState=$newState\")\n"
+         "                    result.success(stateToMap(newState))\n"
+         "                }\n"
+         "                else -> result.notImplemented()\n"
+         "            }\n"
+         "        } catch (t: Throwable) {\n"
+         "            Log.e(TAG, \"onMethodCall: method='${call.method}' THREW\", t)\n"
+         "            result.error(\"vpn_method_error\", t.message, null)\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+         # MainActivity.kt (must have configureFlutterEngine: ENTER + MethodChannel handler log)
+         "package com.opene2ee.opene2ee\n"
+         "import io.flutter.embedding.engine.FlutterEngine\n"
+         "import io.flutter.plugin.common.MethodChannel\n"
+         "class MainActivity : io.flutter.embedding.android.FlutterActivity() {\n"
+         "    companion object { private const val TAG = \"MainActivity\" }\n"
+         "    private var vpnChannel: MethodChannel? = null\n"
+         "    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {\n"
+         "        super.configureFlutterEngine(flutterEngine)\n"
+         "        android.util.Log.d(TAG, \"configureFlutterEngine: ENTER, registering opene2ee/vpn MethodChannel handler\")\n"
+         "        vpnChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, \"opene2ee/vpn\").apply {\n"
+         "            setMethodCallHandler { call, result ->\n"
+         "                android.util.Log.d(TAG, \"MethodChannel handler: received method='${call.method}', delegating to OpenE2eeVpnService.dispatch\")\n"
+         "                com.opene2ee.opene2ee.vpn.OpenE2eeVpnService.dispatch(this@MainActivity, call, result)\n"
+         "            }\n"
+         "        }\n"
+         "        android.util.Log.d(TAG, \"configureFlutterEngine: DONE, opene2ee/vpn handler registered\")\n"
+         "    }\n"
+         "}\n",
+         # vpn_service.dart (must have vpn_service.dart: start print)
+         "import 'package:flutter/services.dart';\n"
+         "class VpnService {\n"
+         "  final MethodChannel _channel = const MethodChannel('opene2ee/vpn');\n"
+         "  Future<Map<String, Object?>> start() async {\n"
+         "    // ignore: avoid_print\n"
+         "    print('vpn_service.dart: start() ENTERED, invoking MethodChannel(START)');\n"
+         "    try {\n"
+         "      final r = await _channel.invokeMethod<Map<Object?, Object?>>('start');\n"
+         "      // ignore: avoid_print\n"
+         "      print('vpn_service.dart: start() invokeMethod returned: $r');\n"
+         "      return (r ?? const {}).cast<String, Object?>();\n"
+         "    } catch (e, st) {\n"
+         "      // ignore: avoid_print\n"
+         "      print('vpn_service.dart: start() THREW: $e\\n$st');\n"
+         "      rethrow;\n"
+         "    }\n"
+         "  }\n"
+         "}\n",
      ),
      []),
   ]   # noqa: E501

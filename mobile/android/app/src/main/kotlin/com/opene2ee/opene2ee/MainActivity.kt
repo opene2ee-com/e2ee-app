@@ -149,6 +149,23 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
+        // Sprint 12.0F+4 — MainActivity call-chain debug.
+        // The Owner 12.0F+3 (release + debug) test
+        // showed 0 onMethodCall logs in the service,
+        // which means EITHER MainActivity never bound
+        // the `opene2ee/vpn` MethodChannel handler
+        // (this method was never called), OR the
+        // handler was bound but Dart never sent a
+        // "start" call. This Log.d fires every time
+        // the Flutter engine attaches to this
+        // activity, so the Owner can grep logcat
+        // for "MainActivity: configureFlutterEngine:
+        // ENTER" and verify the handler registration
+        // path is live. S124-4 audit verifies the
+        // literal.
+        android.util.Log.d(TAG, "configureFlutterEngine: ENTER, " +
+                "registering opene2ee/vpn MethodChannel handler")
+
         // Sprint 11.0D — `opene2ee/vpn` MethodChannel. Owned by
         // MainActivity. The companion form
         // `OpenE2eeVpnService.attachFlutterEngine(engine)` is
@@ -164,6 +181,17 @@ class MainActivity : FlutterActivity() {
             OpenE2eeVpnService.METHOD_CHANNEL,
         ).apply {
             setMethodCallHandler { call, result ->
+                // Sprint 12.0F+4 — MethodChannel handler
+                // log. Pairs with the
+                // onMethodCall: received method= log
+                // in OpenE2eeVpnService. The Owner
+                // greps for "MainActivity: MethodChannel
+                // handler: received method='start'" to
+                // confirm Dart sent the start command
+                // AND that the handler was bound.
+                android.util.Log.d(TAG, "MethodChannel handler: " +
+                        "received method='${call.method}', " +
+                        "delegating to OpenE2eeVpnService.dispatch")
                 OpenE2eeVpnService.dispatch(this@MainActivity, call, result)
             }
         }
@@ -180,6 +208,9 @@ class MainActivity : FlutterActivity() {
         ).apply {
             setMethodCallHandler(::onPermissionsCall)
         }
+        android.util.Log.d(TAG, "configureFlutterEngine: DONE, " +
+                "opene2ee/vpn handler registered, " +
+                "opene2ee/vpn_permissions handler registered")
     }
 
     /**

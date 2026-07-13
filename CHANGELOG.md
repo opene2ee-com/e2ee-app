@@ -4,7 +4,58 @@ All notable changes to the opene2ee app are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] - Sprint 12.0F+3 (VPN routing / network fix: bindProcessToNetwork retry + allowedApps kaldir + ip route dump)
+## [Unreleased] - Sprint 12.0F+4 (MethodChannel call-chain debug: onMethodCall + attachFlutterEngine + Dart print + MainActivity configureFlutterEngine)
+
+### Critical fixes (Owner 12.0F+3 test "durum değişmedi", logcat120f.txt 1387 satır release + 767 satır debug — TÜM breadcrumb 0)
+
+- **Sprint 12.0F+4 - onMethodCall call-chain debug (Debug 1, KRITIK)** - Owner 12.0F+3 release log (1387 satır) + debug log (767 satır) showed 0 breadcrumbs (vpnRoutingState, rebind, DEBUG_MODE, buildVpnBuilder, dispatching flags, writeTcpRstToTun — hepsi 0). Mavis kod analizi: startCapture entry log 0 = startCapture synchronized block'a hiç girmedi = "start" komutu VpnService.onMethodCall'a hiç ulaşmadı. Call chain break noktası bulunmalı. Fix: added entry log + per-branch log + catch log at `onMethodCall` in `OpenE2eeVpnService.kt`. S124-1 audit verifies `onMethodCall: received method='` literal.
+
+- **Sprint 12.0F+4 - attachFlutterEngine / detachFlutterEngine call-chain debug (Debug 2)** - The Owner 12.0F+3 test showed 0 onMethodCall logs, which means EITHER MainActivity never called attachFlutterEngine, OR the companion methodChannel was null when onMethodCall fired. Fix: added `attachFlutterEngine: ENTER, prev Companion.methodChannel=...` + `DONE` logs + `detachFlutterEngine: ENTER, prev methodChannel=...` + `DONE` logs at the instance methods in `OpenE2eeVpnService.kt`. S124-2 audit verifies `attachFlutterEngine: ch=` literal.
+
+- **Sprint 12.0F+4 - Dart-side start() call-chain debug (Debug 3)** - `print()` is stripped in release but PRESERVED in debug APK. Added 3 print breadcrumbs in `vpn_service.dart` start() method: `vpn_service.dart: start() ENTERED, invoking MethodChannel(START)`, `vpn_service.dart: start() invokeMethod returned: $result`, `vpn_service.dart: start() THREW: $e\n$st`. The Owner greps logcat via `adb logcat -d -s flutter:V | Select-String "vpn_service.dart"` to verify the Dart side reached the invokeMethod call. S124-3 audit verifies `vpn_service.dart: start` literal.
+
+- **Sprint 12.0F+4 - MainActivity configureFlutterEngine call-chain debug (Debug 4)** - The Owner 12.0F+3 test showed 0 onMethodCall logs, which means EITHER MainActivity never bound the `opene2ee/vpn` MethodChannel handler (configureFlutterEngine was never called), OR the handler was bound but Dart never sent a "start" call. Fix: added `configureFlutterEngine: ENTER, registering opene2ee/vpn MethodChannel handler` + `DONE` logs + `MethodChannel handler: received method='${call.method}'` log at the inbound handler lambda in `MainActivity.kt`. S124-4 audit verifies `MainActivity: configureFlutterEngine: ENTER` literal.
+
+### Owner's 9-step test akışı (S124 — extends the 12.0F+3 8-step with the call-chain teyit)
+
+Per Owner 12.0F+3 test (1387 satır release + 767 satır debug, "durum değişmedi"), the 8-step test akışı was extended to 9 steps with the call-chain teyit. **KRITIK: 10-15 sn logla kisitli tut, her Log.d onemli (canli debug yok).** The Tag filter is extended from 4 TAG to 5 TAG + flutter:V:
+
+```
+adb logcat -d -s "OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V MainActivity:V" > C:\Users\User\Downloads\logcat120fplus4_v1.txt
+adb logcat -d -s "flutter:V" | Select-String "vpn_service.dart"
+```
+
+  1. VPN KAPALI
+  2. Uygulama force-stop + yeni aç
+  3. 212.64.210.85:443'e ilk istek
+  4. VPN AÇ
+  5. AYNI adrese ikinci istek
+  6. 10 saniye bekle
+  7. **Yeni (S124-4):** `adb logcat -d -s "OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V MainActivity:V" > logcat120fplus4_v1.txt`
+  8. **Yeni (S124-3):** `adb logcat -d -s "flutter:V" | Select-String "vpn_service.dart"` (Dart print'ler debug APK'da görünür)
+  9. Yeni log'u Mavis'e gönder
+
+### Karar matrisi (9-step + call-chain teyit)
+
+- `MainActivity: configureFlutterEngine: ENTER` görünüyorsa → handler register olmuş
+- `MainActivity: MethodChannel handler: received method='start'` görünüyorsa → Dart "start" komutunu göndermiş
+- `OpenE2eeVpn: onMethodCall: received method='start'` görünüyorsa → MainActivity handler doğru delegate etmiş
+- `OpenE2eeVpn: startCapture: entry` görünüyorsa → start çağrısı VpnService'e ulaşmış
+- Hangi adımda koptuysa, o noktadaki breadcrumb eksik → kök neden bulunur
+
+### S124 audit (added in this sprint)
+
+- S124-1: `onMethodCall: received method=` Kotlin dosyasında (grep)
+- S124-2: `attachFlutterEngine: ch=` Kotlin dosyasında (grep)
+- S124-3: `vpn_service.dart: start` Dart dosyasında (grep in mobile/lib)
+- S124-4: `MainActivity: configureFlutterEngine: ENTER` MainActivity.kt'de (grep)
+- Runtime test: 9-step sonrası tüm breadcrumb'lar logda görünmeli (Mavis doğrular)
+
+### Debug APK kullan (önerilen)
+
+R8 kapalı, tüm log'lar + Dart print'ler görünür. `flutter.buildMode=debug` ile build edilir. local.properties `flutter.buildMode=debug` + `flutter build apk --debug` çağrılır.
+
+## [12.0F+3] - 2026-07-13 — Sprint 12.0F+3 (VPN routing / network fix)
 
 ### Critical fixes (Owner 12.0F+2 test "durum değişmedi" — logcat120f.txt 1056 satır)
 

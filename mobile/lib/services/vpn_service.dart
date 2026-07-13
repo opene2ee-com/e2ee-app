@@ -174,9 +174,28 @@ class VpnService {
   /// RESULT_OK from `VpnService.prepare`; if not, the call
   /// throws `PlatformException` with code `vpn_not_prepared`.
   Future<Map<String, Object?>> start() async {
-    final r = await _channel.invokeMethod<Map<Object?, Object?>>('start');
-    _stateCtrl.add(_stateFromMap(r?.cast<String, Object?>()));
-    return (r ?? const {}).cast<String, Object?>();
+    // Sprint 12.0F+4 — Dart-side call-chain debug.
+    // `print()` is stripped in release but PRESERVED in
+    // debug APK, so this breadcrumb is visible in
+    // 12.0F+4-debug (and any subsequent --debug builds).
+    // The Owner greps logcat for "vpn_service.dart:
+    // start" via `adb logcat -d -s flutter:V |
+    // Select-String "vpn_service.dart"` to verify the
+    // Dart side reached the invokeMethod call. S124-3
+    // audit verifies the literal.
+    // ignore: avoid_print
+    print('vpn_service.dart: start() ENTERED, invoking MethodChannel(START)');
+    try {
+      final r = await _channel.invokeMethod<Map<Object?, Object?>>('start');
+      // ignore: avoid_print
+      print('vpn_service.dart: start() invokeMethod returned: $r');
+      _stateCtrl.add(_stateFromMap(r?.cast<String, Object?>()));
+      return (r ?? const {}).cast<String, Object?>();
+    } catch (e, st) {
+      // ignore: avoid_print
+      print('vpn_service.dart: start() THREW: $e\n$st');
+      rethrow;
+    }
   }
 
   /// Stop capture. When [graceful] is true, the service flushes
