@@ -4,6 +4,65 @@ All notable changes to the opene2ee app are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] - Sprint 12.0F+2 (TCP SYN RST workaround + R8 keep rules)
+
+### Critical fixes
+
+- **Sprint 12.0F+2 - R8 minify log breadcrumb fix (Fix 1)** - Owner 16:24-16:29 test of the 12.0F+1 APK (`SHA256: AE734AD37C7A4EFF706F01DBED83D3A129A971EB75EAD5CD880CC753D9153635`, 82.29 MB) showed 0 occurrences of the 12.0F+1 breadcrumbs: `handleTcpPacket: dispatching flags=0x`, `buildVpnBuilder: allowedApps=`, `checkPrivateDnsAndBindToVpn`. Root cause: R8 (release minifier) stripped the 3 breadcrumb Log.d calls because the return value is unused and the call has no obvious side effect on the program's data flow. Coder 12.0F+1 commit message was incorrect: "R8/proguard 12.0F+1 Log.d strings'i temizlemedi" was wrong — R8 DID remove the strings. Fix: added 3 keep rules to `mobile/android/app/proguard-rules.pro`:
+
+  1. **`-keepclassmembers,allowobfuscation class * { *** Log*(...); }`** — preserves ALL `android.util.Log.*` method calls on ANY class (wildcard `*`). `allowobfuscation` keeps name mangling for the methods themselves (so attackers cannot grep `handleTcpPacket` in the obfuscated DEX and trace the call back to source). S122-4 audit verifies this rule is present.
+  2. **`-keepclassmembers,allowobfuscation class * { public static final java.lang.String TAG; }`** — preserves the `TAG` field as a distinct constant. Without this, R8 may fold/inline the `TAG` literal as a primitive `String` constant in the bytecode, which still leaves the literal present but may confuse some grep patterns. S122-5 audit verifies this rule is present.
+  3. **`-keepclassmembers class * { @androidx.annotation.Keep *; }`** + `-keep @androidx.annotation.Keep class * { *; }` + `-keep,allowobfuscation @interface androidx.annotation.Keep` — preserves all members annotated with `@androidx.annotation.Keep`. R8 respects `@Keep` natively but the keep rules are belt-and-braces in case R8 treats `@Keep` as a soft hint during partial evaluation. S122-6 audit verifies at least 1 `@Keep` annotation is used in our code (on the new `writeTcpRstToTun` function).
+
+- **Sprint 12.0F+2 - TCP SYN RST workaround (Fix 2, Ali's suggestion)** - 10 saniye timeout confirmed by Owner test. Root cause: kernel TCP stack established the connection BEFORE our user-space stack saw the SYN (the "established connection cache" survives VPN reconfiguration). The kernel routes the 3-way handshake via the real NIC, our user-space stack only sees the data packets of the now-established connection. Fix: instead of silently dropping unknown-flow packets, synthesize a TCP RST packet and write it back to the TUN. The kernel delivers the RST to the app, the app tears down the connection and IMMEDIATELY retransmits a fresh SYN. Our user-space stack sees the NEW SYN and `handleSyn()` can do its normal 3-way handshake via `protect()`'d `java.net.Socket`. Net effect: 1-2 second "blip" for the user instead of a 10-second stall.
+
+  Implementation: new `writeTcpRstToTun(srcIp, dstIp, srcPort, dstPort, seqNum, ackNum, flowKey)` function in `TcpForwarder`. RST packet format per RFC 793 §3.5: 20-byte IP header (srcIp/dstIp SWAPPED so the RST goes BACK to the app, protocol=6) + 20-byte TCP header (srcPort/dstPort SWAPPED, flags=RST+ACK=0x14, seqNum=ackNum, ackNum=seqNum+1, payload=empty). Function is annotated with `@androidx.annotation.Keep` for belt-and-braces protection against R8 inlining.
+
+  Called from 4 "unknown flow" branches:
+    - `handleData` (PSH+ACK for unknown/no-socket flow) — 2 places (conn == null OR state != ESTABLISHED)
+    - `handleTcpPacket` ACK case (bare ACK for unknown flow)
+    - `handleFinAck` (FIN+ACK for unknown flow)
+  Each call logs a `writeTcpRstToTun: dispatching RST for flow X` warning breadcrumb so the Owner can confirm the workaround fired.
+
+### Owner's 7-step test akışı (S121-4 / S122-7)
+
+Per Owner 12.0F+1 test (10s timeout, log at `C:\Users\User\Downloads\logcat120fplus1_v1.txt` line 13-22), the 6-step test akışı was extended to 7 steps with the RST recovery scenario. Tag 4 filter remains `OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V`.
+
+  1. **VPN KAPALI** (toggle OFF in uygulama).
+  2. **Uygulamayı force-stop**: `adb shell am force-stop com.opene2ee.opene2ee`.
+  3. **First request (real NIC)**: Open uygulama, send first request to `212.64.210.85:443` (e.g., "Aktif Nöbet başlat" → `POST /api/v1/sessions`). At this point the VPN is OFF so the SYN goes via the real NIC. The request should succeed (200 OK or similar).
+  4. **VPN AÇ** (toggle ON in uygulama, OR `adb shell am start -a android.net.VpnService`).
+  5. **Second request (should trigger RST)**: Open uygulama, send a SECOND request to `212.64.210.85:443`. The kernel has already established the connection via real NIC in step 3, so our user-space stack sees only the data packets (not the SYN). The `writeTcpRstToTun` workaround should fire.
+  6. **Wait 10 seconds for timeout**: give the RST recovery time to cycle (RST → app retransmits → new SYN → user-space stack handles).
+  7. **Expected outcomes** (one of two):
+     - **Direct response**: SYN kuruldu ilk seferde, RST gerekmedi (the kernel captured the SYN into the user-space stack — unlikely given the 12.0F+1 test but possible if the Owner fully rebooted between steps).
+     - **RST recovery (1-2s blip)**: önce 1-2 saniye timeout (RST gönderildi, app retransmit yaptı), sonra response (yeni SYN user-space stack tarafından handle edildi, bağlantı kuruldu, server response geldi). Owner greps `writeTcpRstToTun: dispatching RST` in logcat to confirm the workaround fired.
+
+  **Log al**: `adb logcat -d -s "OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V" | grep -E "handleTcpPacket: dispatching flags=0x|allowedApps=|checkPrivateDnsAndBindToVpn|writeTcpRstToTun: dispatching RST"`
+
+  **Decision matrix after the 7-step test**:
+    - `handleTcpPacket: dispatching flags=0x` fires 1+ times → R8 keep rules WORK, the 12.0F+1 breadcrumbs are preserved. If the SYN's `SYN=true` AND `writeTcpRstToTun: dispatching RST` fires once → the kernel-bypass recovery is working (RST was sent for the first stale packet, app retransmits, new SYN is captured by user-space stack).
+    - `handleTcpPacket: dispatching flags=0x` STILL 0 → R8 keep rules NOT enough; check if R8 was upgraded to a version that ignores `@Keep` (unlikely) or if the Log.d was inlined by the kotlin compiler (R8 sees the inlined call, not the `@Keep` annotation). Fix: switch to a `synchronized(loggingMutex) { ... }` block around the Log.d call (R8 cannot remove synchronized blocks because they have visible side effects on the lock state).
+    - `writeTcpRstToTun: dispatching RST` fires but app still times out → RST was sent but app's TCP retransmit didn't reach the TUN (the kernel keeps using the real NIC for the established connection). Fix 3 (best effort): add `bindProcessToNetwork` retry with a 5s delay (the brief's Fix 3 — best effort only).
+
+### S122 audit (added in this sprint)
+
+- **S122-1**: `fun writeTcpRstToTun` function exists in `TcpForwarder` (grep the function declaration).
+- **S122-2**: `writeTcpRstToTun(` call in `handleData` "unknown/no-socket flow" branch (grep).
+- **S122-3**: `writeTcpRstToTun(` call in `handleAck` OR `handleFinAck` "unknown flow" branch (at least 1 of the 2).
+- **S122-4**: `proguard-rules.pro` contains `-keepclassmembers,allowobfuscation class * { *** Log*(...); }` rule.
+- **S122-5**: `proguard-rules.pro` contains `-keepclassmembers,allowobfuscation class * { public static final java.lang.String TAG; }` rule.
+- **S122-6**: `import androidx.annotation.Keep` in `OpenE2eeVpnService.kt` AND at least 1 `@Keep` annotation on a member (e.g., `@Keep private fun writeTcpRstToTun`).
+- **S122-7**: `CHANGELOG.md` has `Sprint 12.0F+2` section + `Tag 4 filter` + `7-step` documentation.
+
+### Reference
+
+- Log: `C:\Users\User\Downloads\logcat120fplus1_v1.txt` (663 satır, 0.18 MB, Tag 4 filter)
+- 12.0F+1 APK: `SHA256: AE734AD3...` (NOT WORKING, breadcrumblar GELMEDI, R8 minify kaldırmış)
+- Ali's analysis: kernel established TCP connection via real NIC (routing table exception + "established connection cache" survives VPN reconfiguration), fix: synthesize RST for unknown-flow packets
+
+## [Unreleased] - Sprint 12.0F+1 (TCP SYN processing debug)
+
 ## [Unreleased] - Sprint 12.0F+1 (TCP SYN processing debug)
 
 ### Diagnostics

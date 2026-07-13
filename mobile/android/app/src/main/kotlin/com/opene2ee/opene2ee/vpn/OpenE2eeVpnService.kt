@@ -154,6 +154,7 @@ import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.annotation.RequiresApi
+import androidx.annotation.Keep
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -4133,6 +4134,20 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
                     Log.d(TAG, "handleTcpPacket: ACK, flow $effectiveFlowKey, ackNum=${tcp.ackNum} (state=${conn.state})")
                 } else {
                     Log.d(TAG, "handleTcpPacket: ACK for unknown flow $effectiveFlowKey; dropping")
+                    // Sprint 12.0F+2 — RST workaround.
+                    // A bare ACK for an unknown flow
+                    // is the most common case: the
+                    // kernel's TCP stack already
+                    // completed the 3-way handshake
+                    // and the server's data packets
+                    // are reaching us as ACKs. Send
+                    // RST so the app retransmits.
+                    writeTcpRstToTun(
+                        srcIp = srcIp, dstIp = dstIp,
+                        srcPort = srcPort, dstPort = dstPort,
+                        seqNum = tcp.seqNum, ackNum = tcp.ackNum,
+                        flowKey = effectiveFlowKey
+                    )
                 }
             }
             else -> {
@@ -4328,10 +4343,36 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
     ) {
         if (conn == null || conn.socket == null) {
             Log.w(TAG, "handleTcpPacket: PSH+ACK for unknown/no-socket flow $flowKey; dropping")
+            // Sprint 12.0F+2 — RST workaround.
+            // The kernel already established the
+            // TCP connection before our user-space
+            // stack saw the SYN (the "established
+            // connection cache" survives VPN
+            // reconfiguration). Send a TCP RST to
+            // the app so it tears down and
+            // retransmits a fresh SYN that our
+            // user-space stack CAN see.
+            writeTcpRstToTun(
+                srcIp = srcIp, dstIp = dstIp,
+                srcPort = srcPort, dstPort = dstPort,
+                seqNum = tcp.seqNum, ackNum = tcp.ackNum,
+                flowKey = flowKey
+            )
             return
         }
         if (conn.state != TcpState.ESTABLISHED) {
             Log.w(TAG, "handleTcpPacket: PSH+ACK in state ${conn.state} for $flowKey; dropping")
+            // Sprint 12.0F+2 — RST workaround (also
+            // for the in-state-but-not-established
+            // case: e.g., a PSH+ACK that arrived
+            // BEFORE the SYN+ACK completed the
+            // handshake).
+            writeTcpRstToTun(
+                srcIp = srcIp, dstIp = dstIp,
+                srcPort = srcPort, dstPort = dstPort,
+                seqNum = tcp.seqNum, ackNum = tcp.ackNum,
+                flowKey = flowKey
+            )
             return
         }
         // Slice + write payload to the real socket.
@@ -4417,6 +4458,19 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
     ) {
         if (conn == null) {
             Log.w(TAG, "handleTcpPacket: FIN+ACK for unknown flow $flowKey; dropping")
+            // Sprint 12.0F+2 — RST workaround.
+            // FIN+ACK for unknown flow = the app
+            // thinks the connection is alive but our
+            // user-space stack has no record. Send
+            // RST so the app's TCP retransmit /
+            // re-establish picks up our user-space
+            // stack on the next attempt.
+            writeTcpRstToTun(
+                srcIp = srcIp, dstIp = dstIp,
+                srcPort = srcPort, dstPort = dstPort,
+                seqNum = tcp.seqNum, ackNum = tcp.ackNum,
+                flowKey = flowKey
+            )
             return
         }
         // Remove from BOTH map slots (primary +
@@ -4818,6 +4872,90 @@ internal class TcpForwarder(private val service: OpenE2eeVpnService) {
         } catch (e: Throwable) {
             Log.w(TAG, "writeToTun: write FAILED for $label: ${e.message}")
         }
+    }
+
+    /**
+     * Sprint 12.0F+2 — TCP RST workaround (Ali's
+     * suggestion). When a PSH+ACK / SYN+ACK / ACK /
+     * FIN+ACK arrives for a flow we don't know
+     * about (tcpConnectionMap miss on BOTH primary
+     * AND reverse key), it means the kernel's TCP
+     * stack already established the connection
+     * BEFORE our user-space stack saw the SYN. This
+     * happens because the kernel's TCP stack is
+     * allowed to keep using the real NIC for
+     * connections it opened before the VPN route
+     * table was installed (the "established
+     * connection cache" survives VPN
+     * reconfiguration). The user-space stack then
+     * sees only the data packets of the
+     * now-established connection and has no way to
+     * inject itself.
+     *
+     * Fix: instead of silently dropping the unknown
+     * packet, synthesize a TCP RST packet and write
+     * it back to the TUN. The kernel will deliver
+     * the RST to the app, the app will tear down the
+     * connection and IMMEDIATELY retransmit a fresh
+     * SYN. Our user-space stack sees the NEW SYN
+     * and handleSyn() can do its normal 3-way
+     * handshake via protect()'d java.net.Socket.
+     * Net effect: a 1-2 second "blip" for the user
+     * instead of a 10-second stall while the kernel
+     * times out.
+     *
+     * RST packet format (RFC 793 §3.5):
+     *   - IP header (20 bytes): srcIp/dstIp SWAPPED
+     *     (so the RST goes BACK to the app), protocol=6
+     *   - TCP header (20 bytes): srcPort/dstPort SWAPPED,
+     *     flags=RST+ACK (0x14), seqNum=ackNum,
+     *     ackNum=seqNum+1
+     *
+     * @Keep is the belt-and-braces annotation in
+     * case R8 minifies the method name or inlines
+     * the function. The proguard-rules.pro
+     * `-keepclassmembers ... Log*(...)` rule also
+     * keeps the Log.d call inside this function.
+     */
+    @Keep
+    private fun writeTcpRstToTun(
+        srcIp: String, dstIp: String,
+        srcPort: Int, dstPort: Int,
+        seqNum: Long, ackNum: Long,
+        flowKey: String
+    ) {
+        // Sprint 12.0F+2 — RST breadcrumb. Logged
+        // BEFORE building the RST packet so the
+        // Owner can confirm the workaround fired
+        // (the breadcrumb is the canonical "RST
+        // dispatched" signal in logcat). R8
+        // would normally strip this Log.d call
+        // (return value unused), but the
+        // proguard-rules.pro `-keepclassmembers ...
+        // Log*(...)` rule preserves it (S122-4).
+        Log.w(TAG, "writeTcpRstToTun: dispatching RST for flow $flowKey (kernel-bypass recovery: $srcIp:$srcPort -> $dstIp:$dstPort, seq=$seqNum, ack=$ackNum)")
+        // Build the RST packet. We swap src/dst so
+        // the RST goes BACK to the app (the app is
+        // the src of the original SYN, the real
+        // server is the dst).
+        val rstPkt = buildIpTcpPacket(
+            srcIp = dstIp,  // SWAP: RST is from the server
+            dstIp = srcIp,  // SWAP: RST is to the app
+            srcPort = dstPort,  // SWAP
+            dstPort = srcPort,  // SWAP
+            // Per RFC 793 §3.5: seqNum = ackNum (the
+            // current send sequence of the receiver),
+            // ackNum = seqNum + 1 (acknowledge the
+            // packet that triggered the RST).
+            seqNum = ackNum,
+            ackNum = seqNum + 1,
+            // RST (0x04) + ACK (0x10) = 0x14. RST+ACK
+            // is the standard response to an
+            // unexpected data packet (per RFC 793).
+            flags = TCP_RST or TCP_ACK,
+            payload = ByteArray(0)
+        )
+        writeToTun(rstPkt, "RST -> app (kernel-bypass recovery, $flowKey)")
     }
 
     /**

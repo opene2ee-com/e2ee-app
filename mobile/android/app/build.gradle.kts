@@ -37,6 +37,18 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Sprint 11.0Z — R8 (release minifier) needs the
+            // Netty `-dontwarn` rules defined in
+            // `proguard-rules.pro`, otherwise it aborts the
+            // release build with "Missing class
+            // org.apache.log4j.Level" and 14 sibling
+            // references. The bundled `proguard-android.txt`
+            // is the AGP default; we layer our keep rules
+            // on top.
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 

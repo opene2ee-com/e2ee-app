@@ -4558,6 +4558,264 @@ def run_s121_check(opene2ee_vpn_service_text, changelog_text):
     return findings
 
 
+def run_s122_check(opene2ee_vpn_service_text, proguard_text, changelog_text):
+    """S122: TCP SYN RST workaround + R8 keep rules (Sprint 12.0F+2).
+
+    Owner 12.0F+1 test (10s timeout, log at
+    C:\\Users\\User\\Downloads\\logcat120fplus1_v1.txt
+    line 13-22) confirmed 0 occurrences of the
+    12.0F+1 breadcrumbs (`handleTcpPacket:
+    dispatching flags=0x`, `buildVpnBuilder:
+    allowedApps=`, `checkPrivateDnsAndBindToVpn`).
+    Two root causes:
+      1. R8 (release minifier) stripped the 3
+         breadcrumb Log.d calls because the
+         return value is unused. Fix: 3 R8
+         keep rules in proguard-rules.pro.
+      2. Kernel TCP stack established the
+         connection BEFORE our user-space
+         stack saw the SYN (the "established
+         connection cache" survives VPN
+         reconfiguration). Fix: synthesize
+         TCP RST for unknown-flow packets
+         (`writeTcpRstToTun` function in
+         TcpForwarder; called from 4
+         "unknown flow" branches).
+
+    The audit strips /* ... */ block comments
+    and // line comments (preserving strings),
+    then checks for the 7 mandatory token
+    substrings (S122-1 through S122-7):
+
+      S122-1: `fun writeTcpRstToTun` function
+        exists in TcpForwarder (the
+        writeTcpRstToTun function declaration
+        in OpenE2eeVpnService.kt).
+
+      S122-2: `writeTcpRstToTun(` call in
+        handleData "unknown/no-socket flow"
+        branch (at least 1 of the 2 calls —
+        conn == null OR state != ESTABLISHED).
+
+      S122-3: `writeTcpRstToTun(` call in
+        handleAck OR handleFinAck "unknown
+        flow" branch (at least 1 of the 2).
+
+      S122-4: proguard-rules.pro contains
+        `-keepclassmembers,allowobfuscation
+        class * { *** Log*(...); }` rule
+        (the Log* keep rule).
+
+      S122-5: proguard-rules.pro contains
+        `-keepclassmembers,allowobfuscation
+        class * { public static final
+        java.lang.String TAG; }` rule (the
+        TAG keep rule).
+
+      S122-6: `import androidx.annotation.Keep`
+        in OpenE2eeVpnService.kt AND at least
+        1 `@Keep` annotation on a member (e.g.,
+        `@Keep private fun writeTcpRstToTun`).
+
+      S122-7: CHANGELOG.md has `Sprint
+        12.0F+2` section + `Tag 4 filter` +
+        `7-step` documentation.
+
+    Sprint 12.0F+2 target: 168 + 1 = 169
+    audit cases total (S122 is the 169th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0F+2 invariant - the "
+            "writeTcpRstToTun function + 4 unknown-flow "
+            "branch calls + @Keep annotation are in this "
+            "file (the TcpForwarder is the runtime path; "
+            "the RST workaround fires for every "
+            "unknown-flow packet to break the kernel's "
+            "established connection cache)."
+        )
+    if proguard_text is None:
+        findings.append(
+            "S122 proguard-rules.pro: file text missing. "
+            "Sprint 12.0F+2 invariant - the 3 R8 keep "
+            "rules (Log* + String TAG + @Keep) are in "
+            "this file (without these rules, R8 strips "
+            "the 12.0F+1 breadcrumbs because the return "
+            "value is unused)."
+        )
+    if changelog_text is None:
+        findings.append(
+            "S122 CHANGELOG.md: file text missing. "
+            "Sprint 12.0F+2 invariant - the 7-step test "
+            "akışı + the RST recovery scenario + the S122 "
+            "audit criteria are documented in the Sprint "
+            "12.0F+2 CHANGELOG section so the Owner has "
+            "the canonical procedure for the next live test."
+        )
+    if opene2ee_vpn_service_text is None or proguard_text is None or changelog_text is None:
+        return findings
+    # Strip /* ... */ block comments.
+    stripped_code = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    stripped_proguard = re.sub(r"/\*[\s\S]*?\*/", "", proguard_text)
+    stripped_changelog = re.sub(r"/\*[\s\S]*?\*/", "", changelog_text)
+    # Strip // line comments (preserving strings).
+    def strip_line_comments(text):
+        lines = []
+        for ln in text.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    code = strip_line_comments(stripped_code)
+    proguard_code = strip_line_comments(stripped_proguard)
+    changelog_code = strip_line_comments(stripped_changelog)
+
+    # S122-1: writeTcpRstToTun function declaration.
+    if "fun writeTcpRstToTun(" not in code:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: missing `fun "
+            "writeTcpRstToTun(` function. Sprint 12.0F+2 "
+            "invariant - the RST workaround synthesizes a "
+            "TCP RST packet (per RFC 793 §3.5) for "
+            "unknown-flow packets so the app tears down "
+            "the connection and retransmits a fresh SYN "
+            "that our user-space stack can handle. Without "
+            "this function, the kernel's 'established "
+            "connection cache' keeps the app on the real "
+            "NIC and our user-space stack never sees the "
+            "SYN — the 10-second timeout symptom."
+        )
+    # S122-2: writeTcpRstToTun call in handleData branch.
+    # Count occurrences of writeTcpRstToTun( in the file.
+    rst_call_count = code.count("writeTcpRstToTun(")
+    if rst_call_count < 2:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: too few "
+            "`writeTcpRstToTun(` calls (found "
+            + str(rst_call_count)
+            + ", need at least 2 — one in handleData "
+            "unknown/no-socket flow branch). Sprint 12.0F+2 "
+            "invariant - the RST workaround MUST fire for "
+            "every unknown-flow PSH+ACK packet. The handleData "
+            "function has 2 unknown branches (conn == null OR "
+            "state != ESTABLISHED) and BOTH must call "
+            "writeTcpRstToTun so the app's TCP retransmit "
+            "cycles back to our user-space stack."
+        )
+    # S122-3: writeTcpRstToTun call in handleAck OR handleFinAck.
+    # The count of writeTcpRstToTun calls already includes
+    # the handleData calls (S122-2) + the function definition
+    # itself (1). The handleAck + handleFinAck calls bring
+    # the total to at least 4 (function def + 2 handleData +
+    # 1 handleAck + 1 handleFinAck).
+    if rst_call_count < 4:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: missing `writeTcpRstToTun(` "
+            "call in handleAck OR handleFinAck. Sprint 12.0F+2 "
+            "invariant - the RST workaround MUST fire for "
+            "ALL 4 unknown-flow branches (PSH+ACK x 2 + ACK + "
+            "FIN+ACK). The total `writeTcpRstToTun(` count "
+            "must be at least 4 (1 function def + 2 handleData "
+            "+ 1 handleAck/handleFinAck)."
+        )
+    # S122-4: Log* keep rule in proguard-rules.pro.
+    if "*** Log*(...)" not in proguard_code:
+        findings.append(
+            "S122 proguard-rules.pro: missing `-keepclassmembers,"
+            "allowobfuscation class * { *** Log*(...); }` rule. "
+            "Sprint 12.0F+2 invariant - the R8 release minifier "
+            "strips `android.util.Log.*` calls when the return "
+            "value is unused (the 12.0F+1 breadcrumbs were stripped "
+            "for this exact reason). This rule preserves all Log.* "
+            "calls on any class so the debug + audit breadcrumbs "
+            "are guaranteed to fire in release."
+        )
+    # S122-5: TAG keep rule in proguard-rules.pro.
+    if "public static final java.lang.String TAG" not in proguard_code:
+        findings.append(
+            "S122 proguard-rules.pro: missing `-keepclassmembers,"
+            "allowobfuscation class * { public static final "
+            "java.lang.String TAG; }` rule. Sprint 12.0F+2 "
+            "invariant - R8 may fold/inline the `TAG` literal "
+            "as a primitive String constant, which still leaves "
+            "the literal present but may confuse some grep "
+            "patterns. This rule keeps the TAG field as a "
+            "distinct constant, guaranteeing the audit grep "
+            "can find it."
+        )
+    # S122-6: @Keep import + at least 1 @Keep usage.
+    if "import androidx.annotation.Keep" not in code:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: missing `import "
+            "androidx.annotation.Keep`. Sprint 12.0F+2 "
+            "invariant - the @Keep annotation is the "
+            "defense-in-depth measure that prevents R8 from "
+            "inlining the writeTcpRstToTun function even if "
+            "R8 is upgraded to a version that ignores the "
+            "proguard-rules.pro keep rules."
+        )
+    keep_count = code.count("@Keep")
+    if keep_count < 1:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: missing `@Keep` "
+            "annotation usage (count="
+            + str(keep_count)
+            + ", need at least 1). Sprint 12.0F+2 invariant - "
+            "the writeTcpRstToTun function MUST be annotated with "
+            "`@Keep` so R8 cannot inline or remove it. The proguard "
+            "keep rules + @Keep annotation are belt-and-braces "
+            "(R8 respects @Keep natively but the keep rules are "
+            "added for partial-evaluation scenarios)."
+        )
+    # S122-7: CHANGELOG.md has Sprint 12.0F+2 + Tag 4 filter + 7-step.
+    if "Sprint 12.0F+2" not in changelog_code:
+        findings.append(
+            "S122 CHANGELOG.md: missing `Sprint 12.0F+2` section. "
+            "Sprint 12.0F+2 invariant - the 7-step test akışı + "
+            "the RST recovery scenario + the S122 audit criteria "
+            "must be documented in the Sprint 12.0F+2 CHANGELOG "
+            "section so the Owner has the canonical procedure for "
+            "the next live test."
+        )
+    if "Tag 4 filter" not in changelog_code and "OpenE2eeVpn:V TcpForwarder:V" not in changelog_code:
+        findings.append(
+            "S122 CHANGELOG.md: missing `Tag 4 filter` (or "
+            "`OpenE2eeVpn:V TcpForwarder:V`) documentation. "
+            "Sprint 12.0F+2 invariant - the 7-step test "
+            "akışı step 7 requires the 4 TAG filter "
+            "(`OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V "
+            "NettyChannelClient:V`) to be documented in the "
+            "CHANGELOG so the Owner can run the canonical "
+            "4 TAG filter on the next live test."
+        )
+    if "7-step" not in changelog_code:
+        findings.append(
+            "S122 CHANGELOG.md: missing `7-step` test akışı "
+            "documentation. Sprint 12.0F+2 invariant - the "
+            "7-step test akışı (extended from the 12.0F+1 "
+            "6-step with the RST recovery scenario) must be "
+            "documented in the Sprint 12.0F+2 CHANGELOG section."
+        )
+    return findings
+
+
 def run_s93_check(opene2ee_vpn_service_text):
     """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
     counter invariant (S93).
@@ -10454,6 +10712,87 @@ cases = [
          "### APK SHA-256 + R8/proguard\n"
          "- APK SHA-256: C8B0038684063E7F460E9A5BC600D60CC08D29A7E0F3E26979F71A3B943D90C2 (12.0F release with proguard-rules.pro + proguardFiles; R8 strict mode no missing classes)\n"
          "- checkPrivateDnsAndBindToVpn() called BEFORE builder.establish() (11.0Y Sprint 98 invariant)\n",
+     ),
+     []),
+    # S122 case (Sprint 12.0F+2 - new) - TCP SYN
+    # RST workaround + R8 keep rules. Owner 12.0F+1
+    # test showed 0 breadcrumbs (R8 stripped them) +
+    # 10s timeout (kernel established TCP via real NIC).
+    # The 12.0F+2 sprint adds writeTcpRstToTun + 3 R8
+    # keep rules. The audit verifies 7 sub-checks:
+    #   S122-1: fun writeTcpRstToTun( in OpenE2eeVpnService.kt
+    #   S122-2: writeTcpRstToTun( called in handleData (>=2 calls)
+    #   S122-3: writeTcpRstToTun( called in handleAck/handleFinAck (>=4 total)
+    #   S122-4: proguard-rules.pro has `*** Log*(...)` keep rule
+    #   S122-5: proguard-rules.pro has `String TAG` keep rule
+    #   S122-6: `import androidx.annotation.Keep` + >=1 @Keep usage
+    #   S122-7: CHANGELOG.md has Sprint 12.0F+2 + Tag 4 filter + 7-step
+    # Total selftest: 168 + 1 = 169.
+    ("S122 PASS (TCP SYN RST workaround + R8 keep rules - writeTcpRstToTun function + 4 unknown-flow branch calls + @Keep annotation + 3 R8 keep rules (Log* + String TAG + @Keep) + Sprint 12.0F+2 CHANGELOG section + 7-step test akisi - regression guard for Sprint 12.0F+2, Owner 16:24 10s timeout)",
+     run_s122_check,
+     (
+         # OpenE2eeVpnService.kt (must include the writeTcpRstToTun function + 4 calls + @Keep)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import androidx.annotation.Keep\n"
+         "class OpenE2eeVpnService {\n"
+         "    internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "        @Keep\n"
+         "        private fun writeTcpRstToTun(srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, seqNum: Long, ackNum: Long, flowKey: String) {\n"
+         "            Log.w(\"TcpForwarder\", \"writeTcpRstToTun: dispatching RST for flow $flowKey\")\n"
+         "        }\n"
+         "        fun handleData(flowKey: String, conn: Any?, srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, seqNum: Long, ackNum: Long) {\n"
+         "            if (conn == null) {\n"
+         "                writeTcpRstToTun(srcIp, dstIp, srcPort, dstPort, seqNum, ackNum, flowKey)\n"
+         "            } else {\n"
+         "                writeTcpRstToTun(srcIp, dstIp, srcPort, dstPort, seqNum, ackNum, flowKey)\n"
+         "            }\n"
+         "        }\n"
+         "        fun handleAck(flowKey: String, conn: Any?, srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, seqNum: Long, ackNum: Long) {\n"
+         "            if (conn == null) {\n"
+         "                writeTcpRstToTun(srcIp, dstIp, srcPort, dstPort, seqNum, ackNum, flowKey)\n"
+         "            }\n"
+         "        }\n"
+         "        fun handleFinAck(flowKey: String, conn: Any?, srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, seqNum: Long, ackNum: Long) {\n"
+         "            if (conn == null) {\n"
+         "                writeTcpRstToTun(srcIp, dstIp, srcPort, dstPort, seqNum, ackNum, flowKey)\n"
+         "            }\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+         # proguard-rules.pro (must include 3 keep rules)
+         "-dontwarn org.apache.log4j.**\n"
+         "-keepclassmembers,allowobfuscation class * {\n"
+         "    *** Log*(...);\n"
+         "}\n"
+         "-keepclassmembers,allowobfuscation class * {\n"
+         "    public static final java.lang.String TAG;\n"
+         "}\n"
+         "-keep,allowobfuscation @interface androidx.annotation.Keep\n"
+         "-keep @androidx.annotation.Keep class * { *; }\n"
+         "-keepclassmembers class * {\n"
+         "    @androidx.annotation.Keep *;\n"
+         "}\n",
+         # CHANGELOG.md (must include Sprint 12.0F+2 + Tag 4 filter + 7-step)
+         "# Changelog\n"
+         "## [Unreleased] - Sprint 12.0F+2 (TCP SYN RST workaround + R8 keep rules)\n"
+         "### Owner's 7-step test akışı (S121-4 / S122-7)\n"
+         "  1. VPN KAPALI\n"
+         "  2. Uygulamayı force-stop\n"
+         "  3. First request (real NIC)\n"
+         "  4. VPN AÇ\n"
+         "  5. Second request (should trigger RST)\n"
+         "  6. Wait 10 seconds for timeout\n"
+         "  7. Expected outcomes (direct response or RST recovery)\n"
+         "  Log al: adb logcat -d -s \"OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V\" (Tag 4 filter)\n"
+         "### S122 audit (added in this sprint)\n"
+         "  S122-1: writeTcpRstToTun function exists in TcpForwarder\n"
+         "  S122-2: writeTcpRstToTun call in handleData unknown/no-socket flow branch (>=2 calls)\n"
+         "  S122-3: writeTcpRstToTun call in handleAck OR handleFinAck unknown flow branch (>=4 total)\n"
+         "  S122-4: proguard-rules.pro contains *** Log*(...) keep rule\n"
+         "  S122-5: proguard-rules.pro contains String TAG keep rule\n"
+         "  S122-6: import androidx.annotation.Keep + at least 1 @Keep usage\n"
+         "  S122-7: CHANGELOG.md has Sprint 12.0F+2 + Tag 4 filter + 7-step\n",
      ),
      []),
   ]   # noqa: E501
