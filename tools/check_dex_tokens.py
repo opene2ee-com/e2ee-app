@@ -1,22 +1,29 @@
-"""Sprint 12.0F+2 DEX token verification (final).
+"""Sprint 12.0F+2 + 12.0F+3 DEX token verification (final).
 
-Verifies the 12.0F+2 fix works:
+Verifies the 12.0F+2 + 12.0F+3 fixes work:
 1. 12.0F+1 breadcrumbs (which R8 stripped) are now preserved
 2. 12.0F+2 new RST function + 4 call sites are in the DEX
-3. Dart AOT snapshot has the 12.0F+2 version string
-4. R8 keep rules preserved Log.d/Log.w call strings
+3. 12.0F+3 new rebind + dump functions + call sites in DEX
+4. Dart AOT snapshot has the 12.0F+3 version string
+5. R8 keep rules preserved Log.d/Log.w call strings
 
 The 12.0F+1 regression test is: 12.0F+1 APK (AE734AD3) had 0
 occurrences of the 3 breadcrumb Log.d calls. The 12.0F+2 fix adds
 3 proguard keep rules + @Keep annotation. After the fix, all
 breadcrumbs + the new RST function + 4 call sites must be in the
 DEX.
+
+The 12.0F+3 fix adds:
+- rebindProcessToNetworkWithRetry function + call site
+- dumpVpnRoutingState function + 500ms post-establish call
+- Commented-out addAllowedApplication (defensive)
+- 3 new "vpnRoutingState:" breadcrumbs (ip rule + ip route + ip addr show tun0)
 """
 import os
 import re
 import sys
 
-WORK = r"C:\repos\e2ee-app-pr-s12citem1\tools\dex-check-12fplus2"
+WORK = r"C:\repos\e2ee-app-pr-s12citem1\tools\dex-check-12fplus3"
 DEX = os.path.join(WORK, "classes.dex")
 DEXDIS = os.path.join(WORK, "dexdis.txt")
 LIBAPP = os.path.join(WORK, "lib", "arm64-v8a", "libapp.so")
@@ -125,15 +132,60 @@ def main():
             print(f"  FAIL: {desc!r} (count={count}, need>={min_count})")
             failures.append((desc, substr, count, min_count))
 
+    # --- 12.0F+3 NEW FEATURES ---
+    print()
+    print("=== 12.0F+3 NEW FEATURES (VPN routing / network fix) ===")
+    s123_checks = [
+        # S123-1: rebindProcessToNetworkWithRetry function
+        ("rebindProcessToNetworkWithRetry", 1, "rebindProcessToNetworkWithRetry function name in DEX string pool"),
+        # S123-2: call site in DEX disassembly (1 def + >=1 call = 2)
+        ("rebindProcessToNetworkWithRetry", 2, "rebindProcessToNetworkWithRetry refs in disassembly (1 def + 1 call)", "dexdis"),
+        # S123 breadcrumbs
+        ("rebindProcessToNetworkWithRetry: starting", 1, "rebind bind start breadcrumb literal"),
+        ("rebindProcessToNetworkWithRetry: 1s elapsed", 1, "rebind 1s retry breadcrumb literal"),
+        ("rebindProcessToNetworkWithRetry: 3s elapsed", 1, "rebind 3s retry breadcrumb literal"),
+        # S123-4: dumpVpnRoutingState function (R8
+        # obfuscates the function name to a single
+        # letter per `allowobfuscation` keep rule).
+        # We verify the function EXISTS by checking
+        # the breadcrumbs it emits (already covered
+        # below) - the 5 `vpnRoutingState:` const-string
+        # references in the dexdump are the proof
+        # the function is in the DEX. We do NOT
+        # require the unobfuscated name to appear.
+        # S123 audit verifies the function name in
+        # the SOURCE file.
+        ("vpnRoutingState: starting ip rule", 1, "dumpVpnRoutingState function exists (verified via 'vpnRoutingState: starting' const-string in dexdump)"),
+        # S123-5: vpnRoutingState breadcrumbs
+        ("vpnRoutingState: ip rule", 1, "vpnRoutingState ip rule breadcrumb"),
+        ("vpnRoutingState: ip route", 1, "vpnRoutingState ip route breadcrumb"),
+        ("vpnRoutingState: ip addr show tun0", 1, "vpnRoutingState ip addr show tun0 breadcrumb"),
+        # buildVpnBuilder DEBUG_MODE log
+        ("DEBUG_MODE all traffic", 1, "buildVpnBuilder DEBUG_MODE breadcrumb"),
+    ]
+    for check in s123_checks:
+        if len(check) == 4:
+            substr, min_count, desc, source = check
+            count = dexdump_text.count(substr) if source == "dexdis" else dex_strings.count(substr)
+        else:
+            substr, min_count, desc = check
+            count = dex_strings.count(substr)
+        if count >= min_count:
+            print(f"  PASS: {desc!r} (count={count})")
+            passes += 1
+        else:
+            print(f"  FAIL: {desc!r} (count={count}, need>={min_count})")
+            failures.append((desc, substr, count, min_count))
+
     # --- VERSION CHECK ---
     print()
     print("=== VERSION CHECK (Dart AOT snapshot) ===")
-    if "12.0F+2" in lib_strings:
-        print(f"  PASS: 12.0F+2 in libapp.so (count={lib_strings.count('12.0F+2')})")
+    if "12.0F+3" in lib_strings:
+        print(f"  PASS: 12.0F+3 in libapp.so (count={lib_strings.count('12.0F+3')})")
         passes += 1
     else:
-        print(f"  FAIL: 12.0F+2 NOT in libapp.so")
-        failures.append(("12.0F+2 version in Dart AOT", "12.0F+2", 0, 1))
+        print(f"  FAIL: 12.0F+3 NOT in libapp.so - rebuild with --dart-define=VERSION_NAME=12.0F+3 --dart-define=VERSION_CODE=1203")
+        failures.append(("12.0F+3 version in Dart AOT", "12.0F+3", 0, 1))
 
     # --- SUMMARY ---
     print()

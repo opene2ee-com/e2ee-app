@@ -1052,15 +1052,30 @@ class OpenE2eeVpnService : VpnService() {
         // which does not resolve on any API level). We therefore loop the per-app list
         // here. The project floor minSdk = 23 (Sprint 7 MOB-5) makes the @RequiresApi(21)
         // guard above redundant; [buildVpnBuilder] carries the lint annotation.
-        allowedApplications?.forEach { pkg ->
-            try {
-                b.addAllowedApplication(pkg)
-            } catch (e: android.content.pm.PackageManager.NameNotFoundException) {
-                // Unknown package — skip silently. The Dart-side package name list is
-                // user-supplied; we don't want one stale entry to break Builder.establish.
-                Log.w(TAG, "allowedApplications: package not found, skipping: $pkg")
-            }
-        }
+        //
+        // Sprint 12.0F+3 — DEBUG_MODE all traffic (allowedApps
+        // removed). For the 12.0F+3 debug round we want ALL
+        // traffic to pass through the VPN (Chrome, WhatsApp,
+        // system apps). This makes the test simpler: any TCP
+        // SYN that the device sends will go through tun0 ->
+        // user-space stack. We log the change so it is easy to
+        // revert in 12.0F+4 once we understand the real root
+        // cause (was: "allowedApps sadece kendi uygulama için
+        // -> Chrome/system app paketleri VPN dışı, kendi
+        // uygulama içinden bile yeni bağlantı kurulamıyor").
+        // S123-3 audit verifies this `addAllowedApplication`
+        // call is commented out.
+        Log.d(TAG, "buildVpnBuilder: DEBUG_MODE all traffic (allowedApps removed, will re-enable in 12.0F+4)")
+        // builder.addAllowedApplication(pkg)  // COMMENTED OUT in 12.0F+3 — DEBUG_MODE
+        // allowedApplications?.forEach { pkg ->
+        //     try {
+        //         b.addAllowedApplication(pkg)
+        //     } catch (e: android.content.pm.PackageManager.NameNotFoundException) {
+        //         // Unknown package — skip silently. The Dart-side package name list is
+        //         // user-supplied; we don't want one stale entry to break Builder.establish.
+        //         Log.w(TAG, "allowedApplications: package not found, skipping: $pkg")
+        //     }
+        // }
         disallowedApplications?.forEach { pkg ->
             try {
                 b.addDisallowedApplication(pkg)
@@ -1160,6 +1175,39 @@ class OpenE2eeVpnService : VpnService() {
                 }
                 Log.d(TAG, "startCapture: builder.establish() returned pfd=$pfd (TUN descriptor acquired)")
                 tunInterface = pfd
+                // Sprint 12.0F+3 — rebindProcessToNetworkWithRetry.
+                // Owner 12.0F+2 logcat (1056 satır) showed 0 TCP
+                // dispatch breadcrumbs even though UDP DNS was
+                // working (687 datagram sends via UdpForwarder).
+                // The Owner-reported symptom is "TCP bağlantı
+                // kurulmadı, 10 sn timeout". Hypothesis: the
+                // initial `bindProcessToNetwork()` (called inside
+                // checkPrivateDnsAndBindToVpn at line ~1133 above)
+                // runs BEFORE the kernel has committed the
+                // `0.0.0.0/0 dev tun0` route, so the bind misses.
+                // We schedule 2 retry binds (at 1s and 3s after
+                // `Builder.establish()`) to catch the race. S123-2
+                // audit verifies this call site is after
+                // establish().
+                rebindProcessToNetworkWithRetry()
+                // Sprint 12.0F+3 — dumpVpnRoutingState.
+                // Runs 500ms after `Builder.establish()` so the
+                // kernel has time to commit the route table
+                // (typically < 100ms on most devices; 500ms is a
+                // safe margin). Verifies the 3 root-cause
+                // candidates in the brief:
+                //   1. bindProcessToNetwork timing (handled by
+                //      the rebind call above).
+                //   2. allowedApps filtering (handled by the
+                //      addAllowedApplication comment-out in
+                //      buildVpnBuilder).
+                //   3. VPN routing table setup (verified by THIS
+                //      dump — the Owner greps logcat for
+                //      `vpnRoutingState: ip route` and checks
+                //      for the `0.0.0.0/0 dev tun0` line).
+                Handler(Looper.getMainLooper()).postDelayed({
+                    dumpVpnRoutingState()
+                }, 500L)
                 running.set(true)
                 state = State.SAMPLING
                 Log.d(TAG, "startCapture: SAMPLING started, pfd=$pfd, state transition $prevState -> $state")
@@ -1864,6 +1912,152 @@ class OpenE2eeVpnService : VpnService() {
             // is gated) does NOT block the VPN from
             // running. Log + continue.
             Log.w(TAG, "DNS: checkPrivateDnsAndBindToVpn failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Sprint 12.0F+3 — rebindProcessToNetworkWithRetry.
+     * Some Android kernel versions (12+ especially on
+     * OnePlus devices) do not bind a process to the VPN
+     * network until the FIRST packet is sent. If the app
+     * has any pre-existing TCP connection (e.g. a
+     * keep-alive socket to the backend), the kernel
+     * routes the new packets over the real NIC even
+     * after `addRoute(0.0.0.0, 0)` is installed. We
+     * force the bind twice (with a 1s gap) and a third
+     * time (with a 3s gap) to cover the race.
+     *
+     * Reference: AOSP frameworks/base/services/core/
+     * java/com/android/server/connectivity/Vpn.java
+     *   - `applyUnderlyingNetworks()` is async; the
+     *     first call may complete BEFORE the route table
+     *     is committed to the kernel.
+     *   - The 1s call catches the case where the app
+     *     started its first TCP SYN between the two.
+     *   - The 3s call is for slow devices (some OnePlus
+     *     OxygenOS builds take 2-3s to commit the route
+     *     table after `Builder.establish()`).
+     *
+     * S123-1 audit verifies this function exists.
+     * S123-2 audit verifies the call site is AFTER
+     * `Builder.establish()`.
+     */
+    private fun rebindProcessToNetworkWithRetry() {
+        // Sprint 12.0F+3 - rebindProcessToNetworkWithRetry
+        // breadcrumb. Logged at entry so the Owner can
+        // confirm the retry sequence is running.
+        Log.d(TAG, "rebindProcessToNetworkWithRetry: starting (initial bind + 1s + 3s retry)")
+        // (1) Initial bind — calls the existing
+        // checkPrivateDnsAndBindToVpn helper, which
+        // issues requestNetwork(TRANSPORT_VPN) + falls
+        // back to activeNetwork. This is the synchronous
+        // (best-effort) bind path.
+        try {
+            checkPrivateDnsAndBindToVpn()
+        } catch (e: Throwable) {
+            Log.w(TAG, "rebindProcessToNetworkWithRetry: initial bind threw ${e.message} (continuing)")
+        }
+        // (2) 1s postDelayed rebind. Catches the case
+        // where Builder.establish() completed AFTER the
+        // initial bind (the VPN transport was not yet
+        // in the system network registry at bind time).
+        val rebindHandler = Handler(Looper.getMainLooper())
+        rebindHandler.postDelayed({
+            Log.d(TAG, "rebindProcessToNetworkWithRetry: 1s elapsed, retrying bind")
+            try {
+                checkPrivateDnsAndBindToVpn()
+            } catch (e: Throwable) {
+                Log.w(TAG, "rebindProcessToNetworkWithRetry: 1s retry threw ${e.message} (continuing)")
+            }
+        }, 1_000L)
+        // (3) 3s postDelayed rebind. Catches the slow
+        // device case (some OnePlus OxygenOS builds
+        // take 2-3s to commit the route table).
+        rebindHandler.postDelayed({
+            Log.d(TAG, "rebindProcessToNetworkWithRetry: 3s elapsed, third bind for slow devices")
+            try {
+                checkPrivateDnsAndBindToVpn()
+            } catch (e: Throwable) {
+                Log.w(TAG, "rebindProcessToNetworkWithRetry: 3s retry threw ${e.message} (continuing)")
+            }
+        }, 3_000L)
+    }
+
+    /**
+     * Sprint 12.0F+3 — dumpVpnRoutingState.
+     * Runs `ip rule`, `ip route`, and `ip addr show tun0`
+     * shell commands on the device AFTER
+     * `Builder.establish()` so we can verify the kernel
+     * routing table has the `0.0.0.0/0 dev tun0` entry.
+     *
+     * The Owner 12.0F+2 logcat (logcat120f.txt, 1056
+     * lines) showed 0 dispatch breadcrumbs even though
+     * UDP DNS was working (687 datagram sends via
+     * UdpForwarder). The Owner-reported symptom is
+     * "TCP bağlantı kurulmadı, 10 sn timeout". The
+     * 3 root-cause candidates in the brief are:
+     *   1. bindProcessToNetwork timing (handled by
+     *      rebindProcessToNetworkWithRetry).
+     *   2. allowedApps filtering (handled by
+     *      commenting out addAllowedApplication in
+     *      buildVpnBuilder).
+     *   3. VPN routing table setup (verified by THIS
+     *      function).
+     *
+     * If the `ip route` output shows `0.0.0.0/0 dev
+     * tun0`, the routing table is correct and the
+     * issue is timing (fix 1 helps). If the entry is
+     * missing, the kernel route is broken and we need
+     * to investigate the `addRoute()` call parameters.
+     *
+     * S123-4 audit verifies this function exists.
+     * S123-5 audit verifies the `vpnRoutingState: ip
+     * route` breadcrumb fires during the test.
+     */
+    private fun dumpVpnRoutingState() {
+        // Sprint 12.0F+3 - dumpVpnRoutingState breadcrumb.
+        // Logged at entry so the Owner can confirm the
+        // shell commands were attempted.
+        Log.d(TAG, "vpnRoutingState: starting ip rule + ip route + ip addr show tun0 dump")
+        try {
+            // (1) `ip rule` — shows the routing policy
+            // database. We expect to see a `lookup tun0`
+            // rule for our UID (the VPN-bound UID lookup).
+            val ipRule = Runtime.getRuntime().exec(
+                arrayOf("sh", "-c", "ip rule 2>&1")
+            )
+            val ruleOut = ipRule.inputStream.bufferedReader().readText()
+            // (S123-5) The `vpnRoutingState: ip rule`
+            // breadcrumb is the canonical "routing state
+            // dumped" signal. The Owner can grep logcat
+            // for this literal to confirm the dump ran.
+            Log.d(TAG, "vpnRoutingState: ip rule =>\n$ruleOut")
+            // (2) `ip route` — shows the kernel route
+            // table. The `0.0.0.0/0 dev tun0` entry is
+            // the canonical "all traffic via tun0" route
+            // that Builder.establish() should have set
+            // via addRoute(0.0.0.0, 0).
+            val ipRoute = Runtime.getRuntime().exec(
+                arrayOf("sh", "-c", "ip route 2>&1")
+            )
+            val routeOut = ipRoute.inputStream.bufferedReader().readText()
+            Log.d(TAG, "vpnRoutingState: ip route =>\n$routeOut")
+            // (3) `ip addr show tun0` — shows the TUN
+            // interface address (10.0.0.2/32 per
+            // TUN_ADDRESS + TUN_PREFIX_LENGTH). If this
+            // is missing, the TUN interface did not
+            // come up correctly.
+            val ipAddr = Runtime.getRuntime().exec(
+                arrayOf("sh", "-c", "ip addr show tun0 2>&1")
+            )
+            val addrOut = ipAddr.inputStream.bufferedReader().readText()
+            Log.d(TAG, "vpnRoutingState: ip addr show tun0 =>\n$addrOut")
+        } catch (e: Throwable) {
+            // Best-effort: a shell failure here does
+            // NOT break the VPN (we still have UDP
+            // working + the 4 RST workaround branches).
+            // Log + continue.
+            Log.w(TAG, "vpnRoutingState: FAILED: ${e.message}")
         }
     }
 

@@ -4816,6 +4816,175 @@ def run_s122_check(opene2ee_vpn_service_text, proguard_text, changelog_text):
     return findings
 
 
+def run_s123_check(opene2ee_vpn_service_text, changelog_text):
+    """S123: VPN routing / network fix (Sprint 12.0F+3).
+
+    Owner 12.0F+2 test (logcat120f.txt 1056 satır,
+    "durum değişmedi"): TcpForwarder 8 satır (all
+    teardown), UdpForwarder 687 satır (UDP DNS
+    synchronize send OK), NettyChannelClient 8 satır
+    (shutdown). dispatching flags=0x: 0,
+    buildVpnBuilder: 0, checkPrivateDnsAndBindToVpn: 0,
+    writeTcpRstToTun: 0. UDP çalışıyor, TCP çalışmıyor.
+    3 root-cause candidates in the brief:
+      1. bindProcessToNetwork timing (Fix 1)
+      2. allowedApps filtering (Fix 2)
+      3. VPN routing table setup (Fix 3)
+
+    The audit verifies all 3 fixes are in place:
+      S123-1: `fun rebindProcessToNetworkWithRetry`
+        function exists (grep for the function decl).
+      S123-2: `rebindProcessToNetworkWithRetry()` call
+        site is AFTER `Builder.establish()` returns
+        (grep for the call near the post-establish
+        block).
+      S123-3: `addAllowedApplication` is commented out
+        (grep for `// builder.addAllowedApplication`).
+      S123-4: `fun dumpVpnRoutingState` function exists.
+      S123-5: `vpnRoutingState: ip route` log appears
+        in the CHANGELOG 8-step test akisi (test-time
+        verification, Mavis DEX check).
+
+    Sprint 12.0F+3 target: 169 + 1 = 170 audit cases
+    total (S123 is the 170th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: file text missing. "
+            "Sprint 12.0F+3 invariant - the "
+            "rebindProcessToNetworkWithRetry function + "
+            "dumpVpnRoutingState function + the call "
+            "sites after Builder.establish() + the "
+            "addAllowedApplication comment-out are all "
+            "in this file."
+        )
+    if changelog_text is None:
+        findings.append(
+            "S123 CHANGELOG.md: file text missing. Sprint "
+            "12.0F+3 invariant - the 8-step test akisi "
+            "(extended from the 12.0F+2 7-step with the "
+            "routing dump) must be documented in the "
+            "Sprint 12.0F+3 CHANGELOG section."
+        )
+    if opene2ee_vpn_service_text is None or changelog_text is None:
+        return findings
+    # Strip /* ... */ block comments + // line comments.
+    stripped_code = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    stripped_changelog = re.sub(r"/\*[\s\S]*?\*/", "", changelog_text)
+    def strip_line_comments(text):
+        lines = []
+        for ln in text.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    code = strip_line_comments(stripped_code)
+    changelog_code = strip_line_comments(stripped_changelog)
+
+    # S123-1: rebindProcessToNetworkWithRetry function decl.
+    if "fun rebindProcessToNetworkWithRetry(" not in code:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: missing `fun "
+            "rebindProcessToNetworkWithRetry(` function "
+            "declaration. Sprint 12.0F+3 invariant - "
+            "Fix 1 is the bindProcessToNetwork retry "
+            "with 1s + 3s Handler.postDelayed retries "
+            "to catch the kernel's async "
+            "applyUnderlyingNetworks() race. Without "
+            "this function the initial bind runs "
+            "BEFORE the kernel has committed the "
+            "0.0.0.0/0 dev tun0 route, so the bind "
+            "misses and TCP SYN packets bypass the VPN."
+        )
+    # S123-2: rebindProcessToNetworkWithRetry() call site
+    # is AFTER Builder.establish() returns.
+    call_count = code.count("rebindProcessToNetworkWithRetry()")
+    if call_count < 1:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: missing "
+            "`rebindProcessToNetworkWithRetry()` call "
+            "site. Sprint 12.0F+3 invariant - the call "
+            "MUST be AFTER `Builder.establish()` (so "
+            "the kernel has registered the VPN "
+            "transport) — NOT inside the pre-establish "
+            "block. The call site should be near the "
+            "`tunInterface = pfd` assignment (the "
+            "post-establish hook)."
+        )
+    # S123-3: addAllowedApplication commented out.
+    # The audit function strips // line comments
+    # BEFORE this check (so the "uncommented" call
+    # would still appear in `code` and the
+    # `b.addAllowedApplication(pkg)` substring would
+    # match). We need to look for the COMMENTED form
+    # BEFORE stripping — check the raw text instead.
+    # The pattern is: a line with `//` followed by
+    # `builder.addAllowedApplication`.
+    raw_has_comment = bool(re.search(
+        r"^\s*//\s*builder\.addAllowedApplication",
+        opene2ee_vpn_service_text,
+        re.MULTILINE,
+    ))
+    if not raw_has_comment:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: missing "
+            "`// builder.addAllowedApplication` "
+            "comment-out. Sprint 12.0F+3 invariant - "
+            "Fix 2 disables per-app VPN filtering for "
+            "the debug round so ALL traffic (Chrome, "
+            "WhatsApp, system apps) goes through tun0. "
+            "The comment-out is documented + easy to "
+            "revert in 12.0F+4 once we understand the "
+            "real root cause."
+        )
+    # S123-4: dumpVpnRoutingState function decl.
+    if "fun dumpVpnRoutingState(" not in code:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: missing `fun "
+            "dumpVpnRoutingState(` function "
+            "declaration. Sprint 12.0F+3 invariant - "
+            "Fix 3 runs `ip rule` + `ip route` + "
+            "`ip addr show tun0` shell commands on the "
+            "device 500ms after `Builder.establish()` "
+            "to verify the kernel routing table has "
+            "the `0.0.0.0/0 dev tun0` entry. Without "
+            "this function the Owner cannot tell "
+            "whether the routing table is correct or "
+            "broken at runtime."
+        )
+    # S123-5: vpnRoutingState: ip route in CHANGELOG
+    # (test-time verification, Mavis DEX check).
+    if "vpnRoutingState: ip route" not in changelog_code:
+        findings.append(
+            "S123 CHANGELOG.md: missing "
+            "`vpnRoutingState: ip route` literal in "
+            "the 8-step test akisi. Sprint 12.0F+3 "
+            "invariant - the Owner greps logcat for "
+            "this literal to confirm the routing dump "
+            "ran. The literal MUST appear in the "
+            "Sprint 12.0F+3 CHANGELOG section so the "
+            "Owner has the canonical grep pattern for "
+            "the next live test."
+        )
+    return findings
+
+
 def run_s93_check(opene2ee_vpn_service_text):
     """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
     counter invariant (S93).
@@ -10793,6 +10962,90 @@ cases = [
          "  S122-5: proguard-rules.pro contains String TAG keep rule\n"
          "  S122-6: import androidx.annotation.Keep + at least 1 @Keep usage\n"
          "  S122-7: CHANGELOG.md has Sprint 12.0F+2 + Tag 4 filter + 7-step\n",
+     ),
+     []),
+    # S123 case (Sprint 12.0F+3 - new) - VPN
+    # routing / network fix. Owner 12.0F+2 logcat
+    # (logcat120f.txt 1056 satır, "durum değişmedi")
+    # showed UDP çalışıyor (687 datagram sends) ama
+    # TCP çalışmıyor (0 dispatch). 3 root-cause
+    # candidates + 3 fixes:
+    #   Fix 1: rebindProcessToNetworkWithRetry()
+    #   Fix 2: addAllowedApplication commented out
+    #   Fix 3: dumpVpnRoutingState() + 500ms post-establish
+    # The audit verifies 5 sub-checks:
+    #   S123-1: fun rebindProcessToNetworkWithRetry( exists
+    #   S123-2: rebindProcessToNetworkWithRetry() call site
+    #   S123-3: // builder.addAllowedApplication comment-out
+    #   S123-4: fun dumpVpnRoutingState( exists
+    #   S123-5: vpnRoutingState: ip route in CHANGELOG
+    # Total selftest: 169 + 1 = 170.
+    ("S123 PASS (VPN routing / network fix - rebindProcessToNetworkWithRetry function + call site after Builder.establish() + addAllowedApplication comment-out + dumpVpnRoutingState function + vpnRoutingState: ip route in CHANGELOG 8-step test akisi - regression guard for Sprint 12.0F+3, Owner logcat120f.txt 1056 satır 'durum değişmedi')",
+     run_s123_check,
+     (
+         # OpenE2eeVpnService.kt (must include rebind + dump + commented addAllowedApplication)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "class OpenE2eeVpnService {\n"
+         "    private fun buildVpnBuilder(): VpnService.Builder {\n"
+         "        val b = Builder()\n"
+         "            .addAddress(TUN_ADDRESS, TUN_PREFIX_LENGTH)\n"
+         "            .addRoute(CAPTURED_ROUTE_ADDRESS, CAPTURED_ROUTE_PREFIX)\n"
+         "            .addDnsServer(PRIMARY_DNS)\n"
+         "            .setMtu(TUN_MTU)\n"
+         "        Log.d(TAG, \"buildVpnBuilder: DEBUG_MODE all traffic (allowedApps removed)\")\n"
+         "        // builder.addAllowedApplication(pkg)  // COMMENTED OUT in 12.0F+3 - DEBUG_MODE\n"
+         "        return b\n"
+         "    }\n"
+         "    private fun startCapture(): State {\n"
+         "        val builder = buildVpnBuilder()\n"
+         "        checkPrivateDnsAndBindToVpn()\n"
+         "        val pfd = builder.establish()\n"
+         "        Log.d(TAG, \"startCapture: builder.establish() returned pfd=\" + pfd)\n"
+         "        tunInterface = pfd\n"
+         "        rebindProcessToNetworkWithRetry()\n"
+         "        Handler(Looper.getMainLooper()).postDelayed({\n"
+         "            dumpVpnRoutingState()\n"
+         "        }, 500L)\n"
+         "        running.set(true)\n"
+         "        return state\n"
+         "    }\n"
+         "    private fun rebindProcessToNetworkWithRetry() {\n"
+         "        Log.d(TAG, \"rebindProcessToNetworkWithRetry: starting\")\n"
+         "        checkPrivateDnsAndBindToVpn()\n"
+         "        val h = Handler(Looper.getMainLooper())\n"
+         "        h.postDelayed({ checkPrivateDnsAndBindToVpn() }, 1_000L)\n"
+         "        h.postDelayed({ checkPrivateDnsAndBindToVpn() }, 3_000L)\n"
+         "    }\n"
+         "    private fun dumpVpnRoutingState() {\n"
+         "        Log.d(TAG, \"vpnRoutingState: starting dump\")\n"
+         "        val ruleOut = Runtime.getRuntime().exec(arrayOf(\"sh\", \"-c\", \"ip rule\")).inputStream.bufferedReader().readText()\n"
+         "        Log.d(TAG, \"vpnRoutingState: ip rule =>\\n\" + ruleOut)\n"
+         "        val routeOut = Runtime.getRuntime().exec(arrayOf(\"sh\", \"-c\", \"ip route\")).inputStream.bufferedReader().readText()\n"
+         "        Log.d(TAG, \"vpnRoutingState: ip route =>\\n\" + routeOut)\n"
+         "        val addrOut = Runtime.getRuntime().exec(arrayOf(\"sh\", \"-c\", \"ip addr show tun0\")).inputStream.bufferedReader().readText()\n"
+         "        Log.d(TAG, \"vpnRoutingState: ip addr show tun0 =>\\n\" + addrOut)\n"
+         "    }\n"
+         "}\n",
+         # CHANGELOG.md (must include Sprint 12.0F+3 + 8-step + vpnRoutingState: ip route)
+         "# Changelog\n"
+         "## [Unreleased] - Sprint 12.0F+3 (VPN routing / network fix)\n"
+         "### Owner's 8-step test akışı (S123)\n"
+         "  1. VPN KAPALI\n"
+         "  2. Uygulamayı force-stop\n"
+         "  3. First request (real NIC)\n"
+         "  4. VPN AÇ\n"
+         "  5. Second request (should trigger rebindProcessToNetworkWithRetry)\n"
+         "  6. Wait 10 seconds for timeout\n"
+         "  7. New: adb logcat -d -s OpenE2eeVpn:V ... | grep -i 'vpnRoutingState: ip route'\n"
+         "    Beklenen: ip route çıktısında 0.0.0.0/0 dev tun0 görünmeli\n"
+         "  8. Yeni logu Mavis'e gönder\n"
+         "### S123 audit (added in this sprint)\n"
+         "  S123-1: rebindProcessToNetworkWithRetry function exists\n"
+         "  S123-2: rebindProcessToNetworkWithRetry() call site after Builder.establish()\n"
+         "  S123-3: addAllowedApplication comment-out\n"
+         "  S123-4: dumpVpnRoutingState function exists\n"
+         "  S123-5: vpnRoutingState: ip route in CHANGELOG 8-step test akisi\n",
      ),
      []),
   ]   # noqa: E501

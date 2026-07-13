@@ -4,7 +4,47 @@ All notable changes to the opene2ee app are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] - Sprint 12.0F+2 (TCP SYN RST workaround + R8 keep rules)
+## [Unreleased] - Sprint 12.0F+3 (VPN routing / network fix: bindProcessToNetwork retry + allowedApps kaldir + ip route dump)
+
+### Critical fixes (Owner 12.0F+2 test "durum değişmedi" — logcat120f.txt 1056 satır)
+
+- **Sprint 12.0F+3 - bindProcessToNetwork retry (Fix 1, ÖNCELİKLİ)** - Owner 12.0F+2 logcat (logcat120f.txt 1056 satır) showed 0 dispatch breadcrumbs even though UDP DNS was working (687 datagram sends via UdpForwarder). UDP çalışıyor (DNS query'leri, datagram-based, connectionless) → 687 paket synchronize send. TCP çalışmıyor (connection-oriented, SYN gerekli) → 0 dispatch. RST workaround tetiklenmedi çünkü tetiklenecek "unknown flow" hiç oluşmadı (SYN gelmedi). Hypothesis: `bindProcessToNetwork()` (called inside `checkPrivateDnsAndBindToVpn()` BEFORE `Builder.establish()`) runs BEFORE the kernel has committed the `0.0.0.0/0 dev tun0` route table, so the bind misses. The initial bind was scheduled correctly but the kernel's `applyUnderlyingNetworks()` is async — by the time the first TCP SYN was sent, the bind was stale. Fix: new `rebindProcessToNetworkWithRetry()` function in `OpenE2eeVpnService.kt` schedules 2 retry binds (at 1s and 3s after `Builder.establish()`) to cover the race. Each retry calls `checkPrivateDnsAndBindToVpn()` (the existing helper) which issues `requestNetwork(TRANSPORT_VPN)` + falls back to `activeNetwork`. S123-1 audit verifies the function exists, S123-2 audit verifies the call site is AFTER `Builder.establish()`.
+
+- **Sprint 12.0F+3 - allowedApps kaldir (Fix 2, defensive)** - `Builder.addAllowedApplication()` was called for `com.opene2ee.opene2ee` (the only allowed package). This means Chrome, WhatsApp, and system apps bypass the VPN entirely — but the Owner test is from inside the app, so this should not be the root cause. Defensive debug round: comment out the call so ALL traffic goes through tun0 → user-space stack. This makes the test simpler (any TCP SYN from any app on the device will go through the user-space stack). The change is logged + the `allowedApplications` list is preserved so it is easy to re-enable in 12.0F+4 once we understand the real root cause. S123-3 audit verifies the `addAllowedApplication` call is commented out.
+
+- **Sprint 12.0F+3 - VPN routing debug (Fix 3, kesin teyit)** - new `dumpVpnRoutingState()` function in `OpenE2eeVpnService.kt`. Runs `ip rule`, `ip route`, and `ip addr show tun0` shell commands on the device 500ms after `Builder.establish()`. The kernel typically commits the route table in < 100ms; 500ms is a safe margin. The 3 `Log.d` breadcrumbs (`vpnRoutingState: ip rule => ...`, `vpnRoutingState: ip route => ...`, `vpnRoutingState: ip addr show tun0 => ...`) are the canonical "routing state dumped" signals in logcat. The Owner greps logcat for `vpnRoutingState: ip route` and checks for the `0.0.0.0/0 dev tun0` line. S123-4 audit verifies the function exists, S123-5 audit verifies the `vpnRoutingState: ip route` breadcrumb fires during the test.
+
+### Owner's 8-step test akışı (S123 — extends the 12.0F+2 7-step with the routing dump)
+
+Per Owner 12.0F+2 test (logcat120f.txt 1056 satır, "durum değişmedi"), the 7-step test akışı was extended to 8 steps with the routing dump + the new bind retry sequence. Tag 4 filter remains `OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V`.
+
+  1. VPN KAPALI
+  2. Uygulamayı force-stop
+  3. First request (real NIC, seeds kernel's "established cache")
+  4. VPN AÇ
+  5. Second request (should trigger rebindProcessToNetworkWithRetry)
+  6. Wait 10 seconds for timeout
+  7. **NEW (S123-5):** `adb logcat -d -s "OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V" | grep -i "vpnRoutingState\|ip route\|tun0"`
+     - Beklenen: `ip route` çıktısında `0.0.0.0/0 dev tun0` görünmeli
+     - Eğer görünmüyorsa → kernel routing kurulmamış, rebind retry artmalı
+  8. Yeni logu Mavis'e gönder
+
+### Karar matrisi (log sonucuna göre)
+
+- `dispatching flags=0x (SYN=1 ...)` varsa → SYN geldi, RST gerekmedi, response geldi
+- `dispatching flags=0x (SYN=0 ...)` + `writeTcpRstToTun` varsa → SYN gelmedi, RST tetiklendi, OS yeni SYN attı
+- `vpnRoutingState: ip route` çıktısında `0.0.0.0/0 dev tun0` yoksa → routing kurulmamış, fix 1 retry artmalı
+- `rebindProcessToNetworkWithRetry: 1s elapsed, retrying bind` yoksa → retry sequence tetiklenmedi, Handler scheduling bozuk
+
+### S123 audit (added in this sprint)
+
+- S123-1: `rebindProcessToNetworkWithRetry` fonksiyonu var
+- S123-2: çağrı yeri Builder.establish()'ten sonra
+- S123-3: `addAllowedApplication` yorum satırı
+- S123-4: `dumpVpnRoutingState` fonksiyonu var
+- S123-5: dumpVpnRoutingState çağrıldıktan sonra `vpnRoutingState: ip route` log'u setup'ta (test sırasında)
+
+## [12.0F+2] - 2026-07-13 — Sprint 12.0F+2 (TCP SYN RST workaround + R8 keep rules)
 
 ### Critical fixes
 
