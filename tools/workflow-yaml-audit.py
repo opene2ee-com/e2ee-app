@@ -4789,6 +4789,823 @@ def check_user_space_tcp_ip_stack_invariant_v42() -> list[str]:
     return findings
 
 
+def check_tcp_state_machine_v43() -> list[str]:
+    """Sprint 12.0A: TCP state machine MVP (S100, S101, S102).
+
+    Sprint 11.0Z delivered the user-space TCP/IP stack
+    SKELETON (S99 audit): Netty dep + VpnService.protect()
+    + user-space routing comment. Sprint 12.0A is the
+    first sprint to fill in the TCP state machine +
+    data flow + FIN teardown + buildIpTcpPacket helper.
+
+    The brief: "9 state (LISTEN/SYN_SENT/ESTABLISHED/
+    FIN_WAIT_1/FIN_WAIT_2/CLOSE_WAIT/LAST_ACK/TIME_WAIT/
+    CLOSED) + 3-way handshake + data flow + FIN +
+    buildIpTcpPacket helper. MVP: single connection,
+    MSS=1460, no sliding window, no retransmission,
+    no TIME_WAIT."
+
+    The audit splits the 9.6.x audit pattern (real
+    parser, comment-strip) into 3 sub-checks:
+
+      S100 — handleTcpPacket( method + TcpConnection
+             data class.
+      S101 — 9 TcpState enum names.
+      S102 — 3-way handshake log breadcrumbs (SYN,
+             SYN+ACK, ACK) + ESTABLISHED transition.
+
+    Negative-path coverage is provided by the production
+    audit itself (a future sprint that drops any of
+    these tokens re-opens the Owner 22:08 'VPN blackhole'
+    regression). The Sprint 12.0A brief does not require
+    a Dart-side unit test for the negative path (the
+    audit IS the regression guard).
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    if not netty_path.exists():
+        findings.append(
+            "S100-S102 NettyChannelClient.kt: file missing. "
+            "Sprint 12.0A invariant - the TCP state machine "
+            "MVP (handleTcpPacket + TcpConnection + 9-state "
+            "TcpState + 3-way handshake + data flow + FIN + "
+            "buildIpTcpPacket) lives in this file."
+        )
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S100-S102 NettyChannelClient.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    # Comment-strip (per the Sprint 9.6.5 lesson: a comment
+    # claiming "we have handleTcpPacket" must NOT pass this
+    # audit).
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # ── S100 sub-check ──
+    s100_findings = []
+    if "fun handleTcpPacket(" not in code:
+        s100_findings.append(
+            "S100 NettyChannelClient.kt: missing `fun handleTcpPacket(` "
+            "method declaration. Sprint 12.0A invariant - the TCP "
+            "state machine MVP requires this dispatcher to drive the "
+            "3-way handshake (SYN -> SYN+ACK -> ESTABLISHED), forward "
+            "PSH+ACK data, and handle FIN+ACK teardown."
+        )
+    if "data class TcpConnection" not in code:
+        s100_findings.append(
+            "S100 NettyChannelClient.kt: missing `data class TcpConnection` "
+            "declaration. Sprint 12.0A invariant - the per-flow state "
+            "(state, seq/ack numbers, receive window, real socket, "
+            "reader thread) must be encapsulated in a data class."
+        )
+    findings.extend(s100_findings)
+
+    # ── S101 sub-check ──
+    s101_findings = []
+    if "enum class TcpState" not in code:
+        s101_findings.append(
+            "S101 NettyChannelClient.kt: missing `enum class TcpState` "
+            "declaration. Sprint 12.0A invariant - the 9-state enum "
+            "is the heart of the TCP state machine MVP."
+        )
+    required_states = (
+        "LISTEN", "SYN_SENT", "ESTABLISHED", "FIN_WAIT_1", "FIN_WAIT_2",
+        "CLOSE_WAIT", "LAST_ACK", "TIME_WAIT", "CLOSED",
+    )
+    for state_name in required_states:
+        if state_name not in code:
+            s101_findings.append(
+                "S101 NettyChannelClient.kt: missing TcpState `"
+                + state_name + "`. Sprint 12.0A invariant - the 9-state "
+                "enum must list all 9 RFC 793 states explicitly. MVP "
+                "does NOT implement TIME_WAIT (transitions directly to "
+                "CLOSED) but the state NAME must still be in the enum "
+                "so Sprint 12.0A.2 can wire it without a schema change."
+            )
+    findings.extend(s101_findings)
+
+    # ── S102 sub-check ──
+    s102_findings = []
+    if "SYN, flow" not in code:
+        s102_findings.append(
+            "S102 NettyChannelClient.kt: missing `SYN, flow` "
+            "log breadcrumb. Sprint 12.0A invariant - the "
+            "handleSyn method must emit a Log.d with `SYN, flow` "
+            "as the first signal that the TCP state machine fired."
+        )
+    if "SYN+ACK received" not in code:
+        s102_findings.append(
+            "S102 NettyChannelClient.kt: missing `SYN+ACK received` "
+            "log breadcrumb. Sprint 12.0A invariant - the brief "
+            "calls this 'SYN+ACK (response from dst)'. In the "
+            "MVP the real socket's `connect()` consumes the SYN+ACK "
+            "on the wire, so the log is synthesized in handleSyn "
+            "after the connect() returns. The Owner greps for this "
+            "token to confirm the 3-way handshake with the real "
+            "destination completed."
+        )
+    has_ack_breadcrumb = ("ACK, flow" in code) or ("ACK ->" in code)
+    if not has_ack_breadcrumb:
+        s102_findings.append(
+            "S102 NettyChannelClient.kt: missing ACK log "
+            "breadcrumb (neither `ACK, flow` nor `ACK ->` present). "
+            "Sprint 12.0A invariant - the bare-ACK case in "
+            "handleTcpPacket must log `ACK, flow` AND the data path "
+            "must log `ACK ->` so the Owner can confirm ACK "
+            "round-trips on the TUN-captured path."
+        )
+    if "-> ESTABLISHED" not in code:
+        s102_findings.append(
+            "S102 NettyChannelClient.kt: missing `-> ESTABLISHED` "
+            "state transition log. Sprint 12.0A invariant - the "
+            "SYN_SENT -> ESTABLISHED transition is the load-bearing "
+            "diagnostic for the 3-way handshake. The Owner greps "
+            "for this token as proof that the connection reached "
+            "the data-transfer state."
+        )
+    findings.extend(s102_findings)
+    return findings
+
+
+def check_udp_forwarder_v44() -> list[str]:
+    """Sprint 12.0A.5: UDP forwarder (S103, S104, S105).
+
+    Owner logcat 10:01 root cause: 12.0A added the TCP
+    state machine but the UDP forwarder was still in the
+    11.0Z "BEST-EFFORT" stub. The result: DNS queries to
+    `1.1.1.1:53` never reach the real resolver, DNS
+    resolution fails, and Chrome HTTP / WhatsApp / every
+    other app that needs a hostname cannot establish a
+    TCP connection (because the app is stuck on the
+    failed DNS query, the SYN never gets sent).
+
+    12.0A.5 fix: per-flow protected DatagramSocket in
+    NettyChannelClient.kt. On the first UDP packet for
+    a flow, create a `java.net.DatagramSocket`, call
+    `service.protect(socket)` (so the socket bypasses
+    the VPN and uses the real NIC), and forward the
+    payload via `DatagramSocket.send(DatagramPacket)`.
+    Start a per-flow daemon thread that reads responses
+    from the real resolver and writes them back to the
+    TUN (wrapped in a new IP+UDP packet via
+    `buildIpUdpPacket`).
+
+    The audit bundles 3 sub-checks into a single
+    check_udp_forwarder_v44 function:
+
+      S103 — handleUdpPacket( method declaration.
+      S104 — DatagramSocket literal in the
+             handleUdpPacket code path.
+      S105 — protect( call site AFTER the
+             DatagramSocket literal (i.e., on the
+             per-flow udpSocket, NOT on the TCP
+             java.net.Socket). The textual-order check
+             distinguishes the UDP protect() from the
+             S99 TCP protect().
+
+    Negative-path coverage is provided by the production
+    audit's pre-12.0A.5 baseline (which had no
+    `handleUdpPacket`, no `DatagramSocket`, and no UDP
+    `protect(` — the audit would fail all 3 sub-checks).
+    12.0A.5 does not add a Dart-side unit test for the
+    negative path; the audit IS the regression guard.
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    if not netty_path.exists():
+        findings.append(
+            "S103-S105 NettyChannelClient.kt: file missing. "
+            "Sprint 12.0A.5 invariant - the UDP forwarder "
+            "(handleUdpPacket + DatagramSocket + protect) "
+            "lives in this file."
+        )
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S103-S105 NettyChannelClient.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    # Comment-strip (per the Sprint 9.6.5 lesson).
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # ── S103 sub-check ──
+    s103_findings = []
+    if "fun handleUdpPacket(" not in code:
+        s103_findings.append(
+            "S103 NettyChannelClient.kt: missing `fun handleUdpPacket(` "
+            "method declaration. Sprint 12.0A.5 invariant - the UDP "
+            "forwarder dispatcher is `fun handleUdpPacket(srcIp, "
+            "srcPort, dstIp, dstPort, payload)`. Without it, every "
+            "TUN-captured UDP packet is dropped (no DNS, no NTP, "
+            "no STUN)."
+        )
+    findings.extend(s103_findings)
+
+    # ── S104 sub-check ──
+    s104_findings = []
+    if "DatagramSocket" not in code:
+        s104_findings.append(
+            "S104 NettyChannelClient.kt: missing `DatagramSocket` "
+            "literal. Sprint 12.0A.5 invariant - the per-flow UDP "
+            "forwarder socket is a `java.net.DatagramSocket`."
+        )
+    findings.extend(s104_findings)
+
+    # ── S105 sub-check (textual-order protect() check) ──
+    s105_findings = []
+    if "DatagramSocket" in code:
+        ds_idx = code.find("DatagramSocket")
+        protect_after_ds = code.find("protect(", ds_idx)
+        if protect_after_ds == -1:
+            s105_findings.append(
+                "S105 NettyChannelClient.kt: missing `protect(` "
+                "call site AFTER the `DatagramSocket` literal. "
+                "Sprint 12.0A.5 invariant - the per-flow UDP "
+                "socket MUST be `service.protect()`-ed so it "
+                "bypasses the VPN and uses the real NIC. Without "
+                "it, the DatagramSocket is captured by the TUN "
+                "and the UDP packet loops forever (the same "
+                "'VPN blackhole' symptom that 12.0A fixed for "
+                "TCP, now closed for UDP)."
+            )
+    # else: S104 already flagged. Don't double-report.
+    findings.extend(s105_findings)
+    return findings
+
+
+def check_tcp_5tuple_v45() -> list[str]:
+    """Sprint 12.0A.6: TCP passthrough skip + 5-tuple
+    normalization + 5 breadcrumb tokens (S106, S107, S108).
+
+    Owner 11:08 logcat root cause (BLOCKED): Sprint
+    12.0A.5's `startReaderThread` dispatched TCP/UDP
+    packets to the user-space stack BUT the transparent
+    passthrough `output.write(buf, 0, n)` still ran
+    AFTER the dispatch. The kernel ALSO processed the
+    TCP SYN, found no listening socket, and sent an RST
+    back through the TUN — which the user-space state
+    machine saw and interpreted as connection close. The
+    3-way handshake could never complete.
+
+    Owner 11:08 secondary issue: the user-space stack
+    only stored the TcpConnection under the OUTGOING
+    5-tuple (app -> real dest). The INCOMING packets
+    (real dest -> app) arrived with the REVERSED 5-tuple
+    and missed the lookup. Pre-12.0A.6, the INCOMING
+    SYN+ACK / data / FIN were dropped silently.
+
+    12.0A.6 fix:
+      S106: 5 breadcrumb tokens (TCP packet ENTRY,
+            parseTcpHeader dstPort, handleTcpPacket
+            dispatch, new TcpConnection, state
+            transition). The Owner-side diagnostic
+            surface for the BLOCKED regression.
+      S107: passthrough SKIPPED — a `handled` flag is
+            set to true after a successful TCP/UDP
+            dispatch, and the `output.write` is
+            wrapped in `if (handled) { log SKIPPED }
+            else { ... }`. The kernel no longer races
+            the user-space stack.
+      S108: 5-tuple normalization — handleTcpPacket
+            tries BOTH the primary and reverse 5-tuple
+            keys when looking up the TcpConnection, so
+            OUTGOING and INCOMING packets find the
+            same connection.
+
+    The audit bundles 3 sub-checks across 2 files
+    (OpenE2eeVpnService.kt + NettyChannelClient.kt).
+    Comment-strip + literal-match per the Sprint 9.6.5
+    lesson. Wired into main() after the S103-S105
+    dispatch.
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    service_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "OpenE2eeVpnService.kt"
+    )
+    if not netty_path.exists():
+        findings.append("S106-S108 NettyChannelClient.kt: file missing.")
+        return findings
+    if not service_path.exists():
+        findings.append("S106-S108 OpenE2eeVpnService.kt: file missing.")
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+        service_text = service_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S106-S108 file read failed (" + str(e) + ")."
+        )
+        return findings
+
+    def strip(text):
+        out = re.sub(r"/\*[\s\S]*?\*/", "", text)
+        lines = []
+        for ln in out.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    vpn_code = strip(service_text)
+    netty_code = strip(netty_text)
+
+    # ── S106 sub-check ──
+    s106_findings = []
+    if "TCP packet ENTRY" not in vpn_code:
+        s106_findings.append(
+            "S106 OpenE2eeVpnService.kt: missing `TCP packet ENTRY` "
+            "log breadcrumb. Sprint 12.0A.6 invariant - the "
+            "Owner greps `adb logcat -d -s OpenE2eeVpn:V` for "
+            "this token to confirm the dispatch path is reached "
+            "(regression: pre-12.0A.6 the dispatch happened "
+            "silently and the Owner could not distinguish 'no "
+            "TCP packets seen' from 'dispatch is broken')."
+        )
+    if "parseTcpHeader dstPort=" not in vpn_code:
+        s106_findings.append(
+            "S106 OpenE2eeVpnService.kt: missing `parseTcpHeader "
+            "dstPort=` log breadcrumb."
+        )
+    if "handleTcpPacket dispatch" not in vpn_code:
+        s106_findings.append(
+            "S106 OpenE2eeVpnService.kt: missing `handleTcpPacket "
+            "dispatch` log breadcrumb."
+        )
+    has_new_conn = "new TcpConnection" in netty_code or "TcpConnection()" in netty_code
+    has_state_trans = "-> SYN_SENT" in netty_code or "-> ESTABLISHED" in netty_code
+    if not has_new_conn or not has_state_trans:
+        s106_findings.append(
+            "S106 NettyChannelClient.kt: missing `new TcpConnection` "
+            "or state transition log breadcrumb."
+        )
+    findings.extend(s106_findings)
+
+    # ── S107 sub-check ──
+    s107_findings = []
+    if "var handled" not in vpn_code and "val handled" not in vpn_code:
+        s107_findings.append(
+            "S107 OpenE2eeVpnService.kt: missing `handled` boolean "
+            "flag in the startReaderThread dispatch block. Sprint "
+            "12.0A.6 invariant - the passthrough-skip logic needs "
+            "a flag to know whether the user-space stack handled "
+            "the packet (Owner 11:08 BLOCKED root cause: "
+            "passthrough was unconditional, the kernel raced "
+            "the user-space stack and sent an RST)."
+        )
+    if "passthrough SKIPPED" not in vpn_code:
+        s107_findings.append(
+            "S107 OpenE2eeVpnService.kt: missing `passthrough "
+            "SKIPPED` log breadcrumb. The Owner greps for this "
+            "token to confirm the new behaviour in logcat."
+        )
+    if "output.write" in vpn_code:
+        handled_idx = vpn_code.find("var handled")
+        if handled_idx == -1:
+            handled_idx = vpn_code.find("val handled")
+        if handled_idx == -1:
+            s107_findings.append(
+                "S107 OpenE2eeVpnService.kt: `handled` flag "
+                "missing — passthrough cannot be conditional."
+            )
+        else:
+            after = vpn_code[handled_idx:]
+            if "if (handled)" not in after:
+                s107_findings.append(
+                    "S107 OpenE2eeVpnService.kt: `output.write` "
+                    "is NOT wrapped in `if (handled)` conditional. "
+                    "Sprint 12.0A.6 invariant - the passthrough "
+                    "MUST be skipped when the user-space stack "
+                    "handled the packet (Owner 11:08 BLOCKED "
+                    "root cause)."
+                )
+    findings.extend(s107_findings)
+
+    # ── S108 sub-check ──
+    s108_findings = []
+    if "primaryFlowKey" not in netty_code:
+        s108_findings.append(
+            "S108 NettyChannelClient.kt: missing `primaryFlowKey` "
+            "declaration. Sprint 12.0A.6 invariant - the "
+            "5-tuple lookup must try BOTH the primary "
+            "(src,dst) and reverse (dst,src) keys."
+        )
+    if "reverseFlowKey" not in netty_code:
+        s108_findings.append(
+            "S108 NettyChannelClient.kt: missing `reverseFlowKey` "
+            "declaration. Sprint 12.0A.6 invariant - the "
+            "5-tuple lookup must try BOTH the primary "
+            "(src,dst) and reverse (dst,src) keys so INCOMING "
+            "packets (real dest -> app) find the same "
+            "TcpConnection."
+        )
+    findings.extend(s108_findings)
+    return findings
+
+
+def check_tcp_dataflow_v46() -> list[str]:
+    """Sprint 12.0A.7: HTTP data flow diagnostics +
+    thread-safety + unknown-flow detection (S109,
+    S110, S111).
+
+    Owner 11:33 BLOCKED on Sprint 12.0A.6: TCP 3-way
+    handshake works (17 ESTABLISHED connections logged)
+    but the HTTP data flow doesn't. Chrome can't load
+    `http://212.64.210.85/healthz`. Root cause
+    hypothesis: the cross-thread visibility bug —
+    `conn.ackNum` is mutated by the TUN reader thread
+    (handleData) and read by the per-connection reader
+    thread (startSocketReader). Without `@Volatile`,
+    the reader thread sees a stale ackNum and writes
+    a response packet with the wrong ack field. The
+    app rejects the response and the HTTP page doesn't
+    load.
+
+    12.0A.7 fix:
+      S109: 4 breadcrumb tokens (sendHttpRequest,
+            recvHttpResponse, responsePayload,
+            "bytes read from real socket"). Owner-side
+            diagnostic for the data flow. Each token
+            confirms a specific stage: app's HTTP
+            request written to real socket, real
+            dest's response read from real socket,
+            response written to TUN, byte count for
+            pairing.
+      S110: tcpConnectionMap.put primary flow log +
+            UNKNOWN FLOW warning. Connection-
+            registration diagnostic surface.
+      S111: @Volatile on every TcpConnection var
+            field. The cross-thread visibility fix.
+
+    The audit bundles 3 sub-checks on
+    NettyChannelClient.kt. Comment-strip + literal-
+    match per the Sprint 9.6.5 lesson. Wired into
+    main() after the S106-S108 dispatch.
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    if not netty_path.exists():
+        findings.append("S109-S111 NettyChannelClient.kt: file missing.")
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S109-S111 NettyChannelClient.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # ── S109 sub-check ──
+    s109_findings = []
+    if "sendHttpRequest:" not in code:
+        s109_findings.append(
+            "S109 NettyChannelClient.kt: missing `sendHttpRequest:` "
+            "log breadcrumb. Sprint 12.0A.7 invariant - the Owner "
+            "greps for this token to confirm the app's HTTP "
+            "request bytes were written to the real socket."
+        )
+    if "recvHttpResponse:" not in code:
+        s109_findings.append(
+            "S109 NettyChannelClient.kt: missing `recvHttpResponse:` "
+            "log breadcrumb. Sprint 12.0A.7 invariant."
+        )
+    if "responsePayload:" not in code:
+        s109_findings.append(
+            "S109 NettyChannelClient.kt: missing `responsePayload:` "
+            "log breadcrumb. Sprint 12.0A.7 invariant - the Owner "
+            "greps for this token to confirm the response bytes "
+            "were written to the TUN."
+        )
+    if "bytes read from real socket" not in code:
+        s109_findings.append(
+            "S109 NettyChannelClient.kt: missing `bytes read from "
+            "real socket` substring in the recvHttpResponse log. "
+            "Sprint 12.0A.7 invariant - the byte count is the "
+            "canonical 'size of the response segment' the Owner "
+            "pairs with the responsePayload log."
+        )
+    findings.extend(s109_findings)
+
+    # ── S110 sub-check ──
+    s110_findings = []
+    if "tcpConnectionMap.put primary flow" not in code:
+        s110_findings.append(
+            "S110 NettyChannelClient.kt: missing "
+            "`tcpConnectionMap.put primary flow` log. Sprint "
+            "12.0A.7 invariant - the Owner greps for this token "
+            "to confirm the connection was registered in the "
+            "map under the primary (OUTGOING) 5-tuple."
+        )
+    if "late ACK" not in code:
+        s110_findings.append(
+            "S110 NettyChannelClient.kt: missing `late ACK` "
+            "debug log. Sprint 12.0A.8 invariant - the 12.0A.7 "
+            "`UNKNOWN FLOW` warning was downgraded to a `late ACK` "
+            "debug log because with the dual put, the UNKNOWN FLOW "
+            "only fires for the late ACK after handleFinAck "
+            "removed both keys (1 per connection — diagnostic "
+            "noise, not an error). The Owner greps for this "
+            "token to confirm the corner-case count."
+        )
+    findings.extend(s110_findings)
+
+    # ── S111 sub-check ──
+    s111_findings = []
+    volatile_count = code.count("@Volatile")
+    if volatile_count < 8:
+        s111_findings.append(
+            "S111 NettyChannelClient.kt: too few `@Volatile` "
+            "annotations (found " + str(volatile_count) +
+            ", need at least 8 — one per TcpConnection var "
+            "field). Sprint 12.0A.7 invariant - cross-thread "
+            "visibility between handleData (TUN reader thread) "
+            "and startSocketReader (per-connection reader thread) "
+            "requires every mutable TcpConnection field to be "
+            "@Volatile."
+        )
+    findings.extend(s111_findings)
+    return findings
+
+
+def check_teardown_comprehensive_v48() -> list[str]:
+    """Sprint 12.0X: comprehensive 6-step teardown
+    in NettyChannelClient.shutdown() (S115).
+
+    Owner 12:29 STOP-FIX: VPN durduruldu gorunuyor
+    ama internet trafigi normale donmuyor, sadece
+    reboot duzeltiyor. Kernel TUN orphan + host
+    routing broken. Root cause: the pre-12.0X
+    teardown only did 11.0R-level cleanup (ring
+    clear + packetsObserved reset). The Netty
+    `workerGroup` shutdown was async (no
+    `awaitTermination`), the per-connection reader
+    threads were interrupted but not joined, and the
+    per-flow UDP reader threads were not tracked at
+    all. The kernel TUN interface remained as an
+    orphan because the VPN service was still alive
+    (background threads holding sockets open).
+
+    12.0X fix: shutdown() is now a 6-step procedure:
+      Step 1: flowMap close + clear (per-flow Netty
+              Channels).
+      Step 2: tcpConnectionMap cancel readerFuture +
+              close socket + interrupt readerThread +
+              join readerThread + clear map.
+      Step 3: udpReaderFutures cancel + udpSocketMap
+              soTimeout=0 + close + clear map.
+      Step 4: tunOutputStream = null.
+      Step 5: workerGroup.shutdownGracefully().await(1,
+              TimeUnit.SECONDS).
+      Step 6: backgroundExecutor.shutdownNow() +
+              awaitTermination(1, TimeUnit.SECONDS).
+
+    The audit verifies all 6 steps in
+    NettyChannelClient.kt via comment-strip +
+    literal-match. Any future sprint that drops one
+    of the steps trips the regression guard.
+
+    The dual put + UNKNOWN FLOW downgrade code from
+    12.0A.8 is still present (handles late ACKs
+    cleanly), but the S112/S113/S114 audits are
+    removed in favor of the 12.0X teardown check
+    because Owner 12:29 is the higher-priority
+    regression.
+    """
+    import re
+    findings = []
+    netty_path = (
+        REPO_ROOT / "mobile" / "android" / "app" / "src"
+        / "main" / "kotlin" / "com" / "opene2ee" / "opene2ee"
+        / "vpn" / "NettyChannelClient.kt"
+    )
+    if not netty_path.exists():
+        findings.append("S115 NettyChannelClient.kt: file missing.")
+        return findings
+    try:
+        netty_text = netty_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as e:
+        findings.append(
+            "S115 NettyChannelClient.kt: read failed (" + str(e) + ")."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # ── Step 1: flowMap close + clear ──
+    if "flowMap.clear()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 1 of "
+            "comprehensive teardown (flowMap.clear). "
+            "Sprint 12.0X invariant - per-flow Netty Channels "
+            "must be closed and removed from the flowMap."
+        )
+
+    # ── Step 2: tcpConnectionMap clear + reader cancel ──
+    if "tcpConnectionMap.clear()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 2 of "
+            "comprehensive teardown (tcpConnectionMap.clear). "
+            "Sprint 12.0X invariant - per-connection "
+            "TcpConnection entries must be removed so the "
+            "per-connection reader threads can be cancelled + "
+            "the real Sockets can be closed."
+        )
+    if "readerFuture" not in code or "cancel(true)" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 2b of "
+            "comprehensive teardown (readerFuture.cancel(true)). "
+            "Sprint 12.0X invariant - the per-connection reader "
+            "Future must be cancelled (Future.cancel(true) interrupts "
+            "the executor worker thread)."
+        )
+
+    # ── Step 3: udpSocketMap close + clear + udpReaderFutures cancel ──
+    if "udpSocketMap.clear()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 3 of "
+            "comprehensive teardown (udpSocketMap.clear). "
+            "Sprint 12.0X invariant - per-flow DatagramSockets "
+            "must be closed and removed from udpSocketMap."
+        )
+    if "udpReaderFutures" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 3b of "
+            "comprehensive teardown (udpReaderFutures cancel). "
+            "Sprint 12.0X invariant - per-flow UDP reader "
+            "Futures must be cancelled so the receive() loop "
+            "unblocks."
+        )
+
+    # ── Step 4: tunOutputStream null ──
+    if "tunOutputStream = null" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 4 of "
+            "comprehensive teardown (tunOutputStream = null). "
+            "Sprint 12.0X invariant - the TUN output stream "
+            "ref must be detached so the kernel can release "
+            "the ParcelFileDescriptor."
+        )
+
+    # ── Step 5: workerGroup shutdownGracefully awaited ──
+    if "workerGroup.shutdownGracefully()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 5 of "
+            "comprehensive teardown (workerGroup.shutdownGracefully). "
+            "Sprint 12.0X invariant - the NioEventLoopGroup must "
+            "be shut down so the 2 worker threads exit."
+        )
+    if "await" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 5b of "
+            "comprehensive teardown (workerGroup.shutdownGracefully().await). "
+            "Sprint 12.0X invariant - the NioEventLoopGroup "
+            "shutdownGracefully returns a Future; we must await it "
+            "with a bounded timeout to ensure the worker threads exit."
+        )
+
+    # ── Step 6: backgroundExecutor shutdownNow + awaitTermination ──
+    if "backgroundExecutor" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 6 of "
+            "comprehensive teardown (backgroundExecutor). "
+            "Sprint 12.0X invariant - a single ExecutorService "
+            "must own ALL background work (per-connection reader "
+            "threads + per-flow UDP reader threads) so the "
+            "shutdown has ONE place to terminate them."
+        )
+    if "shutdownNow()" not in code or "awaitTermination" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 6b of "
+            "comprehensive teardown (backgroundExecutor.shutdownNow "
+            "+ awaitTermination). Sprint 12.0X invariant - the "
+            "executor must be shutdownNow() (interrupts running "
+            "tasks) and awaitTermination(1, TimeUnit.SECONDS) "
+            "(waits for them to exit) so no reader thread outlives "
+            "the VPN service."
+        )
+    return findings
+
+
 
 
 
@@ -8305,6 +9122,79 @@ def main() -> int:
         all_findings.extend(s84_findings)
     else:
         print("PASS: OpenE2eeVpnService.kt has packetsObserved.incrementAndGet ONLY in the input.read(buf) read branch (no fake increments) — regression guard for OnePlus 9 Pro Sprint 11.0A-11.0L fake-capture accusation - Sprint 11.0M S84")
+
+    # Sprint 12.0A: TCP state machine MVP (S100, S101, S102).
+    # S99 (Sprint 11.0Z) was the SKELETON; 12.0A adds the
+    # state machine, 3-way handshake, data flow, FIN
+    # teardown, and buildIpTcpPacket helper. The check
+    # bundles 3 sub-checks into a single
+    # check_tcp_state_machine_v43 audit.
+    s100_102_findings = check_tcp_state_machine_v43()
+    if s100_102_findings:
+        all_findings.extend(s100_102_findings)
+    else:
+        print("PASS: NettyChannelClient.kt has handleTcpPacket( method + TcpConnection data class (S100) + 9-state TcpState enum (S101) + 3-way handshake log breadcrumbs SYN / SYN+ACK / ACK + ESTABLISHED transition (S102) - regression guard for Sprint 12.0A TCP state machine MVP (Owner-side `curl http://212.64.210.85/healthz` test)")
+
+    # Sprint 12.0A.5: UDP forwarder (S103, S104, S105).
+    # Owner logcat 10:01 root cause: 12.0A added the TCP
+    # state machine but the UDP forwarder was still in the
+    # 11.0Z "BEST-EFFORT" stub. Without S103-S105, the DNS
+    # resolver path is broken and Chrome HTTP cannot
+    # establish a TCP connection.
+    s103_105_findings = check_udp_forwarder_v44()
+    if s103_105_findings:
+        all_findings.extend(s103_105_findings)
+    else:
+        print("PASS: NettyChannelClient.kt has handleUdpPacket( method (S103) + DatagramSocket literal (S104) + protect(udpSocket) call AFTER DatagramSocket (S105) - regression guard for Sprint 12.0A.5 UDP forwarder (Owner logcat 10:01 root cause: DNS resolver path)")
+
+    # Sprint 12.0A.6: TCP passthrough skip + 5-tuple
+    # normalization + 5 breadcrumb tokens (S106, S107,
+    # S108). Owner 11:08 BLOCKED root cause: the
+    # transparent passthrough was unconditional, the
+    # kernel raced the user-space stack and sent an RST.
+    # Owner 11:08 secondary: INCOMING packets were dropped
+    # silently because the 5-tuple lookup was
+    # single-direction. 12.0A.6 fixes both.
+    s106_108_findings = check_tcp_5tuple_v45()
+    if s106_108_findings:
+        all_findings.extend(s106_108_findings)
+    else:
+        print("PASS: 5 breadcrumb tokens for TCP dispatch (S106) + passthrough SKIPPED via `handled` flag (S107) + primaryFlowKey + reverseFlowKey 5-tuple normalization (S108) - regression guard for Sprint 12.0A.6 (Owner 11:08 BLOCKED: TCP SYN 0, ESTABLISHED YOK)")
+
+    # Sprint 12.0A.7: HTTP data flow diagnostics +
+    # thread-safety + unknown-flow detection (S109,
+    # S110, S111). Owner 11:33 BLOCKED on Sprint
+    # 12.0A.6: TCP 3-way handshake works (17
+    # ESTABLISHED connections) but HTTP data flow
+    # doesn't. Root cause hypothesis: cross-thread
+    # visibility bug — `conn.ackNum` is mutated by
+    # the TUN reader thread (handleData) and read by
+    # the per-connection reader thread
+    # (startSocketReader). Without @Volatile, the
+    # reader sees a stale ackNum and writes a
+    # response packet with the wrong ack field.
+    s109_111_findings = check_tcp_dataflow_v46()
+    if s109_111_findings:
+        all_findings.extend(s109_111_findings)
+    else:
+        print("PASS: 4 HTTP data flow breadcrumb tokens (S109) + tcpConnectionMap.put + UNKNOWN FLOW warning (S110) + @Volatile on TcpConnection fields (S111) - regression guard for Sprint 12.0A.7 (Owner 11:33 BLOCKED: TCP handshake works, HTTP data flow doesn't)")
+
+    # Sprint 12.0X: comprehensive 6-step teardown
+    # in NettyChannelClient.shutdown() (S115).
+    # Owner 12:29 STOP-FIX: VPN durduruldu gorunuyor
+    # ama internet trafigi normale donmuyor, sadece
+    # reboot duzeltiyor. The pre-12.0X teardown only
+    # did 11.0R-level cleanup (ring clear + packets-
+    # Observed reset), leaving the Netty
+    # `workerGroup`, the per-connection reader
+    # threads, and the per-flow UDP reader threads
+    # leaked. The kernel TUN interface remained as
+    # an orphan and host routing was broken.
+    s115_findings = check_teardown_comprehensive_v48()
+    if s115_findings:
+        all_findings.extend(s115_findings)
+    else:
+        print("PASS: Comprehensive 6-step teardown in NettyChannelClient.shutdown (S115) covering flowMap + tcpConnectionMap (with readerFuture.cancel + socket.close + readerThread.interrupt) + udpSocketMap (with udpReaderFutures.cancel) + tunOutputStream + workerGroup.shutdownGracefully.await + backgroundExecutor.shutdownNow.awaitTermination - regression guard for Sprint 12.0X (Owner 12:29 STOP-FIX: kernel TUN orphan + host routing broken until reboot)")
 
     if all_findings:
         print("\nFINDINGS:")

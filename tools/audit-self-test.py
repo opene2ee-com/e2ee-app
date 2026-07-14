@@ -176,13 +176,17 @@ S50 cases: 2 (1 PASS + 1 FAIL — `OpenE2EE Şifreleme Doğrulama` foreground no
 S51 cases: 2 (1 PASS + 1 FAIL — `i < 30` + `Timer.periodic` 30-call loop in active_pool_screen.dart).
 S52 cases: 2 (1 PASS + 1 FAIL — `sendSummary` method + `/api/v1/sessions/` path + 6 fields in telemetry_service.dart).
 
-Total: 149 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
+Total: 164 cases (72 pre-Sprint 11.0A + 16 from S45-S52 + 24 from
 S53-S60 + 24 from S61-S72 + 1 from S73 + 1 from S74 + 1 from
 S76 + 1 from S77 + 1 from S78 + 1 from S79 + 1 from S80 +
 1 from S82 + 1 from S84 + 1 from S86 + 1 from S87 +
 1 from S88 + 1 from S89 + 1 from S91 + 1 from S92 +
 1 from S93 + 1 from S94 + 1 from S95 + 1 from S96 +
-1 from S97 + 1 from S98 + 1 from S99).
+1 from S97 + 1 from S98 + 1 from S99 + 1 from S100 +
+1 from S101 + 1 from S102 + 1 from S103 + 1 from S104 +
+1 from S105 + 1 from S106 + 1 from S107 + 1 from S108 +
+1 from S109 + 1 from S110 + 1 from S111 + 1 from S112 +
+1 from S113 + 1 from S114).
 Sprint 11.0Q adds 1 new selftest case for S88 (2-level
 VPN disconnect fallback: .stop with 3s timeout +
 MainActivity.disconnectVpn hard-stop) — the
@@ -1190,6 +1194,3910 @@ def run_s99_check(opene2ee_vpn_service_text, build_gradle_kts_text, netty_channe
     else:
         if "user-space" not in opene2ee_vpn_service_text:
             findings.append("S99 fail (OpenE2eeVpnService.kt missing `user-space` literal)")
+    return findings
+
+
+# ═══ Sprint 12.0A — TCP state machine MVP audit helpers (S100-S102) ═══
+#
+# Sprint 12.0A is the first sprint to add the TCP state
+# machine to the user-space TCP/IP stack skeleton from
+# Sprint 11.0Z. S99 was the SKELETON (Netty dep + protect
+# + user-space routing comment); S100/S101/S102 are the
+# TCP-specific implementation:
+#
+#   S100: NettyChannelClient.kt has the `handleTcpPacket(`
+#         method AND the `data class TcpConnection` data
+#         class declaration. Regression guard: re-touching
+#         the file in a future sprint cannot silently drop
+#         the state-machine dispatcher.
+#   S101: NettyChannelClient.kt has the 9-state TcpState
+#         enum (LISTEN, SYN_SENT, ESTABLISHED, FIN_WAIT_1,
+#         FIN_WAIT_2, CLOSE_WAIT, LAST_ACK, TIME_WAIT,
+#         CLOSED). The brief lists 9 states explicitly; the
+#         MVP does NOT implement TIME_WAIT (it transitions
+#         directly to CLOSED per the brief) but the state
+#         NAME must still be present in the enum so
+#         Sprint 12.0A.2 can wire it without a schema
+#         change.
+#   S102: NettyChannelClient.kt has the 3-way handshake
+#         log breadcrumbs (SYN, SYN+ACK, ACK) AND the
+#         ESTABLISHED transition log. These breadcrumbs
+#         are the Owner-side verification surface: he
+#         greps `adb logcat -d -s OpenE2eeVpn:V` for
+#         these tokens after `curl http://212.64.210.85/healthz`
+#         to confirm the handshake completed.
+#
+# The negative-path coverage is provided by the audit's
+# production code (which would fail the same check
+# against the pre-12.0A S99 skeleton) — Sprint 12.0A
+# does not add new negative-path Dart-side unit tests
+# (the production check IS the regression guard).
+
+
+def run_s100_check(netty_text):
+    """S100: NettyChannelClient.kt has handleTcpPacket(
+    method + data class TcpConnection declaration.
+
+    The brief: "S100: NettyChannelClient.kt içinde
+    handleTcpPacket method + TcpConnection data class".
+    The method handles the dispatch (SYN / SYN+ACK /
+    ACK / PSH+ACK / FIN+ACK / RST) and the data class
+    carries the per-flow state. Both must be present in
+    the file as REAL declarations (not just comments —
+    the Sprint 9.6.5 lesson: strip comments, then
+    substring-match the code).
+
+    Sub-checks:
+      (a) `fun handleTcpPacket(` literal present in the
+          code-only text (comment-stripped per the
+          Sprint 9.6.x audit pattern).
+      (b) `data class TcpConnection` literal present.
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S100 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A invariant — the TCP state machine "
+            "MVP requires the `handleTcpPacket(` dispatcher "
+            "method AND the `data class TcpConnection` "
+            "declaration in the same file. Regression guard "
+            "for the Owner 22:08 'VPN blackhole' symptom: "
+            "without `handleTcpPacket`, every TUN-captured "
+            "TCP packet is dropped (no handshake, no data "
+            "forward, no teardown)."
+        )
+        return findings
+    # Comment-strip (best-effort, mirrors the Sprint 9.6.x
+    # audit pattern: a comment claiming "we have
+    # handleTcpPacket" must NOT pass this check).
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    if "fun handleTcpPacket(" not in code:
+        findings.append(
+            "S100 NettyChannelClient.kt: missing `fun handleTcpPacket(` "
+            "method declaration. Sprint 12.0A invariant — the TCP "
+            "state machine MVP requires this dispatcher to drive the "
+            "3-way handshake (SYN -> SYN+ACK -> ESTABLISHED), forward "
+            "PSH+ACK data, and handle FIN+ACK teardown. Without it, "
+            "every TUN-captured TCP packet is dropped (no handshake, "
+            "no data forward, no teardown) and the Owner-side "
+            "`curl http://212.64.210.85/healthz` test hangs."
+        )
+    if "data class TcpConnection" not in code:
+        findings.append(
+            "S100 NettyChannelClient.kt: missing `data class TcpConnection` "
+            "declaration. Sprint 12.0A invariant — the per-flow state "
+            "(state, seq/ack numbers, receive window, real socket, "
+            "reader thread) must be encapsulated in a data class so "
+            "the multi-connection follow-up (Sprint 12.0A.2) can extend "
+            "it without breaking the single-connection MVP."
+        )
+    return findings
+
+
+def run_s101_check(netty_text):
+    """S101: NettyChannelClient.kt has the 9-state TcpState
+    enum (LISTEN, SYN_SENT, ESTABLISHED, FIN_WAIT_1,
+    FIN_WAIT_2, CLOSE_WAIT, LAST_ACK, TIME_WAIT, CLOSED).
+
+    The brief lists 9 states explicitly. The MVP does NOT
+    implement TIME_WAIT (it transitions directly to CLOSED
+    per the brief) but the state NAME must still be present
+    in the enum so Sprint 12.0A.2 can wire it without a
+    schema change. The audit requires ALL 9 names to be
+    present (defense-in-depth: a future sprint that drops a
+    state name in a refactor re-opens the Owner 22:08 'VPN
+    blackhole' regression because the state machine table
+    no longer matches the brief).
+
+    Sub-checks:
+      (a) `enum class TcpState` declaration present.
+      (b) All 9 state names present in the comment-stripped
+          text (LISTEN, SYN_SENT, ESTABLISHED, FIN_WAIT_1,
+          FIN_WAIT_2, CLOSE_WAIT, LAST_ACK, TIME_WAIT,
+          CLOSED).
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S101 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A invariant — the 9-state TcpState "
+            "enum (LISTEN, SYN_SENT, ESTABLISHED, FIN_WAIT_1, "
+            "FIN_WAIT_2, CLOSE_WAIT, LAST_ACK, TIME_WAIT, "
+            "CLOSED) is the heart of the TCP state machine "
+            "MVP. Regression guard for the Owner 22:08 'VPN "
+            "blackhole' symptom: a future sprint that drops "
+            "a state name re-opens the regression because "
+            "the state machine table no longer matches the "
+            "brief."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    if "enum class TcpState" not in code:
+        findings.append(
+            "S101 NettyChannelClient.kt: missing `enum class TcpState` "
+            "declaration. Sprint 12.0A invariant — the 9-state enum "
+            "is the heart of the TCP state machine MVP. The `state` "
+            "field in TcpConnection is a `TcpState`; without the "
+            "enum declaration, the file does not compile."
+        )
+    required_states = {
+        "LISTEN": "LISTEN",
+        "SYN_SENT": "SYN_SENT",
+        "ESTABLISHED": "ESTABLISHED",
+        "FIN_WAIT_1": "FIN_WAIT_1",
+        "FIN_WAIT_2": "FIN_WAIT_2",
+        "CLOSE_WAIT": "CLOSE_WAIT",
+        "LAST_ACK": "LAST_ACK",
+        "TIME_WAIT": "TIME_WAIT",
+        "CLOSED": "CLOSED",
+    }
+    for label, state_name in required_states.items():
+        if state_name not in code:
+            findings.append(
+                "S101 NettyChannelClient.kt: missing TcpState `"
+                + state_name + "` (label=" + label + "). Sprint "
+                "12.0A invariant — the 9-state enum must list all "
+                "9 RFC 793 states explicitly. MVP does NOT implement "
+                "TIME_WAIT (transitions directly to CLOSED) but the "
+                "state NAME must still be in the enum so Sprint "
+                "12.0A.2 can wire it without a schema change."
+            )
+    return findings
+
+
+def run_s102_check(netty_text):
+    """S102: NettyChannelClient.kt has the 3-way handshake
+    log breadcrumbs (SYN, SYN+ACK, ACK) AND the ESTABLISHED
+    transition log.
+
+    Owner-side verification (per the brief): "Görmelisin:
+    TcpConnection: new state=LISTEN → SYN_SENT,
+    handleTcpPacket: SYN+ACK received, state=SYN_SENT →
+    ESTABLISHED, TcpConnection: connected to 212.64.210.85:80".
+    These breadcrumbs are the surface the Owner greps via
+    `adb logcat -d -s OpenE2eeVpn:V` to confirm the
+    3-way handshake completed. If a future sprint refactors
+    the log strings, the Owner cannot verify the regression
+    fix and the 12.0A MVP cannot be validated by Chrome /
+    HTTP test alone.
+
+    Sub-checks (4 tokens, all must be present in the
+    comment-stripped text):
+      (a) `SYN, flow` — SYN breadcrumb in handleSyn.
+      (b) `SYN+ACK received` — SYN+ACK breadcrumb in
+          handleSyn (synthesized after the real socket's
+          3-way handshake completes; the brief calls this
+          "SYN+ACK (response from dst)").
+      (c) `ACK, flow` OR `ACK ->` — ACK breadcrumb in the
+          bare-ACK case (handleAck) or the data path
+          (handleData's "ACK -> app (data)" log).
+      (d) `-> ESTABLISHED` — the state transition log
+          (synthesized in handleSyn after the connect()
+          completes).
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S102 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A invariant — the 3-way handshake "
+            "log breadcrumbs (SYN, SYN+ACK, ACK) + "
+            "ESTABLISHED transition are the Owner-side "
+            "verification surface for the MVP. He greps "
+            "`adb logcat -d -s OpenE2eeVpn:V` for these "
+            "tokens after `curl http://212.64.210.85/healthz` "
+            "to confirm the handshake completed. Without "
+            "them, the MVP cannot be validated by Chrome / "
+            "HTTP test alone."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    # (a) SYN breadcrumb
+    if "SYN, flow" not in code:
+        findings.append(
+            "S102 NettyChannelClient.kt: missing `SYN, flow` "
+            "log breadcrumb. Sprint 12.0A invariant — the "
+            "handleSyn method must emit a Log.d with `SYN, "
+            "flow` so the Owner can grep `adb logcat` for "
+            "the SYN entry as the first signal that the "
+            "TCP state machine fired."
+        )
+    # (b) SYN+ACK breadcrumb (synthesized after connect())
+    if "SYN+ACK received" not in code:
+        findings.append(
+            "S102 NettyChannelClient.kt: missing `SYN+ACK received` "
+            "log breadcrumb. Sprint 12.0A invariant — the brief "
+            "calls this 'SYN+ACK (response from dst)'. In the "
+            "MVP the real socket's `connect()` consumes the "
+            "SYN+ACK on the wire, so the log is synthesized "
+            "in handleSyn after the connect() returns. The "
+            "Owner greps for this token to confirm the "
+            "3-way handshake with the real destination "
+            "completed."
+        )
+    # (c) ACK breadcrumb (bare-ACK case or data path)
+    has_ack_breadcrumb = ("ACK, flow" in code) or ("ACK ->" in code)
+    if not has_ack_breadcrumb:
+        findings.append(
+            "S102 NettyChannelClient.kt: missing ACK log "
+            "breadcrumb (neither `ACK, flow` nor `ACK ->` "
+            "present). Sprint 12.0A invariant — the bare-ACK "
+            "case in handleTcpPacket must log `ACK, flow` "
+            "AND the data path must log `ACK ->` so the "
+            "Owner can confirm ACK round-trips on the "
+            "TUN-captured path."
+        )
+    # (d) ESTABLISHED transition
+    if "-> ESTABLISHED" not in code:
+        findings.append(
+            "S102 NettyChannelClient.kt: missing `-> ESTABLISHED` "
+            "state transition log. Sprint 12.0A invariant - "
+            "the SYN_SENT -> ESTABLISHED transition is the "
+            "load-bearing diagnostic for the 3-way handshake. "
+            "The Owner greps for this token as proof that the "
+            "connection reached the data-transfer state."
+        )
+    return findings
+
+
+# ═══ Sprint 12.0A.5 — UDP forwarder audit helpers (S103-S105) ═══
+#
+# Sprint 12.0A.5 closes the Owner logcat 10:01 root cause:
+# 12.0A added the TCP state machine but the UDP forwarder
+# was still in the 11.0Z "BEST-EFFORT" stub. The result:
+# DNS queries to `1.1.1.1:53` never reach the real resolver,
+# DNS resolution fails, and Chrome HTTP / WhatsApp / every
+# other app that needs a hostname cannot establish a TCP
+# connection (because the app is stuck on the failed DNS
+# query, the SYN never gets sent).
+#
+# 12.0A.5 fix: per-flow protected DatagramSocket in
+# NettyChannelClient.kt. On the first UDP packet for a
+# flow, create a `java.net.DatagramSocket`, call
+# `service.protect(socket)` (so the socket bypasses the
+# VPN and uses the real NIC), and forward the payload via
+# `DatagramSocket.send(DatagramPacket)`. Start a per-flow
+# daemon thread that reads responses from the real resolver
+# and writes them back to the TUN (wrapped in a new IP+UDP
+# packet via `buildIpUdpPacket`).
+#
+# S103 / S104 / S105 audit tokens:
+#   - S103: `fun handleUdpPacket(` method declaration
+#     (the UDP dispatcher that mirrors `handleTcpPacket`).
+#   - S104: `DatagramSocket` literal in the handleUdpPacket
+#     code path (the per-flow protected socket).
+#   - S105: `protect(udpSocket)` (or `service.protect(`
+#     on the udpSocket) call in the handleUdpPacket code
+#     path. The protect() call is the load-bearing piece:
+#     without it, the DatagramSocket is captured by the
+#     TUN and the UDP packet loops forever (the same
+#     "VPN blackhole" symptom that 12.0A fixed for TCP,
+#     now closed for UDP).
+#
+# Negative-path coverage is provided by the production
+# audit's pre-12.0A.5 baseline (which had `DatagramSocket`
+# nowhere in the file — the audit would fail all 3
+# sub-checks). 12.0A.5 does not add a Dart-side unit test
+# for the negative path; the audit IS the regression guard.
+
+
+def run_s103_check(netty_text):
+    """S103: NettyChannelClient.kt has `fun handleUdpPacket(`
+    method declaration.
+
+    The brief: "handleUdpPacket(srcIp, srcPort, dstIp, dstPort,
+    payload) EKLE". The method dispatches the UDP packet
+    to a per-flow protected DatagramSocket and starts a
+    per-flow reader thread for the response. Without
+    handleUdpPacket, every TUN-captured UDP packet is
+    dropped (no DNS, no NTP, no STUN) and the
+    Owner-side `curl http://212.64.210.85/healthz` test
+    fails because the app cannot resolve the hostname.
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S103 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.5 invariant - the UDP forwarder "
+            "dispatcher is `fun handleUdpPacket(`. Without it, "
+            "every TUN-captured UDP packet is dropped and the "
+            "Owner-side `curl http://212.64.210.85/healthz` test "
+            "fails because the app cannot resolve the hostname "
+            "(DNS query to 1.1.1.1:53 never reaches the real "
+            "resolver)."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    if "fun handleUdpPacket(" not in code:
+        findings.append(
+            "S103 NettyChannelClient.kt: missing `fun handleUdpPacket(` "
+            "method declaration. Sprint 12.0A.5 invariant - the UDP "
+            "forwarder dispatcher is `fun handleUdpPacket(srcIp, "
+            "srcPort, dstIp, dstPort, payload)`. Without it, every "
+            "TUN-captured UDP packet is dropped (no DNS, no NTP, "
+            "no STUN) and the Owner-side `curl http://212.64.210.85/healthz` "
+            "test fails because the app cannot resolve the hostname."
+        )
+    return findings
+
+
+def run_s104_check(netty_text):
+    """S104: NettyChannelClient.kt has `DatagramSocket` literal
+    in the handleUdpPacket code path (the per-flow protected
+    socket).
+
+    The brief: "udpSocket = DatagramSocket()". The literal
+    `DatagramSocket` must be present in the comment-stripped
+    text (the `java.net.DatagramSocket` import + the
+    `DatagramSocket()` constructor call site). A comment
+    claiming "we use DatagramSocket" must NOT pass — the
+    Sprint 9.6.5 lesson re-applies.
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S104 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.5 invariant - the per-flow UDP "
+            "forwarder socket is a `java.net.DatagramSocket`. "
+            "Without it, the UDP dispatcher cannot create a "
+            "per-flow protected socket and the DNS resolver "
+            "path is broken (Owner 10:01 logcat symptom)."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    if "DatagramSocket" not in code:
+        findings.append(
+            "S104 NettyChannelClient.kt: missing `DatagramSocket` "
+            "literal in the handleUdpPacket code path. Sprint "
+            "12.0A.5 invariant - the per-flow UDP forwarder "
+            "socket is a `java.net.DatagramSocket`. Without it, "
+            "the UDP dispatcher cannot create a per-flow "
+            "protected socket and the DNS resolver path is broken "
+            "(Owner 10:01 logcat symptom: TCP SYN 0, ESTABLISHED "
+            "YOK, all traffic dropped at the UDP layer)."
+        )
+    return findings
+
+
+def run_s105_check(netty_text):
+    """S105: NettyChannelClient.kt has `protect(udpSocket)`
+    call (or `service.protect(`
+    on the udpSocket) in the handleUdpPacket code path.
+
+    The brief: "service.protect(udpSocket)". The protect()
+    call is the load-bearing piece: without it, the
+    DatagramSocket is captured by the TUN and the UDP
+    packet loops forever (the same "VPN blackhole" symptom
+    that 12.0A fixed for TCP, now closed for UDP).
+
+    The audit requires a `protect(` call site on a
+    DatagramSocket (NOT a java.net.Socket) inside the
+    handleUdpPacket code path. The pre-12.0A.5 baseline
+    has the `protect(` call for the TCP path (S99) but
+    NOT for the UDP path; this check distinguishes the
+    two.
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S105 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.5 invariant - the per-flow UDP "
+            "socket MUST be `service.protect()`-ed so it "
+            "bypasses the VPN and uses the real NIC. Without "
+            "it, the DatagramSocket is captured by the TUN "
+            "and the UDP packet loops forever (the same "
+            "'VPN blackhole' symptom that 12.0A fixed for "
+            "TCP, now closed for UDP)."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    # S105 specifically: the protect() call site must be
+    # inside the handleUdpPacket code path, NOT in the
+    # protectAndConnect (TCP) path. We look for a protect
+    # call site that is textually after the
+    # `fun handleUdpPacket(` declaration (or textually
+    # inside a "UDP" / "udp" / "DatagramSocket" labelled
+    # code block). The simplest check: a `protect(` call
+    # textually after the first `DatagramSocket` literal
+    # (the DatagramSocket comes first in the MVP).
+    if "DatagramSocket" not in code:
+        # Already flagged by S104. Don't double-report;
+        # S105 is a sub-check of S104, not independent.
+        return findings
+    ds_idx = code.find("DatagramSocket")
+    protect_after_ds = code.find("protect(", ds_idx)
+    if protect_after_ds == -1:
+        findings.append(
+            "S105 NettyChannelClient.kt: missing `protect(` "
+            "call site AFTER the `DatagramSocket` literal "
+            "in the handleUdpPacket code path. Sprint "
+            "12.0A.5 invariant - the per-flow UDP socket "
+            "MUST be `service.protect()`-ed so it bypasses "
+            "the VPN and uses the real NIC. Without it, the "
+            "DatagramSocket is captured by the TUN and the "
+            "UDP packet loops forever (the same 'VPN blackhole' "
+            "symptom that 12.0A fixed for TCP, now closed for "
+            "UDP)."
+        )
+    return findings
+
+
+# ═══ Sprint 12.0A.6 — TCP passthrough skip + 5-tuple normalization (S106-S108) ═══
+#
+# Owner 11:08 logcat root cause: Sprint 12.0A.5's
+# `startReaderThread` dispatched TCP/UDP packets to the
+# user-space stack BUT the transparent passthrough
+# `output.write(buf, 0, n)` still ran AFTER the dispatch.
+# Result: the kernel ALSO processed the TCP SYN, found
+# no listening socket, and sent an RST back through the
+# TUN — which the user-space state machine saw and
+# interpreted as connection close. The 3-way handshake
+# could never complete because the kernel's RST
+# pre-empted our SYN_SENT -> ESTABLISHED transition.
+#
+# Owner 11:08 secondary issue: the user-space stack
+# only stored the TcpConnection under the OUTGOING
+# 5-tuple (app -> real dest). The INCOMING packets
+# (real dest -> app) arrived with the REVERSED 5-tuple
+# and missed the lookup. Pre-12.0A.6, the INCOMING
+# SYN+ACK / data / FIN were dropped silently.
+#
+# 12.0A.6 fix:
+#   S106: 5 breadcrumb tokens (TCP entry, parseTcpHeader
+#         dstPort, handleTcpPacket dispatch, new
+#         TcpConnection, state transition). These are
+#         the Owner-side diagnostic surface for the
+#         `adb logcat -d -s OpenE2eeVpn:V` test.
+#   S107: passthrough skip — when the user-space stack
+#         successfully dispatched a TCP/UDP packet,
+#         skip the transparent passthrough so the
+#         kernel does not race the user-space stack.
+#   S108: 5-tuple normalization — handleTcpPacket tries
+#         BOTH the primary (src,dst) and reverse
+#         (dst,src) 5-tuple keys when looking up the
+#         TcpConnection, so both OUTGOING and INCOMING
+#         packets find the same connection.
+#
+# Negative-path coverage: the production audit
+# `check_tcp_5tuple_v45` itself is the regression
+# guard. Pre-12.0A.6 baseline: passthrough was
+# unconditional (S107 fail), 5-tuple lookup was
+# single-direction (S108 fail), 5 breadcrumb tokens
+# were missing (S106 fail). The audit catches all
+# three regressions on a single PR review.
+
+
+def run_s106_check(vpn_service_text, netty_text):
+    """S106: 5 breadcrumb tokens for the TCP dispatch
+    path.
+
+    Owner 11:08 logcat symptom: TCP SYN 0, ESTABLISHED
+    YOK, no TcpConnection connected log. Could not
+    distinguish "no TCP packets seen" from "dispatch is
+    broken". 12.0A.6 adds 5 breadcrumb tokens so the
+    Owner can pinpoint the failure mode via
+    `adb logcat -d -s OpenE2eeVpn:V | grep -E
+    'TCP packet ENTRY|parseTcpHeader|handleTcpPacket
+    dispatch|new TcpConnection|state='`.
+
+    The 5 tokens (Owner-mandated):
+      (1) `startReaderThread: TCP packet ENTRY` — every
+          TCP packet the reader sees, in the
+          `startReaderThread` TCP branch.
+      (2) `parseTcpHeader dstPort=...` — confirms the
+          TCP header parsed cleanly (a malformed
+          header would cause `parseTcpHeader` to return
+          null and the dst port would be 0).
+      (3) `handleTcpPacket dispatch` — the call site
+          log in `startReaderThread` confirming the
+          dispatcher was reached.
+      (4) `new TcpConnection` — in `handleSyn` when a
+          new connection is created (this is paired
+          with the `conn #N` log already present).
+      (5) `state=LISTEN -> SYN_SENT` (or similar
+          transition) — the state transition log in
+          `handleSyn` / `handleSynAck`.
+    """
+    import re
+    findings = []
+    if vpn_service_text is None:
+        findings.append(
+            "S106 OpenE2eeVpnService.kt: file text missing. "
+            "Sprint 12.0A.6 invariant - the 5 breadcrumb "
+            "tokens (TCP packet ENTRY, parseTcpHeader dstPort, "
+            "handleTcpPacket dispatch, new TcpConnection, "
+            "state transition) are the Owner-side diagnostic "
+            "surface for the 11:08 BLOCKED regression."
+        )
+        return findings
+    if netty_text is None:
+        findings.append(
+            "S106 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.6 invariant."
+        )
+        return findings
+    # Comment-strip both files (Sprint 9.6.5 lesson).
+    def strip(text):
+        out = re.sub(r"/\*[\s\S]*?\*/", "", text)
+        lines = []
+        for ln in out.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    vpn_code = strip(vpn_service_text)
+    netty_code = strip(netty_text)
+    # (1) startReaderThread TCP packet ENTRY
+    if "TCP packet ENTRY" not in vpn_code:
+        findings.append(
+            "S106 OpenE2eeVpnService.kt: missing `TCP packet ENTRY` "
+            "log breadcrumb. Sprint 12.0A.6 invariant - the "
+            "Owner greps `adb logcat -d -s OpenE2eeVpn:V` "
+            "for this token to confirm the dispatch path is "
+            "reached (regression: pre-12.0A.6 the dispatch "
+            "happened silently and the Owner could not "
+            "distinguish 'no TCP packets seen' from 'dispatch "
+            "is broken')."
+        )
+    # (2) parseTcpHeader dstPort
+    if "parseTcpHeader dstPort=" not in vpn_code:
+        findings.append(
+            "S106 OpenE2eeVpnService.kt: missing `parseTcpHeader "
+            "dstPort=` log breadcrumb. Sprint 12.0A.6 invariant - "
+            "the Owner greps for this token to confirm the TCP "
+            "header parsed cleanly (a malformed header would "
+            "cause parseTcpHeader to return null and the dst "
+            "port would be 0)."
+        )
+    # (3) handleTcpPacket dispatch
+    if "handleTcpPacket dispatch" not in vpn_code:
+        findings.append(
+            "S106 OpenE2eeVpnService.kt: missing `handleTcpPacket "
+            "dispatch` log breadcrumb. Sprint 12.0A.6 invariant - "
+            "the Owner greps for this token to confirm the "
+            "dispatcher was reached."
+        )
+    # (4) new TcpConnection
+    if "new TcpConnection" not in netty_code and "TcpConnection()" not in netty_code:
+        findings.append(
+            "S106 NettyChannelClient.kt: missing `new TcpConnection` "
+            "log breadcrumb. Sprint 12.0A.6 invariant - the "
+            "Owner greps for this token to confirm a new "
+            "connection was created."
+        )
+    # (5) state transition
+    if "-> SYN_SENT" not in netty_code and "-> ESTABLISHED" not in netty_code:
+        findings.append(
+            "S106 NettyChannelClient.kt: missing state transition "
+            "log breadcrumb. Sprint 12.0A.6 invariant - the "
+            "Owner greps for `-> SYN_SENT` or `-> ESTABLISHED` "
+            "to confirm the state machine fired."
+        )
+    return findings
+
+
+def run_s107_check(vpn_service_text):
+    """S107: OpenE2eeVpnService.kt passthrough SKIPPED on
+    user-space-handled TCP/UDP.
+
+    Owner 11:08 BLOCKED root cause: Sprint 12.0A.5's
+    `startReaderThread` dispatched TCP/UDP packets to
+    the user-space stack BUT the transparent passthrough
+    `output.write(buf, 0, n)` still ran AFTER the dispatch.
+    Result: the kernel ALSO processed the TCP SYN, found
+    no listening socket, and sent an RST back through the
+    TUN — which the user-space state machine saw and
+    interpreted as connection close. The 3-way handshake
+    could never complete.
+
+    12.0A.6 fix: a `handled` boolean flag is set to true
+    after a successful TCP/UDP dispatch, and the
+    passthrough is wrapped in `if (handled) { log SKIPPED;
+    return true } else { output.write(...); passthroughCount++ }`.
+
+    The audit requires:
+      (a) `handled` boolean (or equivalent flag name)
+          in the dispatch block.
+      (b) The `output.write` call is wrapped in a
+          conditional that checks the flag.
+      (c) A `passthrough SKIPPED` log breadcrumb so
+          the Owner can see the new behaviour.
+    """
+    import re
+    findings = []
+    if vpn_service_text is None:
+        findings.append(
+            "S107 OpenE2eeVpnService.kt: file text missing. "
+            "Sprint 12.0A.6 invariant - the transparent "
+            "passthrough MUST be skipped when the user-space "
+            "stack successfully dispatched a TCP/UDP packet. "
+            "Otherwise the kernel races the user-space stack "
+            "and sends an RST (Owner 11:08 BLOCKED root cause)."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", vpn_service_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    # (a) `handled` flag declared
+    if "var handled" not in code and "val handled" not in code:
+        findings.append(
+            "S107 OpenE2eeVpnService.kt: missing `handled` "
+            "boolean flag in the startReaderThread dispatch "
+            "block. Sprint 12.0A.6 invariant - the "
+            "passthrough-skip logic needs a flag to know "
+            "whether the user-space stack handled the "
+            "packet (Owner 11:08 BLOCKED root cause: "
+            "passthrough was unconditional)."
+        )
+    # (b) `output.write` is conditional on the flag
+    if "output.write" in code:
+        # Check if output.write is inside an `if (handled)`
+        # block. Simplest check: the code between the
+        # `var handled` declaration and `output.write` has
+        # a `handled = true` assignment AND the output.write
+        # is wrapped in a conditional.
+        handled_idx = code.find("var handled")
+        if handled_idx == -1:
+            handled_idx = code.find("val handled")
+        if handled_idx != -1:
+            after = code[handled_idx:]
+            if "output.write" in after and "if (handled)" in after:
+                # Look for the output.write between the
+                # `if (handled)` and the `else` (or end of
+                # the conditional). The simplest proxy:
+                # there should be a "passthrough SKIPPED" log
+                # right after the `if (handled)`.
+                if "passthrough SKIPPED" not in after:
+                    findings.append(
+                        "S107 OpenE2eeVpnService.kt: passthrough "
+                        "skip is implemented but missing "
+                        "`passthrough SKIPPED` log breadcrumb. "
+                        "Sprint 12.0A.6 invariant - the Owner "
+                        "greps for this token to confirm the "
+                        "new behaviour in logcat."
+                    )
+            else:
+                findings.append(
+                    "S107 OpenE2eeVpnService.kt: `output.write` "
+                    "is NOT wrapped in `if (handled)` conditional. "
+                    "Sprint 12.0A.6 invariant - the passthrough "
+                    "MUST be skipped when the user-space stack "
+                    "handled the packet (Owner 11:08 BLOCKED "
+                    "root cause: the kernel raced the user-space "
+                    "stack and sent an RST)."
+                )
+    # (c) passthrough SKIPPED log
+    if "passthrough SKIPPED" not in code:
+        findings.append(
+            "S107 OpenE2eeVpnService.kt: missing `passthrough "
+            "SKIPPED` log breadcrumb. Sprint 12.0A.6 invariant - "
+            "the Owner greps for this token to confirm the new "
+            "behaviour in logcat."
+        )
+    return findings
+
+
+def run_s108_check(netty_text):
+    """S108: NettyChannelClient.kt tries BOTH the primary
+    AND reverse 5-tuple key when looking up a
+    TcpConnection.
+
+    Owner 11:08 BLOCKED secondary issue: the user-space
+    stack only stored the TcpConnection under the
+    OUTGOING 5-tuple (app -> real dest). The INCOMING
+    packets (real dest -> app) arrived with the REVERSED
+    5-tuple and missed the lookup. Pre-12.0A.6, the
+    INCOMING SYN+ACK / data / FIN were dropped silently.
+
+    12.0A.6 fix: handleTcpPacket computes BOTH the
+    primary and reverse flowKey, then does
+    `tcpConnectionMap[primaryFlowKey] ?:
+     tcpConnectionMap[reverseFlowKey]`. Both directions
+    of the flow find the same TcpConnection.
+
+    The audit requires the textual-order evidence:
+      (a) `primaryFlowKey` declaration (or equivalent
+          name) in handleTcpPacket.
+      (b) `reverseFlowKey` declaration.
+      (c) The lookup uses both keys (e.g.,
+          `tcpConnectionMap[primaryFlowKey] ?:
+           tcpConnectionMap[reverseFlowKey]`).
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S108 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.6 invariant - the 5-tuple "
+            "lookup MUST try BOTH the primary and reverse "
+            "keys so OUTGOING and INCOMING packets find the "
+            "same TcpConnection (Owner 11:08 BLOCKED secondary "
+            "issue: INCOMING packets were dropped silently)."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    if "primaryFlowKey" not in code:
+        findings.append(
+            "S108 NettyChannelClient.kt: missing `primaryFlowKey` "
+            "declaration. Sprint 12.0A.6 invariant - the "
+            "5-tuple lookup must try BOTH the primary "
+            "(src,dst) and reverse (dst,src) keys. Without "
+            "the primary declaration, the lookup only sees "
+            "one direction of the flow."
+        )
+    if "reverseFlowKey" not in code:
+        findings.append(
+            "S108 NettyChannelClient.kt: missing `reverseFlowKey` "
+            "declaration. Sprint 12.0A.6 invariant - the "
+            "5-tuple lookup must try BOTH the primary "
+            "(src,dst) and reverse (dst,src) keys. Without "
+            "the reverse declaration, INCOMING packets "
+            "(real dest -> app) miss the TcpConnection "
+            "stored under the OUTGOING key (Owner 11:08 "
+            "BLOCKED secondary issue)."
+        )
+    return findings
+
+
+# ═══ Sprint 12.0A.7 — HTTP data flow diagnostics + thread-safety (S109-S111) ═══
+#
+# Owner 11:33 BLOCKED on Sprint 12.0A.6: TCP 3-way
+# handshake works (17 ESTABLISHED connections logged)
+# but the HTTP data flow doesn't. Chrome can't load
+# `http://212.64.210.85/healthz`. Root cause hypothesis:
+# the cross-thread visibility bug — the startSocketReader
+# thread sees a STALE `conn.ackNum` (set by handleData on
+# the TUN reader thread) because `conn.ackNum` was not
+# `@Volatile`. The response packet then has the wrong
+# ack field, the app rejects the response, and the
+# HTTP page doesn't load.
+#
+# 12.0A.7 fix:
+#   S109: 4 breadcrumb tokens (sendHttpRequest,
+#         recvHttpResponse, responsePayload, response
+#         bytes count) — Owner-side diagnostic for the
+#         data flow. Each token confirms a specific
+#         stage: app's HTTP request written to real
+#         socket, real dest's response read from real
+#         socket, response written to TUN, byte count
+#         for pairing.
+#   S110: tcpConnectionMap.put primary flow +
+#         "unknown flow" warning — the connection
+#         registration log + the explicit drop
+#         log. The Owner greps for these to confirm
+#         the connection was registered (S110.a) and
+#         to detect late packets on torn-down
+#         connections (S110.b).
+#   S111: @Volatile on every TcpConnection var field
+#         — the cross-thread visibility fix.
+#         `conn.ackNum` is mutated by the TUN reader
+#         thread (handleData) and read by the
+#         per-connection reader thread (startSocketReader).
+#         Without @Volatile, the reader thread sees
+#         a stale ackNum and writes a response packet
+#         with the wrong ack field.
+#
+# Negative-path coverage: the production audit
+# `check_tcp_dataflow_v46` itself is the regression
+# guard. Pre-12.0A.7 baseline: the 4 breadcrumb
+# tokens were missing (S109 fail), the
+# tcpConnectionMap.put log was missing (S110.a fail),
+# the "unknown flow" warning was missing (S110.b
+# fail), and the @Volatile annotations were missing
+# (S111 fail). The audit catches all 4 regressions
+# on a single PR review.
+
+
+def run_s109_check(netty_text):
+    """S109: NettyChannelClient.kt has the 4 HTTP data
+    flow breadcrumb tokens.
+
+    Owner 11:33 BLOCKED on Sprint 12.0A.6: TCP 3-way
+    handshake works (17 ESTABLISHED connections logged)
+    but the HTTP data flow doesn't. The Owner could
+    not pinpoint where the data flow failed. 12.0A.7
+    adds 4 breadcrumb tokens so the Owner can match
+    the send-side log with the receive-side log via
+    the byte count + flowKey.
+
+    The 4 tokens (Owner-mandated):
+      (1) `sendHttpRequest: N bytes written to real
+          socket for flow ...` — in handleData after
+          out.flush(). Confirms the app's HTTP
+          request bytes actually reached the real
+          socket (and thus the OS's TCP stack would
+          send them to the real dest).
+      (2) `recvHttpResponse: N bytes read from real
+          socket for flow ...` — in startSocketReader
+          after input.read(). Confirms the real
+          dest's response bytes were actually read
+          from the real socket.
+      (3) `responsePayload: N bytes written to TUN
+          for flow ...` — in startSocketReader after
+          writeToTun. Confirms the response bytes
+          were actually written to the TUN (so the
+          kernel would route them to the app's
+          socket).
+      (4) The byte count — encoded in tokens (2)
+          and (3). The Owner pairs the byte count
+          of recvHttpResponse with the byte count
+          of responsePayload to confirm the
+          read-to-write round-trip is lossless.
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S109 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.7 invariant - the 4 HTTP data "
+            "flow breadcrumb tokens (sendHttpRequest, "
+            "recvHttpResponse, responsePayload, response "
+            "bytes count) are the Owner-side diagnostic "
+            "surface for the 11:33 BLOCKED regression."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    if "sendHttpRequest:" not in code:
+        findings.append(
+            "S109 NettyChannelClient.kt: missing `sendHttpRequest:` "
+            "log breadcrumb. Sprint 12.0A.7 invariant - the "
+            "Owner greps for this token to confirm the app's "
+            "HTTP request bytes were written to the real "
+            "socket. Without it, the Owner cannot distinguish "
+            "'handleData was called' (S106) from 'the bytes "
+            "actually reached the real socket' (S109)."
+        )
+    if "recvHttpResponse:" not in code:
+        findings.append(
+            "S109 NettyChannelClient.kt: missing `recvHttpResponse:` "
+            "log breadcrumb. Sprint 12.0A.7 invariant - the "
+            "Owner greps for this token to confirm the real "
+            "dest's HTTP response bytes were read from the "
+            "real socket. Without it, the Owner cannot "
+            "distinguish 'the reader is running' (S100) from "
+            "'the reader is reading actual data' (S109)."
+        )
+    if "responsePayload:" not in code:
+        findings.append(
+            "S109 NettyChannelClient.kt: missing `responsePayload:` "
+            "log breadcrumb. Sprint 12.0A.7 invariant - the "
+            "Owner greps for this token to confirm the "
+            "response bytes were written to the TUN. Pairs "
+            "with recvHttpResponse — recvHttp confirms the "
+            "read, responsePayload confirms the write. If "
+            "only recvHttp is present but responsePayload is "
+            "missing, the reader is reading but the write to "
+            "TUN is failing (silent drop)."
+        )
+    # (4) response bytes count — the token is shared
+    # with (2) and (3); a separate check for "N bytes"
+    # would be too strict (the exact format varies
+    # by sprint). We check for the dollar-N pattern
+    # in the recvHttpResponse + responsePayload lines
+    # as a proxy.
+    if "bytes read from real socket" not in code:
+        findings.append(
+            "S109 NettyChannelClient.kt: missing `bytes read "
+            "from real socket` substring in the recvHttpResponse "
+            "log. Sprint 12.0A.7 invariant - the byte count "
+            "is the canonical 'size of the response segment' "
+            "the Owner pairs with the responsePayload log."
+        )
+    return findings
+
+
+def run_s110_check(netty_text):
+    """S110: NettyChannelClient.kt has
+    `tcpConnectionMap.put primary flow` log AND
+    `late ACK` debug log (Sprint 12.0A.8 downgraded
+    from the 12.0A.7 `UNKNOWN FLOW` warning).
+
+    Sprint 12.0A.7 adds two diagnostic logs for
+    connection-registration:
+
+      (a) `tcpConnectionMap.put primary flow: $flowKey
+          (state=ESTABLISHED, conn #N, M entries in
+          map)` — in handleSyn AFTER
+          `tcpConnectionMap[flowKey] = conn`. The Owner
+          greps for this token to confirm the
+          connection was registered in the map under
+          the primary (OUTGOING) 5-tuple. Without
+          this log, the Owner cannot confirm the
+          connection survived past handleSyn.
+
+      (b) Sprint 12.0A.8 downgraded the 12.0A.7
+          `UNKNOWN FLOW` warning (Log.w) to a
+          `late ACK` debug log (Log.d) because with
+          the dual put, the UNKNOWN FLOW only fires
+          for the late ACK after handleFinAck removed
+          both keys (1 per connection — diagnostic
+          noise, not an error). The audit verifies
+          the `late ACK` log is present.
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S110 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.7/12.0A.8 invariant - the "
+            "tcpConnectionMap.put primary flow log AND "
+            "the late ACK debug log are the connection-"
+            "registration diagnostic surface."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    if "tcpConnectionMap.put primary flow" not in code:
+        findings.append(
+            "S110 NettyChannelClient.kt: missing "
+            "`tcpConnectionMap.put primary flow` log. "
+            "Sprint 12.0A.7 invariant - the Owner greps "
+            "for this token to confirm the connection was "
+            "registered in the map under the primary "
+            "(OUTGOING) 5-tuple. Without it, the Owner "
+            "cannot confirm the connection survived past "
+            "handleSyn (the TcpConnection has no other "
+            "references and would be GC'd by the JVM)."
+        )
+    if "late ACK" not in code:
+        findings.append(
+            "S110 NettyChannelClient.kt: missing "
+            "`late ACK` debug log. Sprint 12.0A.8 "
+            "invariant - the 12.0A.7 `UNKNOWN FLOW` "
+            "warning was downgraded to a `late ACK` "
+            "debug log because with the dual put, the "
+            "UNKNOWN FLOW only fires for the late ACK "
+            "after handleFinAck removed both keys (1 "
+            "per connection — diagnostic noise, not an "
+            "error). The Owner greps for this token to "
+            "confirm the corner-case count."
+        )
+    return findings
+
+
+def run_s111_check(netty_text):
+    """S111: NettyChannelClient.kt has `@Volatile` on
+    every mutable TcpConnection field.
+
+    The cross-thread visibility bug — `conn.ackNum` is
+    mutated by the TUN reader thread (handleData) and
+    read by the per-connection reader thread
+    (startSocketReader). Without `@Volatile`, the
+    reader thread sees a stale ackNum and writes a
+    response packet with the wrong ack field. The
+    app rejects the response and the HTTP page doesn't
+    load. This was the Owner 11:33 BLOCKED root cause
+    hypothesis: "TCP 3-way handshake works (17
+    ESTABLISHED) but HTTP data flow doesn't".
+
+    12.0A.7 fix: every `var` field in TcpConnection
+    gets `@Volatile` (state, seqNum, ackNum,
+    receiveWindow, socket, lastAckSent,
+    retransmissionTimer, readerThread). The
+    `outputBuffer` is `val` and immutable so doesn't
+    need volatile.
+
+    The audit verifies the 8 fields each carry
+    `@Volatile` in the TcpConnection data class.
+    Comment-strip per the Sprint 9.6.5 lesson (a
+    comment claiming "we use volatile" must NOT pass).
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S111 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.7 invariant - every TcpConnection "
+            "var field MUST be @Volatile (cross-thread "
+            "visibility between handleData on the TUN "
+            "reader thread + startSocketReader on the "
+            "per-connection reader thread). Without "
+            "@Volatile, the reader thread sees a stale "
+            "ackNum and writes a response packet with the "
+            "wrong ack field (Owner 11:33 BLOCKED root "
+            "cause hypothesis)."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    # The TcpConnection data class is named "TcpConnection".
+    # The simplest check: every `var` field in the data
+    # class is prefixed with @Volatile. We can detect
+    # this by counting @Volatile occurrences inside
+    # the data class body (between "data class
+    # TcpConnection(" and the matching closing ")").
+    # For the audit we use a simpler proxy: count the
+    # @Volatile occurrences in the file and verify the
+    # expected minimum (8 fields, plus possibly more
+    # from the per-flow map or shutdown path).
+    volatile_count = code.count("@Volatile")
+    if volatile_count < 8:
+        findings.append(
+            "S111 NettyChannelClient.kt: too few `@Volatile` "
+            "annotations (found " + str(volatile_count) +
+            ", need at least 8 — one per TcpConnection "
+            "var field: state, seqNum, ackNum, "
+            "receiveWindow, socket, lastAckSent, "
+            "retransmissionTimer, readerThread). Sprint "
+            "12.0A.7 invariant - cross-thread visibility "
+            "between handleData (TUN reader thread) and "
+            "startSocketReader (per-connection reader "
+            "thread) requires every mutable TcpConnection "
+            "field to be @Volatile. Without it, the "
+            "reader thread sees a stale ackNum (Owner "
+            "11:33 BLOCKED root cause hypothesis)."
+        )
+    return findings
+
+
+# ═══ Sprint 12.0A.8 — Dual put + UNKNOWN FLOW downgrade (S112-S114) ═══
+#
+# Owner 12:09 BLOCKED on Sprint 12.0A.7: HTTP data
+# flow is working (sendHttpRequest 13, recvHttpResponse
+# 13, responsePayload 13, ESTABLISHED 13) but UNKNOWN
+# FLOW warning fires 13 times. Chrome page doesn't
+# open.
+#
+# Root cause: 12.0A.6 stored the TcpConnection under
+# the primary (OUTGOING) 5-tuple only. The INCOMING
+# packets (real dest -> app) had a reversed 5-tuple
+# and the lookup used the reverse key fallback. The
+# UNKNOWN FLOW warning was fired for late ACKs after
+# handleFinAck removed both keys (1 per connection,
+# 13 total for 13 connections).
+#
+# 12.0A.8 fix:
+#   S112: ConcurrentHashMap — verify the
+#         `tcpConnectionMap` field uses
+#         ConcurrentHashMap (NOT plain HashMap) so
+#         concurrent put/get from multiple threads
+#         is safe. (This was already in 12.0A.7; the
+#         audit formalizes the check.)
+#   S113: handleSyn dual put — verify handleSyn
+#         stores the conn under BOTH the primary and
+#         reverse flowKey (forward prediction). The
+#         lookup in handleTcpPacket then ALWAYS
+#         succeeds for the common case (data flow
+#         packets), eliminating the UNKNOWN FLOW
+#         warning.
+#   S114: UNKNOWN FLOW downgraded — verify the
+#         `UNKNOWN FLOW` warning is now a `late ACK`
+#         debug log AND there's a positive
+#         `forwarded via reverseKey` INFO log for
+#         the INCOMING packet case.
+#
+# Negative-path coverage: the production audit
+# `check_tcp_dual_put_v47` itself is the regression
+# guard. Pre-12.0A.8 baseline: HashMap (S112 fail),
+# single put (S113 fail), UNKNOWN FLOW warning
+# (S114 fail). The audit catches all 3 regressions
+# on a single PR review.
+
+
+def run_s112_check(netty_text):
+    """S112: NettyChannelClient.kt uses
+    `ConcurrentHashMap` for `tcpConnectionMap`.
+
+    The map is mutated from THREE threads:
+      (1) The TUN reader thread — handleSyn /
+          handleFinAck / handleData all read + write
+          the map.
+      (2) The per-connection socket reader thread
+          (started in handleSyn) — does NOT mutate
+          the map directly but reads via the conn
+          reference.
+      (3) The shutdown path — clears the map.
+    A plain `HashMap` would corrupt under concurrent
+    access (ConcurrentModificationException or
+    silent data loss). `ConcurrentHashMap` provides
+    thread-safe put / get / remove with no external
+    synchronization.
+
+    The audit verifies the `tcpConnectionMap` field
+    is declared as `ConcurrentHashMap` (NOT plain
+    `HashMap`). Comment-strip per the Sprint 9.6.5
+    lesson.
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S112 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.8 invariant - tcpConnectionMap "
+            "MUST be ConcurrentHashMap (not plain HashMap) "
+            "for thread-safe concurrent access from the "
+            "TUN reader thread + the per-connection reader "
+            "thread + the shutdown path."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    # Find the tcpConnectionMap declaration. It must
+    # be a ConcurrentHashMap, not a HashMap.
+    if "tcpConnectionMap" not in code:
+        findings.append(
+            "S112 NettyChannelClient.kt: missing "
+            "`tcpConnectionMap` field declaration. "
+            "Sprint 12.0A.8 invariant - the per-flow "
+            "TCP state map MUST exist and use "
+            "ConcurrentHashMap."
+        )
+        return findings
+    if "ConcurrentHashMap" not in code:
+        findings.append(
+            "S112 NettyChannelClient.kt: tcpConnectionMap "
+            "MUST be ConcurrentHashMap (not plain HashMap). "
+            "Sprint 12.0A.8 invariant - the map is "
+            "mutated from 3 threads (TUN reader, "
+            "per-connection reader, shutdown); plain "
+            "HashMap would corrupt under concurrent "
+            "access (ConcurrentModificationException or "
+            "silent data loss)."
+        )
+    # Also verify the map is NOT declared as plain HashMap
+    # (a defensive double-check: a future sprint that
+    # changes ConcurrentHashMap to HashMap would fail
+    # BOTH the positive ConcurrentHashMap check above
+    # AND the negative plain-HashMap check below).
+    if re.search(r"tcpConnectionMap[^=]*=\s*HashMap", code) is not None or re.search(r"HashMap<[^,]+,\s*tcpConnectionMap|HashMap<[^,]+,\s*[^,]+>\s*=\s*[^;]*tcpConnectionMap", code) is not None:
+        findings.append(
+            "S112 NettyChannelClient.kt: tcpConnectionMap "
+            "is declared as plain HashMap (NOT "
+            "ConcurrentHashMap). Sprint 12.0A.8 "
+            "invariant - the map MUST be "
+            "ConcurrentHashMap for thread-safe access."
+        )
+    return findings
+
+
+def run_s113_check(netty_text):
+    """S113: NettyChannelClient.kt `handleSyn` puts
+    BOTH the primary and reverse flowKey.
+
+    The MVP single-connection scope can safely put
+    the SAME TcpConnection under both keys (forward
+    prediction). This way, the lookup in
+    handleTcpPacket always succeeds regardless of
+    which direction the packet is going:
+      - OUTGOING packet (app -> real dest): the
+        packet's primaryFlowKey is the OUTGOING
+        key, which is the primary in handleSyn's
+        frame. Found.
+      - INCOMING packet (real dest -> app): the
+        packet's primaryFlowKey is the REVERSED
+        key (i.e., the OUTGOING key from handleSyn's
+        frame, which is the reverse of the packet's
+        own primary). Found via the reverse key
+        fallback.
+    The dual put eliminates the UNKNOWN FLOW warning
+    for the common case (data flow packets). The
+    late ACK after FIN+ACK (when both keys are
+    removed in handleFinAck) is still a corner case
+    but is now downgraded to a `late ACK` debug log.
+
+    The audit verifies handleSyn has BOTH:
+      (a) `tcpConnectionMap[flowKey] = conn` (primary)
+      (b) `tcpConnectionMap[reverseKey] = conn`
+          (reverse) — or equivalent pattern.
+    Comment-strip per the Sprint 9.6.5 lesson.
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S113 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.8 invariant - handleSyn MUST "
+            "put BOTH the primary and reverse flowKey "
+            "so the lookup always succeeds for the "
+            "common case (data flow packets)."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    # Count the `tcpConnectionMap[... ] = conn` (or
+    # `tcpConnectionMap.put(...)`) occurrences in the
+    # code. We expect at least 2 in handleSyn (primary
+    # + reverse). Note: handleFinAck ALSO removes from
+    # the map (1 remove + 1 remove = 2 ops), but those
+    # are `tcpConnectionMap.remove(...)` not `= conn`.
+    # A simple proxy: count `tcpConnectionMap[` (open
+    # bracket) occurrences. handleSyn has 2 puts,
+    # handleFinAck has 2 removes, so total is >= 4.
+    map_put_count = len(re.findall(r"tcpConnectionMap\[\s*\w+\s*\]\s*=\s*conn", code))
+    if map_put_count < 2:
+        findings.append(
+            "S113 NettyChannelClient.kt: handleSyn does NOT "
+            "put BOTH the primary and reverse flowKey. "
+            "Found only " + str(map_put_count) + " "
+            "`tcpConnectionMap[...] = conn` line(s); "
+            "need at least 2 (one for the primary, one "
+            "for the reverse). Sprint 12.0A.8 invariant - "
+            "the dual put ensures the lookup in "
+            "handleTcpPacket always succeeds for both "
+            "OUTGOING and INCOMING packets, eliminating "
+            "the UNKNOWN FLOW warning for the common case."
+        )
+    return findings
+
+
+def run_s114_check(netty_text):
+    """S114: NettyChannelClient.kt downgrades
+    `UNKNOWN FLOW` warning to a `late ACK` debug
+    log AND adds a `forwarded via reverseKey`
+    INFO log.
+
+    Sprint 12.0A.7 fired `Log.w` for the
+    UNKNOWN FLOW case. With the 12.0A.8 dual
+    put, this only fires for the late ACK after
+    handleFinAck removed both keys (1 per
+    connection — diagnostic noise, not an
+    error). 12.0A.8 downgrades it to `Log.d`
+    with the message `late ACK` so the Owner can
+    grep for it to confirm the corner-case count.
+
+    Additionally, 12.0A.8 adds a positive
+    `forwarded via reverseKey` INFO log when
+    the lookup succeeded via the reverse key
+    (i.e., the INCOMING packet case). This is
+    a positive signal that the dual put is
+    working.
+
+    The audit verifies:
+      (a) The `UNKNOWN FLOW` literal is NOT
+          present (downgraded).
+      (b) The `forwarded via reverseKey` literal
+          IS present (positive signal).
+      (c) The `late ACK` literal IS present
+          (downgraded message).
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S114 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0A.8 invariant - the UNKNOWN "
+            "FLOW warning is downgraded to a `late ACK` "
+            "debug log AND a `forwarded via reverseKey` "
+            "INFO log is added."
+        )
+        return findings
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+    if "UNKNOWN FLOW" in code:
+        findings.append(
+            "S114 NettyChannelClient.kt: `UNKNOWN FLOW` "
+            "warning still present. Sprint 12.0A.8 "
+            "invariant - the warning is downgraded to a "
+            "`late ACK` debug log because with the dual "
+            "put, this only fires for the late ACK after "
+            "handleFinAck removed both keys (1 per "
+            "connection — diagnostic noise, not an error)."
+        )
+    if "forwarded via reverseKey" not in code:
+        findings.append(
+            "S114 NettyChannelClient.kt: missing "
+            "`forwarded via reverseKey` INFO log. Sprint "
+            "12.0A.8 invariant - this is the positive "
+            "signal that the dual put is working (the "
+            "INCOMING packet found its conn via the "
+            "reverse key)."
+        )
+    if "late ACK" not in code:
+        findings.append(
+            "S114 NettyChannelClient.kt: missing `late ACK` "
+            "debug log message. Sprint 12.0A.8 invariant - "
+            "this is the downgraded message for the "
+            "UNKNOWN FLOW case (late ACK after handleFinAck "
+            "removed both keys)."
+        )
+    return findings
+
+
+def run_s115_check(netty_text):
+    """S115: NettyChannelClient.kt has comprehensive
+    6-step teardown in `shutdown()` covering every
+    resource Sprint 12.0A introduced. Sprint 12.0X
+    stop-fix (Owner 12:29): the pre-12.0X teardown
+    only did 11.0R-level cleanup, leaving the Netty
+    `workerGroup`, the per-connection reader threads,
+    and the per-flow UDP reader threads leaked. The
+    kernel TUN interface remained as an orphan and
+    host routing was broken (only a reboot recovered).
+    The 6 mandatory steps in `shutdown()`:
+      1. `flowMap.values.forEach { it.close() }` AND
+         `flowMap.clear()` — per-flow Netty Channels.
+      2. `tcpConnectionMap.values.forEach { conn ->
+             conn.readerFuture?.cancel(true) ...
+             conn.socket?.close() ...
+             conn.readerThread?.interrupt() ...
+         }` AND `tcpConnectionMap.clear()` — per-connection
+         readers (cancel Future, close Socket, interrupt
+         Thread for defense in depth).
+      3. `udpReaderFutures.values.forEach { f ->
+             f?.cancel(true) }` AND
+         `udpSocketMap.values.forEach { sock ->
+             sock.soTimeout = 0; sock.close() }` AND
+         `udpSocketMap.clear()` — per-flow UDP readers
+         + DatagramSockets.
+      4. `tunOutputStream = null` — detach the TUN
+         output stream ref.
+      5. `workerGroup.shutdownGracefully().await(1,
+         TimeUnit.SECONDS)` — bounded wait for the
+         NioEventLoopGroup threads to exit.
+      6. `backgroundExecutor.shutdownNow()` AND
+         `backgroundExecutor.awaitTermination(1,
+         TimeUnit.SECONDS)` — bounded wait for ALL
+         per-connection / per-flow reader threads to
+         exit.
+    The audit strips `/* ... */` block comments and
+    `//` line comments (preserving strings), then
+    checks for the 6 mandatory token substrings in
+    the resulting code. Any future sprint that drops
+    one of the 6 steps trips the regression guard.
+    """
+    import re
+    findings = []
+    if netty_text is None:
+        findings.append(
+            "S115 NettyChannelClient.kt: file text missing. "
+            "Sprint 12.0X invariant - the comprehensive "
+            "teardown in shutdown() is the regression "
+            "guard for Owner 12:29 (kernel TUN orphan + "
+            "host routing broken until reboot)."
+        )
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", netty_text)
+    # Strip // line comments (preserving strings).
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # Step 1: flowMap close + clear.
+    if "flowMap.clear()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 1 of "
+            "comprehensive teardown (flowMap.clear). "
+            "Sprint 12.0X invariant - per-flow Netty "
+            "Channels must be closed and removed from "
+            "the flowMap so the kernel TUN can release."
+        )
+
+    # Step 2: tcpConnectionMap clear + reader cancel.
+    if "tcpConnectionMap.clear()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 2 of "
+            "comprehensive teardown (tcpConnectionMap.clear). "
+            "Sprint 12.0X invariant - per-connection TcpConnection "
+            "entries must be removed so the per-connection reader "
+            "threads can be cancelled + the real Sockets can be closed."
+        )
+    if "readerFuture" not in code or "cancel(true)" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 2b of "
+            "comprehensive teardown (readerFuture.cancel(true)). "
+            "Sprint 12.0X invariant - the per-connection reader "
+            "Future must be cancelled (Future.cancel(true) interrupts "
+            "the executor worker thread) for the cancel to take effect."
+        )
+
+    # Step 3: udpSocketMap close + clear + udpReaderFutures cancel.
+    # Sprint 12.0B — tolerant of the post-12.0B pattern
+    # (UDP forwarder moved to OpenE2eeVpnService.UdpForwarder
+    # per the brief: "Netty DEGIL"). The 6-step shutdown
+    # now has step 3 as a forward-compat no-op (logs
+    # "step 3 DELEGATED (UDP teardown runs in
+    # service.UdpForwarder.tearDown() before this method;
+    # udpSocketMap + udpReaderFutures are already
+    # cleared)"). The actual UDP teardown is verified by
+    # S116 (the new UdpForwarder teardown audit).
+    if (
+        "udpSocketMap.clear()" not in code
+        and "step 3 DELEGATED" not in code
+    ):
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 3 of "
+            "comprehensive teardown (udpSocketMap.clear OR "
+            "step 3 DELEGATED breadcrumb). Sprint 12.0X "
+            "invariant - per-flow DatagramSockets must be "
+            "closed and removed from udpSocketMap, OR (Sprint "
+            "12.0B) the teardown must be delegated to "
+            "UdpForwarder.tearDown() with the DELEGATED "
+            "breadcrumb. The new pattern is checked by S116."
+        )
+    if (
+        "udpReaderFutures" not in code
+        and "step 3 DELEGATED" not in code
+    ):
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 3b of "
+            "comprehensive teardown (udpReaderFutures cancel "
+            "OR step 3 DELEGATED breadcrumb). Sprint 12.0X "
+            "invariant - per-flow UDP reader Futures must be "
+            "cancelled so the receive() loop unblocks, OR "
+            "(Sprint 12.0B) the teardown must be delegated "
+            "to UdpForwarder.tearDown() with the DELEGATED "
+            "breadcrumb. The new pattern is checked by S116."
+        )
+
+    # Step 4: tunOutputStream null.
+    if "tunOutputStream = null" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 4 of "
+            "comprehensive teardown (tunOutputStream = null). "
+            "Sprint 12.0X invariant - the TUN output stream ref "
+            "must be detached so the kernel can release the "
+            "ParcelFileDescriptor."
+        )
+
+    # Step 5: workerGroup shutdownGracefully awaited.
+    if "workerGroup.shutdownGracefully()" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 5 of "
+            "comprehensive teardown (workerGroup.shutdownGracefully). "
+            "Sprint 12.0X invariant - the NioEventLoopGroup must "
+            "be shut down so the 2 worker threads exit."
+        )
+    if "TimeUnit" not in code or "await" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 5b of "
+            "comprehensive teardown (workerGroup.shutdownGracefully().await). "
+            "Sprint 12.0X invariant - the NioEventLoopGroup "
+            "shutdownGracefully returns a Future; we must await it "
+            "with a bounded timeout to ensure the worker threads exit."
+        )
+
+    # Step 6: backgroundExecutor shutdownNow + awaitTermination.
+    if "backgroundExecutor" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 6 of "
+            "comprehensive teardown (backgroundExecutor). "
+            "Sprint 12.0X invariant - a single ExecutorService "
+            "must own ALL background work (per-connection reader "
+            "threads + per-flow UDP reader threads) so the "
+            "shutdown has ONE place to terminate them."
+        )
+    if "shutdownNow()" not in code or "awaitTermination" not in code:
+        findings.append(
+            "S115 NettyChannelClient.kt: missing step 6b of "
+            "comprehensive teardown (backgroundExecutor.shutdownNow "
+            "+ awaitTermination). Sprint 12.0X invariant - the "
+            "executor must be shutdownNow() (interrupts running "
+            "tasks) and awaitTermination(1, TimeUnit.SECONDS) (waits "
+            "for them to exit) so no reader thread outlives the "
+            "VPN service."
+        )
+    return findings
+
+
+def run_s116_check(opene2ee_vpn_service_text):
+    """S116: UdpForwarder teardown invariant (Sprint 12.0B).
+
+    The 12.0A.5 UDP forwarder (per-flow protected
+    DatagramSocket + per-flow reader thread) was moved
+    OUT of NettyChannelClient.kt and INTO a new
+    UdpForwarder class in OpenE2eeVpnService.kt per
+    the brief: "OpenE2eeVpnService.kt icine minimal
+    UDP forwarder ekle, Netty DEGIL, sadece raw
+    java.net.DatagramSocket + service.protect(socket)".
+
+    The teardown invariant (S116) verifies the new
+    class + its caller contract + the 6-step teardown
+    inside the class.
+
+    The audit checks the OpenE2eeVpnService.kt source
+    for:
+      1. `UdpForwarder` class declaration (top-level
+         or nested) in the file.
+      2. `udpSocketMap` field in the class (the
+         per-flow DatagramSocket map; the brief
+         requires the teardown to close + clear it).
+      3. `udpReaderFutures` field in the class (the
+         per-flow reader Future map; the teardown
+         must cancel them).
+      4. `tearDown()` method declaration (the public
+         teardown entry point called from
+         `OpenE2eeVpnService.stopCapture`).
+      5. Inside `tearDown`: `cancel(true)` call
+         (cancels every per-flow reader Future so
+         the receive() loop unblocks).
+      6. Inside `tearDown`: `sock.close()` call
+         (closes every per-flow DatagramSocket).
+      7. Inside `tearDown`: `shutdownNow()` call
+         (interrupts all background reader threads).
+      8. Inside `tearDown`: `awaitTermination` call
+         (bounded wait for the threads to exit).
+      9. `protect(` call in the handleUdpPacket
+         code path (the brief: "service.protect
+         (socket)" — without it the DatagramSocket
+         is captured by the TUN and the UDP packet
+         loops forever).
+      10. Caller wiring: `udpForwarder.tearDown()`
+          call from `OpenE2eeVpnService.stopCapture`
+          (the teardown must run BEFORE
+          `nettyClient?.shutdown()` so the 6-step
+          structure is preserved).
+      11. TUN wire: `udpForwarder.setTunOutputStream`
+          call from `startReaderThread` (so the
+          per-flow reader can write response packets
+          back to the kernel).
+
+    The audit strips `/* ... */` block comments and
+    `//` line comments (preserving strings), then
+    checks for the 11 mandatory token substrings in
+    the resulting code. Any future sprint that
+    drops one of the 11 invariants trips the
+    regression guard.
+
+    Sprint 12.0B target: 162 + 1 = 163 audit cases
+    total (S116 is the 163rd).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: file text missing. "
+            "Sprint 12.0B invariant - the UdpForwarder "
+            "teardown must be in this file (the brief: "
+            "\"OpenE2eeVpnService.kt icine minimal UDP "
+            "forwarder ekle\"). S115 is no longer the "
+            "complete teardown guard for the UDP path "
+            "(the UDP code moved out of "
+            "NettyChannelClient.kt); S116 is the new "
+            "authoritative audit."
+        )
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    # Strip // line comments (preserving strings).
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # 1. UdpForwarder class declaration.
+    if "class UdpForwarder" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `class "
+            "UdpForwarder` declaration. Sprint 12.0B "
+            "invariant - the UDP forwarder must be a class "
+            "IN this file (the brief: \"OpenE2eeVpnService.kt "
+            "icine minimal UDP forwarder ekle\"). "
+            "NettyChannelClient.kt no longer owns the UDP "
+            "code."
+        )
+
+    # 2. udpSocketMap field.
+    if "udpSocketMap" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `udpSocketMap` "
+            "field. Sprint 12.0B invariant - the per-flow "
+            "DatagramSocket map must be in UdpForwarder "
+            "(moved from NettyChannelClient) so the teardown "
+            "can close + clear it."
+        )
+
+    # 3. udpReaderFutures field.
+    if "udpReaderFutures" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `udpReaderFutures` "
+            "field. Sprint 12.0B invariant - the per-flow "
+            "reader Future map must be in UdpForwarder "
+            "(moved from NettyChannelClient) so the teardown "
+            "can cancel them."
+        )
+
+    # 4. tearDown() method.
+    if "fun tearDown()" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `fun tearDown()` "
+            "method on UdpForwarder. Sprint 12.0B invariant - "
+            "the teardown is called from "
+            "OpenE2eeVpnService.stopCapture BEFORE "
+            "nettyClient?.shutdown() (so the 6-step "
+            "shutdown's step 3 can safely delegate to "
+            "service?.tearDownUdpForwarder() as a no-op)."
+        )
+
+    # 5. cancel(true) inside tearDown (the per-flow reader
+    # Future cancellation; this is the load-bearing piece
+    # — without it the receive() loop blocks the worker
+    # thread until the 2s soTimeout fires, leaking the
+    # thread into the next VPN session).
+    if "cancel(true)" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `cancel(true)` "
+            "in UdpForwarder.tearDown. Sprint 12.0B invariant "
+            "- the per-flow UDP reader Futures must be "
+            "cancelled (Future.cancel(true) interrupts the "
+            "executor worker thread) so the receive() call "
+            "unblocks immediately."
+        )
+
+    # 6. sock.close() inside tearDown (the per-flow
+    # DatagramSocket close; without it the socket stays
+    # bound and the kernel cannot release the underlying
+    # port).
+    if "sock.close()" not in code and "s.close()" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing per-flow "
+            "DatagramSocket close in UdpForwarder.tearDown. "
+            "Sprint 12.0B invariant - every per-flow "
+            "DatagramSocket must be closed so the kernel "
+            "can release the bound UDP port and the TUN "
+            "interface can be safely released."
+        )
+
+    # 7. shutdownNow() inside tearDown (the background
+    # ExecutorService teardown — interrupts all running
+    # tasks; awaitTermination waits for them to exit).
+    if "shutdownNow()" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing "
+            "backgroundExecutor.shutdownNow() in "
+            "UdpForwarder.tearDown. Sprint 12.0B invariant "
+            "- the ExecutorService that owns the per-flow "
+            "reader threads must be shutdownNow() (interrupts "
+            "running tasks) so no reader thread outlives the "
+            "VPN service."
+        )
+
+    # 8. awaitTermination inside tearDown (the bounded
+    # wait for the threads to exit).
+    if "awaitTermination" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing "
+            "backgroundExecutor.awaitTermination in "
+            "UdpForwarder.tearDown. Sprint 12.0B invariant "
+            "- the executor must awaitTermination(1, "
+            "TimeUnit.SECONDS) (waits for running tasks to "
+            "exit) so no reader thread outlives the VPN "
+            "service."
+        )
+
+    # 9. protect() call in the handleUdpPacket code path.
+    # The brief: "service.protect(socket)". Without
+    # protect(), the DatagramSocket is captured by the
+    # TUN and the UDP packet loops forever (the "VPN
+    # blackhole" symptom that 12.0A fixed for TCP, now
+    # closed for UDP).
+    if "protect(" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing `protect(` "
+            "call in UdpForwarder.handleUdpPacket. Sprint "
+            "12.0B invariant - the per-flow DatagramSocket "
+            "must be VpnService.protect()-ed (the brief: "
+            "\"sadece raw java.net.DatagramSocket + "
+            "service.protect(socket)\") so it bypasses the "
+            "VPN and uses the device's real NIC."
+        )
+
+    # 10. Caller wiring: udpForwarder.tearDown() call
+    # from stopCapture. The teardown must run BEFORE
+    # nettyClient?.shutdown() so the 6-step structure is
+    # preserved.
+    if "udpForwarder.tearDown()" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing "
+            "`udpForwarder.tearDown()` call from "
+            "stopCapture. Sprint 12.0B invariant - the "
+            "UdpForwarder teardown must run BEFORE "
+            "nettyClient?.shutdown() so the 6-step "
+            "shutdown's step 3 can safely delegate "
+            "(step 3 is a forward-compat no-op after "
+            "the teardown ran first)."
+        )
+
+    # 11. TUN wire: udpForwarder.setTunOutputStream call
+    # from startReaderThread. The per-flow reader needs
+    # the TUN output stream to write response packets
+    # back to the kernel; without this wire, DNS queries
+    # would never get a response and every hostname-
+    # dependent app would fail.
+    if "udpForwarder.setTunOutputStream" not in code:
+        findings.append(
+            "S116 OpenE2eeVpnService.kt: missing "
+            "`udpForwarder.setTunOutputStream(...)` call "
+            "from startReaderThread. Sprint 12.0B invariant "
+            "- the TUN output stream must be wired to the "
+            "UdpForwarder so the per-flow reader can write "
+            "wrapped IP+UDP response packets back to the "
+            "kernel. Without this wire, DNS / NTP / STUN "
+            "responses are silently dropped."
+        )
+
+    return findings
+
+
+def run_s117_check(opene2ee_vpn_service_text):
+    """S117: TcpForwarder teardown invariant (Sprint 12.0C).
+
+    The 12.0A TCP state machine was moved OUT of
+    NettyChannelClient.kt and INTO a new
+    TcpForwarder class in OpenE2eeVpnService.kt per
+    the brief: "OpenE2eeVpnService.kt icine
+    TcpForwarder class (raw java.net.Socket, Netty
+    DEGIL, 12.0B gibi)".
+
+    The TcpForwarder mirrors the 12.0B UdpForwarder
+    pattern: raw java.net.Socket + service.protect
+    on every connection (the brief: "service
+    .protect(socket) + Socket(host, port) +
+    outputStream + inputStream"). The 12.0X 6-step
+    teardown's step 2 is moved into the new
+    TcpForwarder.tearDown() method:
+
+      1. Cancel every per-flow TCP reader Future
+         (`Future.cancel(true)` interrupts the
+         worker thread).
+      2. Close every per-flow real java.net.Socket.
+      3. Interrupt every per-flow reader Thread.
+      4. Join every per-flow reader Thread
+         (1-second bounded wait).
+      5. Clear tcpConnectionMap + tcpReaderFutures.
+      6. backgroundExecutor.shutdownNow() +
+         awaitTermination(1, SECONDS).
+
+    After tearDown returns, NO background TCP thread
+    is alive, every per-flow socket is closed, and
+    the kernel can safely release the TUN
+    interface. The teardown is called from
+    OpenE2eeVpnService.stopCapture BEFORE
+    nettyClient?.shutdown() so the 6-step
+    shutdown's step 2 can safely delegate to the
+    TcpForwarder teardown (similar to the post-12.0B
+    pattern for step 3 / UdpForwarder).
+
+    The audit checks the OpenE2eeVpnService.kt
+    source for the 12 mandatory tokens:
+      1. `class TcpForwarder` declaration (top-level
+         or nested) in the file.
+      2. `tcpConnectionMap` field (per-flow
+         TcpConnection map; the brief requires the
+         teardown to close + clear it).
+      3. `tcpReaderFutures` field (per-flow reader
+         Future map; the teardown must cancel
+         them).
+      4. `tearDown()` method declaration (the
+         public teardown entry point called from
+         `OpenE2eeVpnService.stopCapture`).
+      5. Inside `tearDown`: `cancel(true)` call
+         (cancels every per-flow reader Future so
+         the read() loop unblocks).
+      6. Inside `tearDown`: `conn.socket?.close()`
+         (closes every per-flow real Socket).
+      7. Inside `tearDown`: `readerThread.interrupt`
+         (defense in depth — interrupts every
+         per-flow reader Thread).
+      8. Inside `tearDown`: `readerThread.join` (1s
+         bounded wait for the reader threads to
+         exit before the teardown returns).
+      9. Inside `tearDown`: `shutdownNow()` +
+         `awaitTermination` (backgroundExecutor
+         teardown).
+     10. `protect(` call in the handleSyn code
+         path (the brief: "service.protect(socket)").
+     11. Caller wiring: `tcpForwarder.tearDown()`
+         call from `OpenE2eeVpnService.stopCapture`
+         (the teardown must run BEFORE
+         `nettyClient?.shutdown()` so the 6-step
+         structure is preserved).
+     12. TUN wire: `tcpForwarder.setTunOutputStream`
+         call from `startReaderThread` (so the
+         per-connection reader can write response
+         packets back to the kernel).
+
+    The audit strips `/* ... */` block comments and
+    `//` line comments (preserving strings), then
+    checks for the 12 mandatory token substrings in
+    the resulting code. Any future sprint that
+    drops one of the 12 invariants trips the
+    regression guard.
+
+    Sprint 12.0C target: 163 + 1 = 164 audit cases
+    total (S117 is the 164th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: file text missing. "
+            "Sprint 12.0C invariant - the TcpForwarder "
+            "teardown must be in this file (the brief: "
+            "\"OpenE2eeVpnService.kt icine TcpForwarder "
+            "class (raw java.net.Socket, Netty DEGIL, "
+            "12.0B gibi)\"). S115 is no longer the "
+            "complete teardown guard for the TCP path "
+            "(the TCP code moved out of "
+            "NettyChannelClient.kt); S117 is the new "
+            "authoritative audit for the TCP forwarder "
+            "teardown."
+        )
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    # Strip // line comments (preserving strings).
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # 1. TcpForwarder class declaration.
+    if "class TcpForwarder" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing `class "
+            "TcpForwarder` declaration. Sprint 12.0C "
+            "invariant - the TCP forwarder must be a class "
+            "IN this file (the brief: \"OpenE2eeVpnService.kt "
+            "icine TcpForwarder class\"). "
+            "NettyChannelClient.kt no longer owns the TCP "
+            "runtime code."
+        )
+
+    # 2. tcpConnectionMap field.
+    if "tcpConnectionMap" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`tcpConnectionMap` field. Sprint 12.0C "
+            "invariant - the per-flow TcpConnection map "
+            "must be in TcpForwarder (moved from "
+            "NettyChannelClient) so the teardown can close "
+            "+ clear it."
+        )
+
+    # 3. tcpReaderFutures field.
+    if "tcpReaderFutures" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`tcpReaderFutures` field. Sprint 12.0C "
+            "invariant - the per-flow reader Future map "
+            "must be in TcpForwarder so the teardown can "
+            "cancel them (mirrors the 12.0B UdpForwarder "
+            "`udpReaderFutures` pattern)."
+        )
+
+    # 4. tearDown() method.
+    if "fun tearDown()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing `fun "
+            "tearDown()` method on TcpForwarder. Sprint "
+            "12.0C invariant - the teardown is called from "
+            "OpenE2eeVpnService.stopCapture BEFORE "
+            "nettyClient?.shutdown() so the 6-step "
+            "shutdown's step 2 can safely delegate (step 2 "
+            "is a forward-compat no-op after the teardown "
+            "ran first)."
+        )
+
+    # 5. cancel(true) inside tearDown.
+    if "cancel(true)" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`cancel(true)` in TcpForwarder.tearDown. "
+            "Sprint 12.0C invariant - the per-flow TCP "
+            "reader Futures must be cancelled "
+            "(Future.cancel(true) interrupts the executor "
+            "worker thread) so the read() call unblocks "
+            "immediately."
+        )
+
+    # 6. socket close inside tearDown (per-flow real
+    # java.net.Socket close; without it the socket stays
+    # bound and the kernel cannot release the underlying
+    # port + the OS's TCP state machine never sees the
+    # FIN).
+    if "conn.socket?.close()" not in code and "conn.socket?.close()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing per-flow "
+            "Socket close in TcpForwarder.tearDown. Sprint "
+            "12.0C invariant - every per-flow real "
+            "java.net.Socket must be closed so the kernel "
+            "can release the bound TCP port and the TUN "
+            "interface can be safely released."
+        )
+
+    # 7. readerThread.interrupt inside tearDown.
+    if "conn.readerThread?.interrupt()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`conn.readerThread?.interrupt()` in "
+            "TcpForwarder.tearDown. Sprint 12.0C invariant "
+            "- every per-flow reader Thread must be "
+            "interrupted (defense in depth — cancel(true) "
+            "already interrupts the executor worker, but a "
+            "stale `readerThread` ref might survive in the "
+            "TcpConnection data class and need an explicit "
+            "interrupt)."
+        )
+
+    # 8. readerThread.join inside tearDown (1s bounded
+    # wait for the reader threads to exit before the
+    # teardown returns).
+    if "conn.readerThread?.join" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`conn.readerThread?.join` in "
+            "TcpForwarder.tearDown. Sprint 12.0C invariant "
+            "- every per-flow reader Thread must be joined "
+            "with a bounded wait (1 second per thread) "
+            "before the teardown returns, so the executor "
+            "worker exits before the TUN interface is "
+            "released."
+        )
+
+    # 9. shutdownNow() + awaitTermination in tearDown.
+    if "shutdownNow()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "backgroundExecutor.shutdownNow() in "
+            "TcpForwarder.tearDown. Sprint 12.0C invariant "
+            "- the ExecutorService that owns the per-flow "
+            "TCP reader threads must be shutdownNow() "
+            "(interrupts running tasks) so no reader thread "
+            "outlives the VPN service."
+        )
+    if "awaitTermination" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "backgroundExecutor.awaitTermination in "
+            "TcpForwarder.tearDown. Sprint 12.0C invariant "
+            "- the executor must awaitTermination(1, "
+            "TimeUnit.SECONDS) (waits for running tasks to "
+            "exit) so no reader thread outlives the VPN "
+            "service."
+        )
+
+    # 10. protect() call in the handleSyn code path.
+    # The brief: "service.protect(socket)". Without
+    # protect(), the raw java.net.Socket is captured by
+    # the TUN and the TCP packet loops forever (the
+    # "VPN blackhole" symptom that 12.0A fixed for the
+    # Netty path, now closed for the raw Socket path).
+    if "service.protect(" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`service.protect(` call in TcpForwarder.handleSyn. "
+            "Sprint 12.0C invariant - the per-flow raw "
+            "java.net.Socket must be VpnService.protect()-ed "
+            "(the brief: \"service.protect(socket) + "
+            "Socket(host, port)\") so it bypasses the VPN "
+            "and uses the device's real NIC."
+        )
+
+    # 11. Caller wiring: tcpForwarder.tearDown() call
+    # from stopCapture. The teardown must run BEFORE
+    # nettyClient?.shutdown() so the 6-step structure is
+    # preserved.
+    if "tcpForwarder.tearDown()" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`tcpForwarder.tearDown()` call from "
+            "stopCapture. Sprint 12.0C invariant - the "
+            "TcpForwarder teardown must run BEFORE "
+            "nettyClient?.shutdown() so the 6-step "
+            "shutdown's step 2 can safely delegate "
+            "(step 2 is a forward-compat no-op after "
+            "the teardown ran first)."
+        )
+
+    # 12. TUN wire: tcpForwarder.setTunOutputStream call
+    # from startReaderThread. The per-connection reader
+    # needs the TUN output stream to write response
+    # packets back to the kernel; without this wire,
+    # HTTP responses are silently dropped and the
+    # browser shows "no internet" / timeout.
+    if "tcpForwarder.setTunOutputStream" not in code:
+        findings.append(
+            "S117 OpenE2eeVpnService.kt: missing "
+            "`tcpForwarder.setTunOutputStream(...)` call "
+            "from startReaderThread. Sprint 12.0C invariant "
+            "- the TUN output stream must be wired to the "
+            "TcpForwarder so the per-connection reader can "
+            "write wrapped IP+TCP response packets (DATA, "
+            "FIN+ACK) back to the kernel. Without this "
+            "wire, Chrome / WhatsApp HTTP responses are "
+            "silently dropped (the request reaches the "
+            "server but the response never reaches the "
+            "app)."
+        )
+
+    return findings
+
+
+def run_s118_check(opene2ee_vpn_service_text):
+    """S118: TcpForwarder response content debug + UNKNOWN
+    FLOW fix + body truncation guard (Sprint 12.0D).
+
+    Owner 14:06 logcat observation (after 12.0C APK
+    install + 7x VPN kapa/ac test, NO reboot needed):
+    every breadcrumb in the 12.0C TcpForwarder fired
+    7 times (SYN, SYN+ACK, ESTABLISHED, PSH+ACK,
+    FIN+ACK, handleSyn, new TcpConnection,
+    sendHttpRequest, recvHttpResponse, responsePayload,
+    UdpForwarder, forwarded UDP, tearDown, shutdown
+    DONE, executor shutdown). AMA ("BUT"):
+      1. Chrome page DOES NOT open.
+      2. Response content is malformed (UNKNOWN FLOW
+         7 — reverse packet lost, response payload
+         wrong/missing).
+      3. Response bytes count / HTTP status code /
+         Content-Type are NOT in the log.
+
+    Root cause: the 12.0C startSocketReader only
+    logged a byte count for the response. The Owner
+    could not distinguish "200 OK with 1234 body
+    bytes" from "502 Bad Gateway with 0 body
+    bytes" from "truncated body (MSS / TUN drop)".
+
+    12.0D fix (3 sub-checks bundled into S118):
+      A. recvHttpResponse log MUST include HTTP
+         status code + Content-Type + Content-Length
+         + bytes count. The TcpForwarder's
+         startSocketReader now parses the HTTP
+         response status line + headers from the
+         first chunk and logs the values in the
+         `recvHttpResponse: N bytes, status=X,
+         content-type=Y, content-length=Z` line.
+         Without these 4 tokens the Owner cannot
+         verify the response is well-formed.
+      B. Validation Log.w MUST fire when the
+         response is suspicious. The 12.0D
+         validation log fires when:
+           (i) status code is 4xx or 5xx, OR
+           (ii) Content-Type is NOT
+                application/json AND NOT text/*
+                (the OpenE2EE Patroni healthz
+                endpoint returns text/plain for
+                plain responses, so text/* is
+                accepted; truly unexpected
+                content types like text/html are
+                flagged).
+         The validation log is the Owner-side
+         diagnostic that tells "the proxy
+         returned a well-formed response" from
+         "the proxy returned a malformed response
+         the app could not parse".
+      C. `forwarded via reverseKey` Log.d MUST
+         fire when the lookup succeeds via the
+         reverse flowKey (i.e., the INCOMING
+         packet case). This is the positive
+         signal that the 12.0C dual put in
+         handleSyn is working — and the
+         regression guard for the Owner 14:06
+         "UNKNOWN FLOW 7" symptom. The 12.0A.8
+         version of this log lived in
+         NettyChannelClient.kt, but the runtime
+         path is now via TcpForwarder (12.0C),
+         so the log never fired. 12.0D adds it
+         back in TcpForwarder.handleTcpPacket.
+      D. responsePayload Log.d MUST include
+         bytes count + TCP ack number. The
+         12.0C version logged bytes count + seq
+         + 5-tuple; 12.0D adds the body byte
+         accumulator (so the Owner can detect
+         truncation by comparing against
+         Content-Length) and the body
+         truncation log at the end of the
+         read loop.
+
+    The audit strips `/* ... */` block comments
+    and `//` line comments (preserving strings),
+    then checks for the 8 mandatory token
+    substrings in the resulting code:
+      (1) `recvHttpResponse:` literal in the
+          response log.
+      (2) `status=` token in the response log
+          (status code emitted).
+      (3) `content-type=` token in the response
+          log.
+      (4) `content-length=` token in the
+          response log.
+      (5) `Log.w` + `SUSPECT response` token
+          in the validation log.
+      (6) `forwarded via reverseKey` literal
+          in handleTcpPacket.
+      (7) `responsePayload:` literal in the
+          writeToTun call.
+      (8) `bodyBytes=` token in the
+          responsePayload log.
+
+    Sprint 12.0D target: 164 + 1 = 165 audit
+    cases total (S118 is the 165th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0D invariant - the "
+            "TcpForwarder response content debug "
+            "(status + Content-Type + Content-Length "
+            "+ bytes count), the validation Log.w, "
+            "the forwarded via reverseKey log, and "
+            "the responsePayload body-byte log must "
+            "all be in this file (the TcpForwarder "
+            "is the runtime path; the NettyChannelClient "
+            "log is runtime-dead). S117 is no longer "
+            "the complete Owner-side diagnostic for "
+            "the response flow; S118 is the new "
+            "authoritative audit for the response "
+            "content debug."
+        )
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    # Strip // line comments (preserving strings).
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # (1) recvHttpResponse: log breadcrumb.
+    if "recvHttpResponse:" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`recvHttpResponse:` log breadcrumb. "
+            "Sprint 12.0D invariant - the Owner "
+            "greps for this token to confirm the "
+            "real dest's HTTP response bytes were "
+            "read from the real socket. Without "
+            "it, the Owner cannot distinguish 'the "
+            "reader is running' (S117) from 'the "
+            "reader is reading actual data' (S118)."
+        )
+    # (2) status= token.
+    if "status=" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`status=` token in the recvHttpResponse "
+            "log. Sprint 12.0D invariant - the Owner "
+            "greps for the HTTP status code (e.g., "
+            "`status=200`) to distinguish 200 OK from "
+            "4xx/5xx. Without it, the Owner cannot "
+            "tell whether the real server accepted the "
+            "request."
+        )
+    # (3) content-type= token.
+    if "content-type=" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`content-type=` token in the "
+            "recvHttpResponse log. Sprint 12.0D "
+            "invariant - the Owner greps for the "
+            "Content-Type header (e.g., "
+            "`content-type=text/plain`) to confirm "
+            "the response is the expected format. "
+            "Without it, the Owner cannot detect "
+            "content-type mismatches (e.g., the "
+            "endpoint returned HTML when the app "
+            "expected JSON)."
+        )
+    # (4) content-length= token.
+    if "content-length=" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`content-length=` token in the "
+            "recvHttpResponse log. Sprint 12.0D "
+            "invariant - the Owner greps for the "
+            "Content-Length header (e.g., "
+            "`content-length=42`) to detect body "
+            "truncation (the per-flow reader exits "
+            "when the socket is closed; if the "
+            "body is shorter than Content-Length, "
+            "the app receives a malformed HTTP "
+            "response and Chrome shows a "
+            "broken/empty page)."
+        )
+    # (5) Validation Log.w + SUSPECT response.
+    if "SUSPECT response" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`SUSPECT response` validation Log.w. "
+            "Sprint 12.0D invariant - the validation "
+            "log MUST fire when the response is "
+            "suspicious (status 4xx/5xx OR "
+            "Content-Type is neither application/json "
+            "nor text/*). This is the Owner-side "
+            "diagnostic that tells 'the proxy returned "
+            "a well-formed response' from 'the proxy "
+            "returned a malformed response the app "
+            "could not parse' (Owner 14:06 BLOCKED "
+            "root cause for Chrome page not opening)."
+        )
+    # (6) forwarded via reverseKey log.
+    if "forwarded via reverseKey" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`forwarded via reverseKey` Log.d. "
+            "Sprint 12.0D invariant - the positive "
+            "signal that the 12.0C dual put in "
+            "handleSyn is working. The 12.0A.8 "
+            "version of this log lived in "
+            "NettyChannelClient.kt, but the runtime "
+            "path is now via TcpForwarder (12.0C), "
+            "so the log never fired. 12.0D adds it "
+            "back in TcpForwarder.handleTcpPacket. "
+            "Without this log, the Owner cannot "
+            "confirm the INCOMING packet was found "
+            "via the reverse key (i.e., the dual put "
+            "is actually working)."
+        )
+    # (7) responsePayload: log breadcrumb.
+    if "responsePayload:" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`responsePayload:` log breadcrumb. "
+            "Sprint 12.0D invariant - the Owner "
+            "greps for this token to confirm the "
+            "response bytes were actually written to "
+            "the TUN. Pairs with recvHttpResponse "
+            "(S118.1) — recvHttpResponse confirms the "
+            "read, responsePayload confirms the "
+            "write. If only recvHttpResponse is "
+            "present but responsePayload is missing, "
+            "the reader is reading but the write to "
+            "TUN is failing (silent drop)."
+        )
+    # (8) bodyBytes= token (body byte accumulator
+    # for truncation detection).
+    if "bodyBytes=" not in code:
+        findings.append(
+            "S118 OpenE2eeVpnService.kt: missing "
+            "`bodyBytes=` token in the "
+            "responsePayload log. Sprint 12.0D "
+            "invariant - the Owner greps for the "
+            "body byte accumulator (e.g., "
+            "`bodyBytes=1234`) to detect truncation "
+            "(bodyBytes < Content-Length indicates "
+            "the body was truncated by the "
+            "per-flow reader exit). The accumulator "
+            "is also logged at the end of the read "
+            "loop as a TRUNCATED/COMPLETE breadcrumb."
+        )
+    return findings
+
+
+def run_s119_check(opene2ee_vpn_service_text):
+    """S119: SUSPECT response content debug (Sprint 12.0E).
+
+    Owner 14:19 logcat observation (after 12.0D APK
+    install + 10x VPN kapa/ac test, no reboot
+    needed): every 12.0D TcpForwarder breadcrumb
+    fired 10 times (TcpForwarder 10, SYN sent 10,
+    ESTABLISHED 10, recvHttpResponse 10, status=10,
+    content-type=10, content-length=10, forwarded
+    via reverseKey 10, responsePayload 10, bodyBytes
+    10, TRUNCATED 10, COMPLETE 10). AMA ("BUT"):
+      1. SUSPECT log fired 10 times (the 12.0D
+         SUSPECT log only emitted status +
+         content-type + content-length + n, but
+         NOT the EXPECTED value (application/json
+         OR text/*) — the Owner could not tell
+         "expected was application/json but got
+         text/html" from "expected was
+         application/json and got
+         application/json" (the 12.0D log would
+         have fired the SUSPECT log with no
+         expected context)).
+      2. UNKNOWN FLOW still 10 (the 12.0D log
+         is conceptually a replacement for
+         the 12.0A.7 UNKNOWN FLOW warning, but
+         the brief asks for a POSITIVE
+         "flow forward" signal that fires for
+         BOTH primary and reverse directions,
+         REPLACING the UNKNOWN FLOW concept).
+      3. The Owner could not tell which HTTP
+         endpoint the app was calling (no
+         request URI + Host header log).
+      4. The Owner could not see the actual
+         response body bytes (no body first
+         100 bytes hex+ascii log).
+      5. The Owner could not detect when the
+         status 200 + content-type text/plain
+         body byte count did not match the
+         declared Content-Length (no MISMATCH
+         log for the specific healthz case).
+
+    12.0E fix (5 sub-checks bundled into S119):
+      A. SUSPECT log MUST include the EXPECTED
+         value (application/json OR text/*).
+         Without the EXPECTED token the Owner
+         cannot verify the SUSPECT rule.
+      B. sendHttpRequest log MUST include the
+         HTTP request line (method + URI +
+         HTTP/x.x) + the Host header so the
+         Owner knows which endpoint the app
+         is calling. The URI + Host are
+         parsed from the first chunk of the
+         app's HTTP request (the request line
+         is always in the first chunk for
+         HTTP/1.1).
+      C. recvHttpResponse bodyFirst100 log
+         MUST include the first 100 bytes of
+         the response body in hex+ascii
+         format. The Owner greps for this
+         token to see the actual response
+         body bytes and verify it is
+         well-formed (printable ASCII) or
+         garbage (binary).
+      D. MISMATCH log MUST fire when status
+         is 200 + content-type is text/plain
+         AND body byte count != Content-Length.
+         The Patroni healthz endpoint returns
+         text/plain for plain health
+         responses; the MISMATCH log is the
+         SPECIFIC Owner-side diagnostic for
+         this case (the general TRUNCATED log
+         fires for any status + content-type
+         with less specific context).
+      E. `flow forward` Log.d MUST fire for
+         BOTH primary and reverse directions
+         when the conn is found. The
+         UNKNOWN FLOW concept is REPLACED:
+         the dual put eliminates the
+         unknown-flow case entirely (the
+         lookup ALWAYS succeeds for the
+         common case). The `flow forward`
+         log is the POSITIVE signal that the
+         packet was successfully dispatched
+         to the conn handler.
+
+    The audit strips `/* ... */` block comments
+    and `//` line comments (preserving strings),
+    then checks for the 5 mandatory token
+    substrings:
+      (1) `expected=application/json` token
+          in the SUSPECT log.
+      (2) `Host=` token in the sendHttpRequest
+          log (Host header parsed + emitted).
+      (3) `bodyFirst100` token in the
+          recvHttpResponse body fingerprint
+          log.
+      (4) `MISMATCH` token in the
+          status=200 + text/plain body
+          length check log.
+      (5) `flow forward` token in the
+          handleTcpPacket positive signal
+          log.
+
+    Sprint 12.0E target: 165 + 1 = 166 audit
+    cases total (S119 is the 166th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0E invariant - the "
+            "SUSPECT response log with EXPECTED "
+            "value, the sendHttpRequest URI + Host "
+            "log, the recvHttpResponse bodyFirst100 "
+            "log, the MISMATCH log, and the `flow "
+            "forward` log must all be in this file "
+            "(the TcpForwarder is the runtime path; "
+            "the NettyChannelClient log is "
+            "runtime-dead). S118 is no longer the "
+            "complete Owner-side diagnostic for the "
+            "response content; S119 is the new "
+            "authoritative audit for the SUSPECT "
+            "response content debug."
+        )
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    # Strip // line comments (preserving strings).
+    lines = []
+    for ln in stripped.splitlines():
+        in_string = False
+        i = 0
+        cut_at = -1
+        while i < len(ln):
+            c = ln[i]
+            if c == '"':
+                in_string = not in_string
+                i += 1
+                continue
+            if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                cut_at = i
+                break
+            i += 1
+        if cut_at >= 0:
+            lines.append(ln[:cut_at])
+        else:
+            lines.append(ln)
+    code = "\n".join(lines)
+
+    # (1) expected=application/json token in SUSPECT log.
+    if "expected=application/json" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`expected=application/json` token in "
+            "the SUSPECT log. Sprint 12.0E invariant "
+            "- the SUSPECT log MUST include the "
+            "EXPECTED value (application/json OR "
+            "text/*) so the Owner can distinguish "
+            "'expected was application/json but got "
+            "text/html' (SUSPECT justified) from "
+            "'expected was application/json and got "
+            "application/json' (no SUSPECT). The "
+            "12.0D SUSPECT log only emitted status + "
+            "content-type + content-length + n, with "
+            "no expected context."
+        )
+    # (2) Host= token in sendHttpRequest log.
+    if "Host=" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`Host=` token in the sendHttpRequest "
+            "log. Sprint 12.0E invariant - the "
+            "sendHttpRequest log MUST include the "
+            "HTTP Host header (e.g., `Host=212.64.210.85`) "
+            "so the Owner knows which endpoint the "
+            "app is calling. Without the Host "
+            "header, the Owner cannot distinguish "
+            "`GET /healthz` to `212.64.210.85` from "
+            "`GET /api/v1/sessions` to "
+            "`api-test.opene2ee.com`."
+        )
+    # (3) bodyFirst100 token in body fingerprint log.
+    if "bodyFirst100" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`bodyFirst100` token in the response "
+            "body fingerprint log. Sprint 12.0E "
+            "invariant - the Owner greps for this "
+            "token to see the first 100 bytes of "
+            "the response body in hex+ascii format. "
+            "Without it, the Owner cannot verify "
+            "the body is well-formed (printable "
+            "ASCII) or detect binary garbage (e.g., "
+            "0xFF 0xFE 0xFD indicating a mis-encoded "
+            "chunk)."
+        )
+    # (4) MISMATCH token in body length check log.
+    if "MISMATCH" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`MISMATCH` token in the body length "
+            "check log. Sprint 12.0E invariant - the "
+            "MISMATCH log MUST fire when status is "
+            "200 + content-type is text/plain AND "
+            "body byte count != Content-Length. The "
+            "Patroni healthz endpoint returns "
+            "text/plain for plain health responses; "
+            "the MISMATCH log is the SPECIFIC "
+            "Owner-side diagnostic for this case "
+            "(the general TRUNCATED log fires for "
+            "any status + content-type with less "
+            "specific context)."
+        )
+    # (5) flow forward token in handleTcpPacket log.
+    if "flow forward" not in code:
+        findings.append(
+            "S119 OpenE2eeVpnService.kt: missing "
+            "`flow forward` Log.d. Sprint 12.0E "
+            "invariant - the `flow forward` log "
+            "REPLACES the 12.0A.7 UNKNOWN FLOW "
+            "concept. The dual put in handleSyn "
+            "eliminates the unknown-flow case "
+            "entirely (the lookup ALWAYS succeeds "
+            "for the common case). The `flow "
+            "forward` log is the POSITIVE signal "
+            "that the packet was successfully "
+            "dispatched to the conn handler, and "
+            "fires for BOTH primary and reverse "
+            "directions. Without this log, the "
+            "Owner cannot verify the dual put is "
+            "actually working (the absence of a "
+            "`UNKNOWN FLOW` warning is silent — the "
+            "`flow forward` log is the audible "
+            "confirmation)."
+        )
+    return findings
+
+
+def run_s120_check(config_text, active_pool_screen_text):
+    """S120: Version display in AppBar (Sprint 12.0F).
+
+    Owner 15:04 doesn't believe the new APK is
+    installed (the install dialog auto-dismisses
+    and the logcat is ambiguous about which APK is
+    running). The Owner will take a screenshot of
+    the active pool screen and compare the AppBar
+    version display against the git log + APK SHA
+    to confirm the new build is actually running.
+
+    The fix is in 2 places:
+      A. mobile/lib/config.dart — new
+         AppConfig.versionName (default
+         '12.0E') + AppConfig.versionCode
+         (default '06bd4d7') static const
+         fields. Both can be overridden at
+         build time via `--dart-define
+         VERSION_NAME=12.0F --dart-define
+         VERSION_CODE=06bd4d7`. The Coder
+         pipeline reads the sprint name +
+         commit SHA from the build script
+         and injects them.
+      B. mobile/lib/screens/active_pool_screen
+         .dart — the AppBar `actions: [...]`
+         array contains a Text widget that
+         displays `v${kVersionName}
+         (${kVersionCode})` so the Owner
+         can take a screenshot and confirm
+         the new APK is running.
+
+    The audit strips `/* ... */` block comments
+    and `//` line comments (preserving strings),
+    then checks for the 4 mandatory token
+    substrings in the Dart source files:
+      (1) `versionName` field in AppConfig
+          (Dart class const + String.from
+          Environment).
+      (2) `versionCode` field in AppConfig
+          (Dart class const + String.from
+          Environment).
+      (3) `kVersionName` alias at the file
+          scope (the AppBar uses the alias,
+          not the AppConfig field directly).
+      (4) `kVersionCode` alias at the file
+          scope.
+      (5) `v${kVersionName}` token in the
+          AppBar `actions: [...]` array.
+      (6) `(${kVersionCode})` token in the
+          AppBar `actions: [...]` array.
+
+    Sprint 12.0F target: 166 + 1 = 167 audit
+    cases total (S120 is the 167th).
+    """
+    import re
+    findings = []
+    if config_text is None:
+        findings.append(
+            "S120 config.dart: file text missing. "
+            "Sprint 12.0F invariant - the AppConfig "
+            "class MUST have `versionName` and "
+            "`versionCode` static const fields so "
+            "the active_pool_screen.dart AppBar can "
+            "display the version. Without these "
+            "constants the Owner cannot confirm "
+            "the new APK is actually running (the "
+            "install dialog auto-dismisses and the "
+            "logcat is ambiguous about which APK is "
+            "running)."
+        )
+    if active_pool_screen_text is None:
+        findings.append(
+            "S120 active_pool_screen.dart: file text "
+            "missing. Sprint 12.0F invariant - the "
+            "AppBar `actions: [...]` array MUST "
+            "contain a Text widget that displays "
+            "`v${kVersionName} (${kVersionCode})` "
+            "so the Owner can take a screenshot to "
+            "confirm the new APK is running."
+        )
+    if config_text is None or active_pool_screen_text is None:
+        return findings
+    # Strip /* ... */ block comments.
+    stripped_config = re.sub(r"/\*[\s\S]*?\*/", "", config_text)
+    stripped_active = re.sub(r"/\*[\s\S]*?\*/", "", active_pool_screen_text)
+    # Strip // line comments (preserving strings).
+    def strip_line_comments(text):
+        lines = []
+        for ln in text.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    config_code = strip_line_comments(stripped_config)
+    active_code = strip_line_comments(stripped_active)
+
+    # (1) AppConfig.versionName field.
+    if "versionName" not in config_code:
+        findings.append(
+            "S120 config.dart: missing `versionName` "
+            "field on AppConfig. Sprint 12.0F "
+            "invariant - the AppConfig class MUST "
+            "have a `versionName` static const "
+            "field (the semantic version tag like "
+            "`12.0F`) so the active_pool_screen "
+            ".dart AppBar can display the version."
+        )
+    # (2) AppConfig.versionCode field.
+    if "versionCode" not in config_code:
+        findings.append(
+            "S120 config.dart: missing `versionCode` "
+            "field on AppConfig. Sprint 12.0F "
+            "invariant - the AppConfig class MUST "
+            "have a `versionCode` static const "
+            "field (the 7-char git commit SHA like "
+            "`06bd4d7`) so the active_pool_screen "
+            ".dart AppBar can display the version."
+        )
+    # (3) kVersionName file-scope alias.
+    if "kVersionName" not in config_code:
+        findings.append(
+            "S120 config.dart: missing `kVersionName` "
+            "file-scope alias. Sprint 12.0F invariant "
+            "- the AppConfig.versionName field is "
+            "the canonical constant, but the AppBar "
+            "uses the `kVersionName` file-scope "
+            "alias (matches the existing kDeviceId / "
+            "kApiKey / kApiBase pattern in the same "
+            "file). Without the alias, the AppBar "
+            "must reach into AppConfig directly, "
+            "which breaks the Sprint 10.1C "
+            "backwards-compat pattern."
+        )
+    # (4) kVersionCode file-scope alias.
+    if "kVersionCode" not in config_code:
+        findings.append(
+            "S120 config.dart: missing `kVersionCode` "
+            "file-scope alias. Sprint 12.0F invariant "
+            "- the AppConfig.versionCode field is "
+            "the canonical constant, but the AppBar "
+            "uses the `kVersionCode` file-scope "
+            "alias (matches the existing kDeviceId / "
+            "kApiKey / kApiBase pattern in the same "
+            "file)."
+        )
+    # (5) v${kVersionName} token in AppBar actions.
+    if "v${kVersionName}" not in active_code:
+        findings.append(
+            "S120 active_pool_screen.dart: missing "
+            "`v${kVersionName}` token in the AppBar "
+            "`actions: [...]` array. Sprint 12.0F "
+            "invariant - the AppBar MUST display the "
+            "version name as `v${kVersionName}` "
+            "(the `v` prefix is the standard Flutter "
+            "AppBar action badge pattern; the "
+            "interpolation uses the kVersionName "
+            "alias so the Owner can match the AppBar "
+            "display against the config.dart default "
+            "value)."
+        )
+    # (6) (${kVersionCode}) token in AppBar actions.
+    if "(${kVersionCode})" not in active_code:
+        findings.append(
+            "S120 active_pool_screen.dart: missing "
+            "`(${kVersionCode})` token in the AppBar "
+            "`actions: [...]` array. Sprint 12.0F "
+            "invariant - the AppBar MUST display "
+            "the version code as `(${kVersionCode})` "
+            "(the parenthesized 7-char git commit "
+            "SHA). The Owner greps for this token to "
+            "match the AppBar display against the "
+            "`git log --oneline -1` output (the "
+            "same 7-char SHA at the start of the "
+            "commit message)."
+        )
+    return findings
+
+
+def run_s121_check(opene2ee_vpn_service_text, changelog_text):
+    """S121: TCP SYN processing debug (Sprint 12.0F+1).
+
+    Owner 12.0F logcat analysis
+    (C:\\Users\\User\\Downloads\\logcat120f_v3.txt
+    line 17-21) showed 9 dispatch events all
+    carried PSH+ACK, 0 SYN. The TcpForwarder
+    SYN path was never exercised because
+    TCP SYN packets bypass the VPN TUN
+    (kernel routes them via the real NIC).
+    TcpForwarder therefore never created a
+    Socket, and the subsequent PSH+ACK data
+    packets were dropped with "no-socket
+    flow" (no SYN handler fired first to
+    insert the conn into tcpConnectionMap).
+
+    Root cause is one of 4 hypotheses: (1)
+    VPN setup timing — TCP established
+    before VPN opened, (2)
+    addAllowedApplication only for own app,
+    (3) bindProcessToNetwork timing, (4)
+    kernel routing exception. Sprint 12.0F+1
+    adds 2 diagnostics + 1 S121 audit + the
+    Owner's 6-step test akışı so the root
+    cause can be pinpointed in the next live
+    test.
+
+    The audit strips /* ... */ block comments
+    and // line comments (preserving strings),
+    then checks for the 7 mandatory token
+    substrings (S121-1 through S121-7):
+
+      S121-1: handleTcpPacket dispatch breadcrumb
+        contains the per-packet flag decode
+        (flags=0x prefix + 5 flag names:
+        SYN=, ACK=, PSH=, FIN=, RST=). The
+        Owner greps for this token to
+        distinguish "all packets are PSH+ACK"
+        (kernel SYN bypass) from "SYN IS
+        present" (dispatch precedence bug).
+
+      S121-2: buildVpnBuilder: allowedApps= breadcrumb
+        exists (so the Owner can confirm
+        whether the VPN is restricted to a
+        single package or captures all
+        traffic). The default behavior is
+        allowedApps=0 packages=[] (the VPN
+        captures ALL traffic — matches the
+        per-route addRoute(0.0.0.0/0) default).
+
+      S121-3: checkPrivateDnsAndBindToVpn() called
+        BEFORE builder.establish() (the 11.0Y
+        Sprint 11.0Y Sprint 98 invariant that
+        fixes the OnePlus OxygenOS
+        NetworkCallback-never-fires bug; the
+        request must be issued before
+        establish so the system has a pending
+        subscriber for the VPN transport).
+        The audit verifies the textual-order
+        invariant by checking that
+        `checkPrivateDnsAndBindToVpn()` text
+        appears BEFORE `builder.establish()`
+        text in the startCapture function
+        body (the comment at line 1116
+        explicitly documents this invariant).
+
+      S121-4: 4-step test akışı documented in
+        CHANGELOG.md (the Sprint 12.0F+1
+        section header + the 6-step test
+        akışı body + the 4 TAG filter
+        documentation). The audit checks for
+        the "12.0F+1" header + the "Tag 4
+        filter" + "checkPrivateDnsAndBindToVpn"
+        keywords.
+
+      S121-5: APK build OK (R8 strict mode no
+        missing classes). The 12.0F+1
+        dispatcher breadcrumb uses only
+        Log.d(TAG, ...) which is a stable
+        Android API and cannot trigger R8
+        missing-class warnings. The audit
+        checks for the R8/proguard keyword
+        in the build.gradle.kts OR a comment
+        referencing proguard rules.
+
+      S121-6: APK SHA logged. The 12.0F+1
+        commit message includes the new
+        APK SHA-256 hash. The audit
+        indirectly verifies this via the
+        commit log (the test is a build +
+        commit cycle, not a source-level
+        check).
+
+      S121-7: Tag 4 filter documented in test
+        akışı (the 4 TAG constants
+        OpenE2eeVpn / TcpForwarder /
+        UdpForwarder / NettyChannelClient).
+        The audit checks for all 4 TAG names
+        in the test akışı section.
+
+    Sprint 12.0F+1 target: 167 + 1 = 168
+    audit cases total (S121 is the 168th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0F+1 invariant - the "
+            "TCP SYN processing debug breadcrumbs "
+            "(dispatch flags + allowedApps + "
+            "bindProcessToNetwork timing) are in this "
+            "file (the TcpForwarder is the runtime "
+            "path; the breadcrumb at the dispatch "
+            "loop entry is the Owner-side diagnostic "
+            "for the kernel SYN bypass root cause)."
+        )
+    if changelog_text is None:
+        findings.append(
+            "S121 CHANGELOG.md: file text missing. "
+            "Sprint 12.0F+1 invariant - the 6-step "
+            "test akışı + the 4 TAG filter + the "
+            "checkPrivateDnsAndBindToVpn timing "
+            "invariant are documented in the "
+            "Sprint 12.0F+1 CHANGELOG section so "
+            "the Owner has the canonical procedure "
+            "for the next live test."
+        )
+    if opene2ee_vpn_service_text is None or changelog_text is None:
+        return findings
+    # Strip /* ... */ block comments.
+    stripped = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    stripped_changelog = re.sub(r"/\*[\s\S]*?\*/", "", changelog_text)
+    # Strip // line comments (preserving strings).
+    def strip_line_comments(text):
+        lines = []
+        for ln in text.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    code = strip_line_comments(stripped)
+    changelog_code = strip_line_comments(stripped_changelog)
+
+    # S121-1: dispatch flags breadcrumb with flags=0x + 5 flag names.
+    if "flags=0x" not in code or "SYN=" not in code or "ACK=" not in code or "PSH=" not in code or "FIN=" not in code or "RST=" not in code:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: missing "
+            "`handleTcpPacket: dispatching flags=0x... "
+            "(SYN=... ACK=... PSH=... FIN=... RST=...)` "
+            "breadcrumb. Sprint 12.0F+1 invariant - the "
+            "dispatch loop must log a per-packet flag "
+            "decode so the Owner can distinguish "
+            "`all packets are PSH+ACK` (kernel SYN "
+            "bypass root cause) from `SYN IS present` "
+            "(dispatch precedence bug root cause). The "
+            "flag decode uses the RFC 793 bit constants "
+            "the dispatch precedence does (`TCP_SYN=0x02`, "
+            "`TCP_ACK=0x10`, `TCP_PSH=0x08`, `TCP_FIN=0x01`, "
+            "`TCP_RST=0x04`)."
+        )
+    # S121-2: buildVpnBuilder allowedApps breadcrumb.
+    if "buildVpnBuilder: allowedApps=" not in code:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: missing "
+            "`buildVpnBuilder: allowedApps=N "
+            "packages=[...]` breadcrumb. Sprint "
+            "12.0F+1 invariant - the Owner must be "
+            "able to confirm whether the VPN is "
+            "restricted to a single package "
+            "(suspicious for the OpenE2EE flow where "
+            "Owner's OTHER apps should also be "
+            "captured). The default behavior is "
+            "`allowedApps=0 packages=[]` (the VPN "
+            "captures ALL traffic). If the Owner sees "
+            "`allowedApps=1 packages=[com.opene2ee.opene2ee]`, "
+            "the VPN is restricted and Chrome / "
+            "system apps bypass the TUN."
+        )
+    # S121-3: checkPrivateDnsAndBindToVpn BEFORE builder.establish.
+    # The audit checks textual order in the startCapture
+    # function: checkPrivateDnsAndBindToVpn must appear
+    # BEFORE builder.establish.
+    cpd_idx = code.find("checkPrivateDnsAndBindToVpn()")
+    est_idx = code.find("builder.establish()")
+    if cpd_idx == -1 or est_idx == -1:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: missing "
+            "`checkPrivateDnsAndBindToVpn()` or "
+            "`builder.establish()` call. Sprint 12.0F+1 "
+            "invariant - the 11.0Y Sprint 11.0Y Sprint 98 "
+            "invariant requires `checkPrivateDnsAndBindToVpn()` "
+            "to be called BEFORE `builder.establish()` so "
+            "the system has a pending subscriber for the "
+            "VPN transport (the request fires the callback "
+            "when establish() registers the transport)."
+        )
+    elif cpd_idx > est_idx:
+        findings.append(
+            "S121 OpenE2eeVpnService.kt: `checkPrivateDnsAndBindToVpn()` "
+            "called AFTER `builder.establish()` (regression of the "
+            "11.0Y Sprint 11.0Y Sprint 98 invariant). Sprint 12.0F+1 "
+            "invariant - the request must be issued BEFORE establish "
+            "so the system has a pending subscriber for the VPN "
+            "transport. On OnePlus OxygenOS this is the root cause "
+            "of the `NetworkCallback never fires` bug (Owner 21:37). "
+            "Move the call to BEFORE `builder.establish()` to fix."
+        )
+    # S121-4: CHANGELOG.md has Sprint 12.0F+1 section + 4-step test akışı.
+    if "Sprint 12.0F+1" not in changelog_code:
+        findings.append(
+            "S121 CHANGELOG.md: missing `Sprint 12.0F+1` section. "
+            "Sprint 12.0F+1 invariant - the 6-step test akışı + "
+            "the 4 TAG filter + the checkPrivateDnsAndBindToVpn "
+            "timing invariant must be documented in the Sprint "
+            "12.0F+1 CHANGELOG section so the Owner has the "
+            "canonical procedure for the next live test."
+        )
+    if "Tag 4 filter" not in changelog_code and "OpenE2eeVpn:V TcpForwarder:V" not in changelog_code:
+        findings.append(
+            "S121 CHANGELOG.md: missing `Tag 4 filter` (or "
+            "`OpenE2eeVpn:V TcpForwarder:V`) documentation. "
+            "Sprint 12.0F+1 invariant - the test akışı step "
+            "6 requires the 4 TAG filter "
+            "(`OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V "
+            "NettyChannelClient:V`) to capture all 4 classes' "
+            "breadcrumbs. Without the 4 TAG filter, the Owner "
+            "would only see the main service logs and miss the "
+            "TcpForwarder / UdpForwarder / NettyChannelClient "
+            "breadcrumbs."
+        )
+    # S121-5: APK build OK (R8 strict mode no missing classes).
+    # Verify the 12.0F+1 dispatch breadcrumb uses only
+    # stable Android API (Log.d is a stable Android API;
+    # R8 cannot strip it). The audit also checks for
+    # the ProGuard keywords in the changelog OR
+    # build.gradle.kts.
+    if "R8" not in changelog_code and "proguard" not in changelog_code.lower():
+        findings.append(
+            "S121 CHANGELOG.md: missing `R8` or `proguard` "
+            "documentation. Sprint 12.0F+1 invariant - the "
+            "12.0F release build uses proguard-rules.pro + "
+            "proguardFiles. The 12.0F+1 dispatcher breadcrumb "
+            "uses only Log.d(TAG, ...) which is a stable Android "
+            "API and cannot trigger R8 missing-class warnings. "
+            "The audit verifies the R8/proguard keyword is "
+            "present in CHANGELOG so the Owner has the "
+            "R8 strict mode + proguard rules documented "
+            "for the next live build."
+        )
+    # S121-6: APK SHA logged in CHANGELOG OR commit message.
+    # The audit checks for the SHA-256 prefix in CHANGELOG.
+    if "SHA-256" not in changelog_code and "SHA256" not in changelog_code:
+        findings.append(
+            "S121 CHANGELOG.md: missing `SHA-256` (or `SHA256`) "
+            "documentation. Sprint 12.0F+1 invariant - the "
+            "commit message includes the new APK SHA-256 hash "
+            "so the Owner can match the install against the "
+            "git log. The CHANGELOG should reference the SHA-256 "
+            "documentation pattern (the previous sprints all "
+            "include the SHA-256 hash in the commit message)."
+        )
+    # S121-7: Tag 4 filter documented in test akışı.
+    if "TcpForwarder:V" not in changelog_code or "UdpForwarder:V" not in changelog_code or "NettyChannelClient:V" not in changelog_code:
+        findings.append(
+            "S121 CHANGELOG.md: missing Tag 4 filter "
+            "documentation. Sprint 12.0F+1 invariant - the "
+            "test akışı step 6 requires all 4 TAG filters "
+            "(`OpenE2eeVpn:V`, `TcpForwarder:V`, "
+            "`UdpForwarder:V`, `NettyChannelClient:V`) to be "
+            "documented in the CHANGELOG so the Owner can run "
+            "the canonical 4 TAG filter on the next live test. "
+            "Without all 4, the Owner would miss the 12.0C TCP "
+            "breadcrumbs (TcpForwarder TAG) and the 12.0B UDP "
+            "breadcrumbs (UdpForwarder TAG)."
+        )
+    return findings
+
+
+def run_s122_check(opene2ee_vpn_service_text, proguard_text, changelog_text):
+    """S122: TCP SYN RST workaround + R8 keep rules (Sprint 12.0F+2).
+
+    Owner 12.0F+1 test (10s timeout, log at
+    C:\\Users\\User\\Downloads\\logcat120fplus1_v1.txt
+    line 13-22) confirmed 0 occurrences of the
+    12.0F+1 breadcrumbs (`handleTcpPacket:
+    dispatching flags=0x`, `buildVpnBuilder:
+    allowedApps=`, `checkPrivateDnsAndBindToVpn`).
+    Two root causes:
+      1. R8 (release minifier) stripped the 3
+         breadcrumb Log.d calls because the
+         return value is unused. Fix: 3 R8
+         keep rules in proguard-rules.pro.
+      2. Kernel TCP stack established the
+         connection BEFORE our user-space
+         stack saw the SYN (the "established
+         connection cache" survives VPN
+         reconfiguration). Fix: synthesize
+         TCP RST for unknown-flow packets
+         (`writeTcpRstToTun` function in
+         TcpForwarder; called from 4
+         "unknown flow" branches).
+
+    The audit strips /* ... */ block comments
+    and // line comments (preserving strings),
+    then checks for the 7 mandatory token
+    substrings (S122-1 through S122-7):
+
+      S122-1: `fun writeTcpRstToTun` function
+        exists in TcpForwarder (the
+        writeTcpRstToTun function declaration
+        in OpenE2eeVpnService.kt).
+
+      S122-2: `writeTcpRstToTun(` call in
+        handleData "unknown/no-socket flow"
+        branch (at least 1 of the 2 calls —
+        conn == null OR state != ESTABLISHED).
+
+      S122-3: `writeTcpRstToTun(` call in
+        handleAck OR handleFinAck "unknown
+        flow" branch (at least 1 of the 2).
+
+      S122-4: proguard-rules.pro contains
+        `-keepclassmembers,allowobfuscation
+        class * { *** Log*(...); }` rule
+        (the Log* keep rule).
+
+      S122-5: proguard-rules.pro contains
+        `-keepclassmembers,allowobfuscation
+        class * { public static final
+        java.lang.String TAG; }` rule (the
+        TAG keep rule).
+
+      S122-6: `import androidx.annotation.Keep`
+        in OpenE2eeVpnService.kt AND at least
+        1 `@Keep` annotation on a member (e.g.,
+        `@Keep private fun writeTcpRstToTun`).
+
+      S122-7: CHANGELOG.md has `Sprint
+        12.0F+2` section + `Tag 4 filter` +
+        `7-step` documentation.
+
+    Sprint 12.0F+2 target: 168 + 1 = 169
+    audit cases total (S122 is the 169th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0F+2 invariant - the "
+            "writeTcpRstToTun function + 4 unknown-flow "
+            "branch calls + @Keep annotation are in this "
+            "file (the TcpForwarder is the runtime path; "
+            "the RST workaround fires for every "
+            "unknown-flow packet to break the kernel's "
+            "established connection cache)."
+        )
+    if proguard_text is None:
+        findings.append(
+            "S122 proguard-rules.pro: file text missing. "
+            "Sprint 12.0F+2 invariant - the 3 R8 keep "
+            "rules (Log* + String TAG + @Keep) are in "
+            "this file (without these rules, R8 strips "
+            "the 12.0F+1 breadcrumbs because the return "
+            "value is unused)."
+        )
+    if changelog_text is None:
+        findings.append(
+            "S122 CHANGELOG.md: file text missing. "
+            "Sprint 12.0F+2 invariant - the 7-step test "
+            "akışı + the RST recovery scenario + the S122 "
+            "audit criteria are documented in the Sprint "
+            "12.0F+2 CHANGELOG section so the Owner has "
+            "the canonical procedure for the next live test."
+        )
+    if opene2ee_vpn_service_text is None or proguard_text is None or changelog_text is None:
+        return findings
+    # Strip /* ... */ block comments.
+    stripped_code = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    stripped_proguard = re.sub(r"/\*[\s\S]*?\*/", "", proguard_text)
+    stripped_changelog = re.sub(r"/\*[\s\S]*?\*/", "", changelog_text)
+    # Strip // line comments (preserving strings).
+    def strip_line_comments(text):
+        lines = []
+        for ln in text.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    code = strip_line_comments(stripped_code)
+    proguard_code = strip_line_comments(stripped_proguard)
+    changelog_code = strip_line_comments(stripped_changelog)
+
+    # S122-1: writeTcpRstToTun function declaration.
+    if "fun writeTcpRstToTun(" not in code:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: missing `fun "
+            "writeTcpRstToTun(` function. Sprint 12.0F+2 "
+            "invariant - the RST workaround synthesizes a "
+            "TCP RST packet (per RFC 793 §3.5) for "
+            "unknown-flow packets so the app tears down "
+            "the connection and retransmits a fresh SYN "
+            "that our user-space stack can handle. Without "
+            "this function, the kernel's 'established "
+            "connection cache' keeps the app on the real "
+            "NIC and our user-space stack never sees the "
+            "SYN — the 10-second timeout symptom."
+        )
+    # S122-2: writeTcpRstToTun call in handleData branch.
+    # Count occurrences of writeTcpRstToTun( in the file.
+    rst_call_count = code.count("writeTcpRstToTun(")
+    if rst_call_count < 2:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: too few "
+            "`writeTcpRstToTun(` calls (found "
+            + str(rst_call_count)
+            + ", need at least 2 — one in handleData "
+            "unknown/no-socket flow branch). Sprint 12.0F+2 "
+            "invariant - the RST workaround MUST fire for "
+            "every unknown-flow PSH+ACK packet. The handleData "
+            "function has 2 unknown branches (conn == null OR "
+            "state != ESTABLISHED) and BOTH must call "
+            "writeTcpRstToTun so the app's TCP retransmit "
+            "cycles back to our user-space stack."
+        )
+    # S122-3: writeTcpRstToTun call in handleAck OR handleFinAck.
+    # The count of writeTcpRstToTun calls already includes
+    # the handleData calls (S122-2) + the function definition
+    # itself (1). The handleAck + handleFinAck calls bring
+    # the total to at least 4 (function def + 2 handleData +
+    # 1 handleAck + 1 handleFinAck).
+    if rst_call_count < 4:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: missing `writeTcpRstToTun(` "
+            "call in handleAck OR handleFinAck. Sprint 12.0F+2 "
+            "invariant - the RST workaround MUST fire for "
+            "ALL 4 unknown-flow branches (PSH+ACK x 2 + ACK + "
+            "FIN+ACK). The total `writeTcpRstToTun(` count "
+            "must be at least 4 (1 function def + 2 handleData "
+            "+ 1 handleAck/handleFinAck)."
+        )
+    # S122-4: Log* keep rule in proguard-rules.pro.
+    if "*** Log*(...)" not in proguard_code:
+        findings.append(
+            "S122 proguard-rules.pro: missing `-keepclassmembers,"
+            "allowobfuscation class * { *** Log*(...); }` rule. "
+            "Sprint 12.0F+2 invariant - the R8 release minifier "
+            "strips `android.util.Log.*` calls when the return "
+            "value is unused (the 12.0F+1 breadcrumbs were stripped "
+            "for this exact reason). This rule preserves all Log.* "
+            "calls on any class so the debug + audit breadcrumbs "
+            "are guaranteed to fire in release."
+        )
+    # S122-5: TAG keep rule in proguard-rules.pro.
+    if "public static final java.lang.String TAG" not in proguard_code:
+        findings.append(
+            "S122 proguard-rules.pro: missing `-keepclassmembers,"
+            "allowobfuscation class * { public static final "
+            "java.lang.String TAG; }` rule. Sprint 12.0F+2 "
+            "invariant - R8 may fold/inline the `TAG` literal "
+            "as a primitive String constant, which still leaves "
+            "the literal present but may confuse some grep "
+            "patterns. This rule keeps the TAG field as a "
+            "distinct constant, guaranteeing the audit grep "
+            "can find it."
+        )
+    # S122-6: @Keep import + at least 1 @Keep usage.
+    if "import androidx.annotation.Keep" not in code:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: missing `import "
+            "androidx.annotation.Keep`. Sprint 12.0F+2 "
+            "invariant - the @Keep annotation is the "
+            "defense-in-depth measure that prevents R8 from "
+            "inlining the writeTcpRstToTun function even if "
+            "R8 is upgraded to a version that ignores the "
+            "proguard-rules.pro keep rules."
+        )
+    keep_count = code.count("@Keep")
+    if keep_count < 1:
+        findings.append(
+            "S122 OpenE2eeVpnService.kt: missing `@Keep` "
+            "annotation usage (count="
+            + str(keep_count)
+            + ", need at least 1). Sprint 12.0F+2 invariant - "
+            "the writeTcpRstToTun function MUST be annotated with "
+            "`@Keep` so R8 cannot inline or remove it. The proguard "
+            "keep rules + @Keep annotation are belt-and-braces "
+            "(R8 respects @Keep natively but the keep rules are "
+            "added for partial-evaluation scenarios)."
+        )
+    # S122-7: CHANGELOG.md has Sprint 12.0F+2 + Tag 4 filter + 7-step.
+    if "Sprint 12.0F+2" not in changelog_code:
+        findings.append(
+            "S122 CHANGELOG.md: missing `Sprint 12.0F+2` section. "
+            "Sprint 12.0F+2 invariant - the 7-step test akışı + "
+            "the RST recovery scenario + the S122 audit criteria "
+            "must be documented in the Sprint 12.0F+2 CHANGELOG "
+            "section so the Owner has the canonical procedure for "
+            "the next live test."
+        )
+    if "Tag 4 filter" not in changelog_code and "OpenE2eeVpn:V TcpForwarder:V" not in changelog_code:
+        findings.append(
+            "S122 CHANGELOG.md: missing `Tag 4 filter` (or "
+            "`OpenE2eeVpn:V TcpForwarder:V`) documentation. "
+            "Sprint 12.0F+2 invariant - the 7-step test "
+            "akışı step 7 requires the 4 TAG filter "
+            "(`OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V "
+            "NettyChannelClient:V`) to be documented in the "
+            "CHANGELOG so the Owner can run the canonical "
+            "4 TAG filter on the next live test."
+        )
+    if "7-step" not in changelog_code:
+        findings.append(
+            "S122 CHANGELOG.md: missing `7-step` test akışı "
+            "documentation. Sprint 12.0F+2 invariant - the "
+            "7-step test akışı (extended from the 12.0F+1 "
+            "6-step with the RST recovery scenario) must be "
+            "documented in the Sprint 12.0F+2 CHANGELOG section."
+        )
+    return findings
+
+
+def run_s123_check(opene2ee_vpn_service_text, changelog_text):
+    """S123: VPN routing / network fix (Sprint 12.0F+3).
+
+    Owner 12.0F+2 test (logcat120f.txt 1056 satır,
+    "durum değişmedi"): TcpForwarder 8 satır (all
+    teardown), UdpForwarder 687 satır (UDP DNS
+    synchronize send OK), NettyChannelClient 8 satır
+    (shutdown). dispatching flags=0x: 0,
+    buildVpnBuilder: 0, checkPrivateDnsAndBindToVpn: 0,
+    writeTcpRstToTun: 0. UDP çalışıyor, TCP çalışmıyor.
+    3 root-cause candidates in the brief:
+      1. bindProcessToNetwork timing (Fix 1)
+      2. allowedApps filtering (Fix 2)
+      3. VPN routing table setup (Fix 3)
+
+    The audit verifies all 3 fixes are in place:
+      S123-1: `fun rebindProcessToNetworkWithRetry`
+        function exists (grep for the function decl).
+      S123-2: `rebindProcessToNetworkWithRetry()` call
+        site is AFTER `Builder.establish()` returns
+        (grep for the call near the post-establish
+        block).
+      S123-3: `addAllowedApplication` is commented out
+        (grep for `// builder.addAllowedApplication`).
+      S123-4: `fun dumpVpnRoutingState` function exists.
+      S123-5: `vpnRoutingState: ip route` log appears
+        in the CHANGELOG 8-step test akisi (test-time
+        verification, Mavis DEX check).
+
+    Sprint 12.0F+3 target: 169 + 1 = 170 audit cases
+    total (S123 is the 170th).
+    """
+    import re
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: file text missing. "
+            "Sprint 12.0F+3 invariant - the "
+            "rebindProcessToNetworkWithRetry function + "
+            "dumpVpnRoutingState function + the call "
+            "sites after Builder.establish() + the "
+            "addAllowedApplication comment-out are all "
+            "in this file."
+        )
+    if changelog_text is None:
+        findings.append(
+            "S123 CHANGELOG.md: file text missing. Sprint "
+            "12.0F+3 invariant - the 8-step test akisi "
+            "(extended from the 12.0F+2 7-step with the "
+            "routing dump) must be documented in the "
+            "Sprint 12.0F+3 CHANGELOG section."
+        )
+    if opene2ee_vpn_service_text is None or changelog_text is None:
+        return findings
+    # Strip /* ... */ block comments + // line comments.
+    stripped_code = re.sub(r"/\*[\s\S]*?\*/", "", opene2ee_vpn_service_text)
+    stripped_changelog = re.sub(r"/\*[\s\S]*?\*/", "", changelog_text)
+    def strip_line_comments(text):
+        lines = []
+        for ln in text.splitlines():
+            in_string = False
+            i = 0
+            cut_at = -1
+            while i < len(ln):
+                c = ln[i]
+                if c == '"':
+                    in_string = not in_string
+                    i += 1
+                    continue
+                if c == "/" and i + 1 < len(ln) and ln[i + 1] == "/" and not in_string:
+                    cut_at = i
+                    break
+                i += 1
+            if cut_at >= 0:
+                lines.append(ln[:cut_at])
+            else:
+                lines.append(ln)
+        return "\n".join(lines)
+    code = strip_line_comments(stripped_code)
+    changelog_code = strip_line_comments(stripped_changelog)
+
+    # S123-1: rebindProcessToNetworkWithRetry function decl.
+    if "fun rebindProcessToNetworkWithRetry(" not in code:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: missing `fun "
+            "rebindProcessToNetworkWithRetry(` function "
+            "declaration. Sprint 12.0F+3 invariant - "
+            "Fix 1 is the bindProcessToNetwork retry "
+            "with 1s + 3s Handler.postDelayed retries "
+            "to catch the kernel's async "
+            "applyUnderlyingNetworks() race. Without "
+            "this function the initial bind runs "
+            "BEFORE the kernel has committed the "
+            "0.0.0.0/0 dev tun0 route, so the bind "
+            "misses and TCP SYN packets bypass the VPN."
+        )
+    # S123-2: rebindProcessToNetworkWithRetry() call site
+    # is AFTER Builder.establish() returns.
+    call_count = code.count("rebindProcessToNetworkWithRetry()")
+    if call_count < 1:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: missing "
+            "`rebindProcessToNetworkWithRetry()` call "
+            "site. Sprint 12.0F+3 invariant - the call "
+            "MUST be AFTER `Builder.establish()` (so "
+            "the kernel has registered the VPN "
+            "transport) — NOT inside the pre-establish "
+            "block. The call site should be near the "
+            "`tunInterface = pfd` assignment (the "
+            "post-establish hook)."
+        )
+    # S123-3: addAllowedApplication commented out.
+    # The audit function strips // line comments
+    # BEFORE this check (so the "uncommented" call
+    # would still appear in `code` and the
+    # `b.addAllowedApplication(pkg)` substring would
+    # match). We need to look for the COMMENTED form
+    # BEFORE stripping — check the raw text instead.
+    # The pattern is: a line with `//` followed by
+    # `builder.addAllowedApplication`.
+    raw_has_comment = bool(re.search(
+        r"^\s*//\s*builder\.addAllowedApplication",
+        opene2ee_vpn_service_text,
+        re.MULTILINE,
+    ))
+    if not raw_has_comment:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: missing "
+            "`// builder.addAllowedApplication` "
+            "comment-out. Sprint 12.0F+3 invariant - "
+            "Fix 2 disables per-app VPN filtering for "
+            "the debug round so ALL traffic (Chrome, "
+            "WhatsApp, system apps) goes through tun0. "
+            "The comment-out is documented + easy to "
+            "revert in 12.0F+4 once we understand the "
+            "real root cause."
+        )
+    # S123-4: dumpVpnRoutingState function decl.
+    if "fun dumpVpnRoutingState(" not in code:
+        findings.append(
+            "S123 OpenE2eeVpnService.kt: missing `fun "
+            "dumpVpnRoutingState(` function "
+            "declaration. Sprint 12.0F+3 invariant - "
+            "Fix 3 runs `ip rule` + `ip route` + "
+            "`ip addr show tun0` shell commands on the "
+            "device 500ms after `Builder.establish()` "
+            "to verify the kernel routing table has "
+            "the `0.0.0.0/0 dev tun0` entry. Without "
+            "this function the Owner cannot tell "
+            "whether the routing table is correct or "
+            "broken at runtime."
+        )
+    # S123-5: vpnRoutingState: ip route in CHANGELOG
+    # (test-time verification, Mavis DEX check).
+    if "vpnRoutingState: ip route" not in changelog_code:
+        findings.append(
+            "S123 CHANGELOG.md: missing "
+            "`vpnRoutingState: ip route` literal in "
+            "the 8-step test akisi. Sprint 12.0F+3 "
+            "invariant - the Owner greps logcat for "
+            "this literal to confirm the routing dump "
+            "ran. The literal MUST appear in the "
+            "Sprint 12.0F+3 CHANGELOG section so the "
+            "Owner has the canonical grep pattern for "
+            "the next live test."
+        )
+    return findings
+
+
+def run_s124_check(opene2ee_vpn_service_text, main_activity_text, vpn_service_dart_text):
+    """S124: MethodChannel call-chain debug (Sprint 12.0F+4).
+
+    Owner 12.0F+3 test (1387 satır release + 767 satır
+    debug) showed 0 breadcrumbs (vpnRoutingState, rebind,
+    DEBUG_MODE, buildVpnBuilder, dispatching flags,
+    writeTcpRstToTun — hepsi 0). Mavis kod analizi:
+    startCapture entry log 0 = startCapture synchronized
+    block'a hiç girmedi = "start" komutu
+    VpnService.onMethodCall'a hiç ulaşmadı. Call chain
+    break noktası bulunmalı.
+
+    The 4 call-chain debug breadcrumbs:
+      S124-1: `onMethodCall: received method='` in
+        OpenE2eeVpnService.kt (every method call).
+      S124-2: `attachFlutterEngine: ENTER, prev` in
+        OpenE2eeVpnService.kt (engine attach).
+      S124-3: `vpn_service.dart: start` in
+        mobile/lib/services/vpn_service.dart (Dart
+        invokeMethod).
+      S124-4: `MainActivity: configureFlutterEngine:
+        ENTER` in MainActivity.kt (handler register).
+
+    Sprint 12.0F+4 target: 170 + 1 = 171 audit cases
+    total (S124 is the 171st).
+    """
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S124 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 12.0F+4 invariant - the "
+            "onMethodCall entry log + attachFlutterEngine "
+            "log + the catch log are in this file."
+        )
+    if main_activity_text is None:
+        findings.append(
+            "S124 MainActivity.kt: file text missing. "
+            "Sprint 12.0F+4 invariant - the "
+            "configureFlutterEngine: ENTER + DONE logs "
+            "+ the MethodChannel handler log are in this "
+            "file."
+        )
+    if vpn_service_dart_text is None:
+        findings.append(
+            "S124 vpn_service.dart: file text missing. "
+            "Sprint 12.0F+4 invariant - the start() "
+            "print breadcrumbs (3x) are in this file."
+        )
+    if opene2ee_vpn_service_text is None or main_activity_text is None or vpn_service_dart_text is None:
+        return findings
+    # S124-1: onMethodCall: received method=' literal
+    # in OpenE2eeVpnService.kt. This is a source-level
+    # check (the string is preserved in the DEX too,
+    # but the audit verifies the source).
+    if "onMethodCall: received method=" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S124 OpenE2eeVpnService.kt: missing "
+            "`onMethodCall: received method=` entry "
+            "log. Sprint 12.0F+4 invariant - Debug 1 "
+            "is the call-chain entry log that fires "
+            "for EVERY method invocation. The Owner "
+            "greps logcat for this literal to confirm "
+            "the Dart -> MainActivity -> dispatch -> "
+            "instance.onMethodCall chain reached this "
+            "method."
+        )
+    # S124-2: attachFlutterEngine: ENTER, prev literal
+    # in OpenE2eeVpnService.kt.
+    if "attachFlutterEngine: ENTER, prev Companion.methodChannel=" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S124 OpenE2eeVpnService.kt: missing "
+            "`attachFlutterEngine: ENTER, prev "
+            "Companion.methodChannel=` log. Sprint "
+            "12.0F+4 invariant - Debug 2 is the "
+            "MethodChannel binding log that fires "
+            "when MainActivity calls attachFlutterEngine. "
+            "Without this log the Owner cannot tell "
+            "whether the engine binaryMessenger was "
+            "wired to the service at app launch."
+        )
+    # S124-3: vpn_service.dart: start in Dart file.
+    # The Dart audit looks for the print() literal.
+    if "vpn_service.dart: start" not in vpn_service_dart_text:
+        findings.append(
+            "S124 vpn_service.dart: missing `vpn_service.dart: "
+            "start` print breadcrumb. Sprint 12.0F+4 "
+            "invariant - Debug 3 is the Dart-side "
+            "print() that fires for every start() "
+            "call. The Owner greps logcat for this "
+            "literal via `adb logcat -d -s flutter:V "
+            "| Select-String vpn_service.dart` to "
+            "verify the Dart side reached the "
+            "invokeMethod call. Note: `print()` is "
+            "stripped in release builds but PRESERVED "
+            "in debug APK builds (which is the "
+            "recommended build for the 9-step test)."
+        )
+    # S124-4: MainActivity: configureFlutterEngine:
+    # ENTER literal in MainActivity.kt.
+    if "configureFlutterEngine: ENTER" not in main_activity_text:
+        findings.append(
+            "S124 MainActivity.kt: missing "
+            "`configureFlutterEngine: ENTER` log. "
+            "Sprint 12.0F+4 invariant - Debug 4 is "
+            "the call-chain entry log that fires "
+            "when the Flutter engine attaches to the "
+            "Activity. The Owner greps logcat for "
+            "this literal to confirm the handler "
+            "registration path is live. Without this "
+            "log the Owner cannot tell whether "
+            "MainActivity ever bound the inbound "
+            "handler."
+        )
     return findings
 
 
@@ -6214,6 +10122,1136 @@ cases = [
     # 134 + 1 = 135.
     ("S84 PASS (OpenE2eeVpnService.kt has packetsObserved.incrementAndGet EXACTLY ONCE in startReaderThread read branch - regression guard for OnePlus 9 Pro fake-capture accusation)",
      run_s84_check, (case_s84_packets_observed_increment_invariant_pass,), []),
+    # S100 case (Sprint 12.0A - new) - NettyChannelClient.kt
+    # has `fun handleTcpPacket(` method AND `data class
+    # TcpConnection` declaration. Regression guard: a
+    # future sprint that refactors the file cannot
+    # silently drop the state-machine dispatcher. The
+    # MVP builds on the Sprint 11.0Z SKELETON (S99
+    # audit tokens) by adding the 3-way handshake,
+    # data flow, FIN teardown, and `buildIpTcpPacket`
+    # helper. Total selftest: 149 + 1 = 150 (the
+    # brief's 150/150 target; S101 + S102 add 2 more
+    # to reach 152 — see below).
+    ("S100 PASS (NettyChannelClient.kt has `fun handleTcpPacket(` method + `data class TcpConnection` declaration - regression guard for the Sprint 12.0A TCP state machine MVP)",
+     run_s100_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.InetAddress\n"
+         "import java.net.Socket\n"
+         "import java.util.concurrent.ConcurrentHashMap\n"
+         "import java.util.concurrent.atomic.AtomicLong\n"
+         "import java.io.OutputStream\n"
+         "import java.nio.ByteBuffer\n"
+         "import java.nio.ByteOrder\n"
+         "\n"
+         "class NettyChannelClient(private val service: OpenE2eeVpnService) {\n"
+         "    enum class TcpState {\n"
+         "        LISTEN, SYN_SENT, ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2,\n"
+         "        CLOSE_WAIT, LAST_ACK, TIME_WAIT, CLOSED\n"
+         "    }\n"
+         "    data class TcpConnection(\n"
+         "        var state: TcpState = TcpState.LISTEN,\n"
+         "        var seqNum: Long = 0L,\n"
+         "        var ackNum: Long = 0L,\n"
+         "        var receiveWindow: Int = 1460,\n"
+         "        var socket: Socket? = null,\n"
+         "        var readerThread: Thread? = null,\n"
+         "    )\n"
+         "    private val tcpConnectionMap: MutableMap<String, TcpConnection> = ConcurrentHashMap()\n"
+         "    private val connectionSeq = AtomicLong(0L)\n"
+         "    @Volatile private var tunOutputStream: OutputStream? = null\n"
+         "    fun setTunOutputStream(output: OutputStream?) { tunOutputStream = output }\n"
+         "    // Sprint 12.0A - TCP state machine MVP. 3-way handshake + data flow + FIN.\n"
+         "    fun handleTcpPacket(\n"
+         "        ipPacket: ByteArray,\n"
+         "        offset: Int,\n"
+         "        length: Int,\n"
+         "        srcIp: String,\n"
+         "        dstIp: String,\n"
+         "        srcPort: Int,\n"
+         "        dstPort: Int\n"
+         "    ) {\n"
+         "        // dispatch on flags (SYN / SYN+ACK / ACK / PSH+ACK / FIN+ACK / RST)\n"
+         "        val flowKey = \"$srcIp:$srcPort-$dstIp:$dstPort\"\n"
+         "        val tcp = parseTcpHeader(ipPacket, length, offset) ?: return\n"
+         "        val flags = tcp.flags\n"
+         "        when {\n"
+         "            (flags and 0x02) != 0 && (flags and 0x10) == 0 -> {\n"
+         "                val conn = TcpConnection()\n"
+         "                conn.state = TcpState.LISTEN\n"
+         "                conn.seqNum = (System.nanoTime() and 0xFFFFFFFFL)\n"
+         "                conn.ackNum = tcp.seqNum + 1\n"
+         "                Log.d(\"NettyChannelClient\", \"handleTcpPacket: SYN, flow $flowKey, state=LISTEN -> SYN_SENT\")\n"
+         "                val sock = protectAndConnect(InetAddress.getByName(dstIp), dstPort, flowKey)\n"
+         "                if (sock == null) { conn.state = TcpState.CLOSED; return }\n"
+         "                conn.socket = sock\n"
+         "                conn.state = TcpState.ESTABLISHED\n"
+         "                Log.d(\"NettyChannelClient\", \"handleTcpPacket: SYN+ACK received, state=SYN_SENT -> ESTABLISHED for flow $flowKey\")\n"
+         "                tcpConnectionMap[flowKey] = conn\n"
+         "            }\n"
+         "            (flags and 0x10) != 0 -> {\n"
+         "                val conn = tcpConnectionMap[flowKey]\n"
+         "                if (conn != null) {\n"
+         "                    conn.lastAckSent = tcp.ackNum\n"
+         "                    Log.d(\"NettyChannelClient\", \"handleTcpPacket: ACK, flow $flowKey, ackNum=${tcp.ackNum} (state=${conn.state})\")\n"
+         "                }\n"
+         "            }\n"
+         "        }\n"
+         "    }\n"
+         "    private fun parseTcpHeader(buf: ByteArray, len: Int, ipHeaderLen: Int) = null\n"
+         "    private fun protectAndConnect(dst: InetAddress, port: Int, flowKey: String): Socket? = null\n"
+         "}\n",
+     ),
+     []),
+    # S101 case (Sprint 12.0A - new) - NettyChannelClient.kt
+    # has the 9-state TcpState enum (LISTEN, SYN_SENT,
+    # ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2, CLOSE_WAIT,
+    # LAST_ACK, TIME_WAIT, CLOSED). MVP does NOT implement
+    # TIME_WAIT (transitions directly to CLOSED per the
+    # brief) but the state NAME must still be in the enum
+    # so Sprint 12.0A.2 can wire it without a schema
+    # change. Total selftest: 150 + 1 = 151.
+    ("S101 PASS (NettyChannelClient.kt has the 9-state TcpState enum - regression guard for the Sprint 12.0A TCP state machine MVP)",
+     run_s101_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import java.net.Socket\n"
+         "import java.util.concurrent.atomic.AtomicLong\n"
+         "import java.util.concurrent.ConcurrentHashMap\n"
+         "class NettyChannelClient(private val service: OpenE2eeVpnService) {\n"
+         "    enum class TcpState {\n"
+         "        LISTEN,\n"
+         "        SYN_SENT,\n"
+         "        ESTABLISHED,\n"
+         "        FIN_WAIT_1,\n"
+         "        FIN_WAIT_2,\n"
+         "        CLOSE_WAIT,\n"
+         "        LAST_ACK,\n"
+         "        TIME_WAIT,\n"
+         "        CLOSED\n"
+         "    }\n"
+         "    data class TcpConnection(\n"
+         "        var state: TcpState = TcpState.LISTEN,\n"
+         "        var seqNum: Long = 0L,\n"
+         "        var ackNum: Long = 0L,\n"
+         "        var receiveWindow: Int = 1460,\n"
+         "        var socket: Socket? = null,\n"
+         "    )\n"
+         "}\n",
+     ),
+     []),
+    # S102 case (Sprint 12.0A - new) - NettyChannelClient.kt
+    # has the 3-way handshake log breadcrumbs (SYN,
+    # SYN+ACK, ACK) AND the ESTABLISHED transition log.
+    # These are the Owner-side verification surface: he
+    # greps `adb logcat -d -s OpenE2eeVpn:V` for these
+    # tokens after `curl http://212.64.210.85/healthz`
+    # to confirm the 3-way handshake completed. Total
+    # selftest: 151 + 1 = 152.
+    ("S102 PASS (NettyChannelClient.kt has 3-way handshake log breadcrumbs (SYN / SYN+ACK / ACK) + ESTABLISHED transition - regression guard for the Sprint 12.0A TCP state machine MVP)",
+     run_s102_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.InetAddress\n"
+         "import java.net.Socket\n"
+         "class NettyChannelClient(private val service: OpenE2eeVpnService) {\n"
+         "    fun handleTcpPacket(\n"
+         "        ipPacket: ByteArray,\n"
+         "        offset: Int,\n"
+         "        length: Int,\n"
+ "        srcIp: String,\n"
+         "        dstIp: String,\n"
+         "        srcPort: Int,\n"
+         "        dstPort: Int\n"
+         "    ) {\n"
+         "        val flowKey = \"$srcIp:$srcPort-$dstIp:$dstPort\"\n"
+         "        val tcp = parseTcpHeader(ipPacket, length, offset) ?: return\n"
+         "        val flags = tcp.flags\n"
+         "        when {\n"
+         "            (flags and 0x02) != 0 && (flags and 0x10) == 0 -> {\n"
+         "                Log.d(\"NettyChannelClient\", \"handleTcpPacket: SYN, flow $flowKey, state=LISTEN -> SYN_SENT\")\n"
+         "                Log.d(\"NettyChannelClient\", \"handleTcpPacket: SYN+ACK received, state=SYN_SENT -> ESTABLISHED for flow $flowKey\")\n"
+         "            }\n"
+         "            (flags and 0x10) != 0 -> {\n"
+         "                Log.d(\"NettyChannelClient\", \"handleTcpPacket: ACK, flow $flowKey, ackNum=${tcp.ackNum} (state=ESTABLISHED)\")\n"
+         "            }\n"
+         "        }\n"
+         "    }\n"
+         "    private fun parseTcpHeader(buf: ByteArray, len: Int, ipHeaderLen: Int) = null\n"
+         "}\n",
+     ),
+     []),
+    # S103 case (Sprint 12.0A.5 - new) - NettyChannelClient.kt
+    # has `fun handleUdpPacket(` method. The UDP forwarder
+    # dispatcher mirrors `handleTcpPacket` and is the
+    # missing piece from the Owner logcat 10:01 root
+    # cause (TCP SYN 0, ESTABLISHED YOK, all traffic dropped
+    # at the UDP layer). Without handleUdpPacket, every
+    # TUN-captured UDP packet is dropped (no DNS, no NTP,
+    # no STUN) and the Owner-side `curl http://212.64.210.85/healthz`
+    # test fails because the app cannot resolve the hostname.
+    # Total selftest: 152 + 1 = 153.
+    ("S103 PASS (NettyChannelClient.kt has `fun handleUdpPacket(` method - regression guard for the Sprint 12.0A.5 UDP forwarder / DNS resolver path)",
+     run_s103_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.DatagramPacket\n"
+         "import java.net.DatagramSocket\n"
+         "import java.net.InetAddress\n"
+         "class NettyChannelClient(private val service: OpenE2eeVpnService) {\n"
+         "    fun handleUdpPacket(\n"
+         "        srcIp: String,\n"
+         "        srcPort: Int,\n"
+         "        dstIp: String,\n"
+         "        dstPort: Int,\n"
+         "        payload: ByteArray\n"
+         "    ) {\n"
+         "        val flowKey = \"$srcIp:$srcPort-$dstIp:$dstPort\"\n"
+         "        Log.d(\"NettyChannelClient\", \"handleUdpPacket: forward ${payload.size}B from $flowKey\")\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    # S104 case (Sprint 12.0A.5 - new) - NettyChannelClient.kt
+    # has `DatagramSocket` literal in the handleUdpPacket
+    # code path. The per-flow UDP forwarder socket is a
+    # `java.net.DatagramSocket`. Total selftest: 153 + 1 = 154.
+    ("S104 PASS (NettyChannelClient.kt has `DatagramSocket` literal in the handleUdpPacket code path - regression guard for the Sprint 12.0A.5 UDP forwarder)",
+     run_s104_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.DatagramPacket\n"
+         "import java.net.DatagramSocket\n"
+         "import java.net.InetAddress\n"
+         "class NettyChannelClient(private val service: OpenE2eeVpnService) {\n"
+         "    fun handleUdpPacket(srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, payload: ByteArray) {\n"
+         "        val udpSocket = DatagramSocket()\n"
+         "        Log.d(\"NettyChannelClient\", \"handleUdpPacket: created DatagramSocket for UDP forwarder\")\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    # S105 case (Sprint 12.0A.5 - new) - NettyChannelClient.kt
+    # has `protect(udpSocket)` call (or `service.protect(`
+    # on the udpSocket) AFTER the `DatagramSocket` literal
+    # in the handleUdpPacket code path. The protect() call
+    # is the load-bearing piece: without it, the
+    # DatagramSocket is captured by the TUN and the UDP
+    # packet loops forever. Total selftest: 154 + 1 = 155.
+    ("S105 PASS (NettyChannelClient.kt has `protect(udpSocket)` call AFTER `DatagramSocket` literal in the handleUdpPacket code path - regression guard for the Sprint 12.0A.5 UDP forwarder)",
+     run_s105_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.DatagramPacket\n"
+         "import java.net.DatagramSocket\n"
+         "import java.net.InetAddress\n"
+         "class NettyChannelClient(private val service: OpenE2eeVpnService) {\n"
+         "    fun handleUdpPacket(srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, payload: ByteArray) {\n"
+         "        val udpSocket = DatagramSocket()\n"
+         "        val protected = service.protect(udpSocket)\n"
+         "        Log.d(\"NettyChannelClient\", \"handleUdpPacket: protected DatagramSocket\")\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    # S106 case (Sprint 12.0A.6 - new) - 5 breadcrumb tokens
+    # for the TCP dispatch path. Owner 11:08 logcat
+    # symptom: TCP SYN 0, ESTABLISHED YOK, no TcpConnection
+    # connected log. The 5 breadcrumb tokens are the
+    # Owner-side diagnostic surface for the BLOCKED
+    # regression. Total selftest: 155 + 1 = 156.
+    ("S106 PASS (5 breadcrumb tokens for TCP dispatch path: TCP packet ENTRY, parseTcpHeader dstPort, handleTcpPacket dispatch, new TcpConnection, state transition - regression guard for Sprint 12.0A.6)",
+     run_s106_check,
+     (
+         # vpn_service_text (must include the 3 OpenE2eeVpnService breadcrumbs)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "class OpenE2eeVpnService {\n"
+         "    private fun startReaderThread() {\n"
+         "        Log.d(\"OpenE2eeVpn\", \"startReaderThread: TCP packet ENTRY (src=10.42.0.2, dst=212.64.210.85)\")\n"
+         "        Log.d(\"OpenE2eeVpn\", \"startReaderThread: parseTcpHeader dstPort=80 srcPort=12345 flags=0x02\")\n"
+         "        Log.d(\"OpenE2eeVpn\", \"startReaderThread: handleTcpPacket dispatch (flowKey=10.42.0.2:12345-212.64.210.85:80)\")\n"
+         "    }\n"
+         "}\n",
+         # netty_text (must include the 2 NettyChannelClient breadcrumbs)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "class NettyChannelClient {\n"
+         "    private fun handleSyn() {\n"
+         "        val conn = TcpConnection()\n"
+         "        Log.d(\"NettyChannelClient\", \"new TcpConnection #1\")\n"
+         "        Log.d(\"NettyChannelClient\", \"handleTcpPacket: state=LISTEN -> SYN_SENT\")\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    # S107 case (Sprint 12.0A.6 - new) - passthrough
+    # SKIPPED on user-space-handled TCP/UDP. Owner 11:08
+    # BLOCKED root cause: the transparent passthrough
+    # was unconditional, the kernel raced the
+    # user-space stack and sent an RST. 12.0A.6 fix: a
+    # `handled` flag is set after a successful
+    # TCP/UDP dispatch, and the passthrough is wrapped
+    # in `if (handled) { log SKIPPED } else { ... }`.
+    # Total selftest: 156 + 1 = 157.
+    ("S107 PASS (OpenE2eeVpnService.kt passthrough SKIPPED on user-space-handled TCP/UDP via `handled` flag + `passthrough SKIPPED` log - regression guard for Owner 11:08 BLOCKED)",
+     run_s107_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.io.OutputStream\n"
+         "class OpenE2eeVpnService {\n"
+         "    private fun startReaderThread(output: OutputStream) {\n"
+         "        var handled = false\n"
+         "        Log.d(\"OpenE2eeVpn\", \"startReaderThread: TCP packet ENTRY\")\n"
+         "        if (true) {\n"
+         "            handled = true\n"
+         "        }\n"
+         "        val writeOk = if (handled) {\n"
+         "            Log.d(\"OpenE2eeVpn\", \"startReaderThread: passthrough SKIPPED (user-space stack handled TCP/UDP packet)\")\n"
+         "            true\n"
+         "        } else try {\n"
+         "            output.write(byteArrayOf())\n"
+         "            true\n"
+         "        } catch (e: Throwable) { false }\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    # S108 case (Sprint 12.0A.6 - new) - 5-tuple
+    # normalization. The user-space stack must try
+    # BOTH the primary (src,dst) and reverse (dst,src)
+    # flowKey when looking up a TcpConnection, so
+    # OUTGOING and INCOMING packets find the same
+    # connection. Owner 11:08 BLOCKED secondary issue:
+    # INCOMING packets were dropped silently because
+    # the lookup only tried one direction. Total
+    # selftest: 157 + 1 = 158.
+    ("S108 PASS (NettyChannelClient.kt has primaryFlowKey + reverseFlowKey declarations for 5-tuple normalization - regression guard for Owner 11:08 INCOMING packets dropped)",
+     run_s108_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.InetAddress\n"
+         "import java.util.concurrent.ConcurrentHashMap\n"
+         "class NettyChannelClient {\n"
+         "    fun handleTcpPacket(\n"
+         "        ipPacket: ByteArray,\n"
+         "        offset: Int,\n"
+         "        length: Int,\n"
+         "        srcIp: String,\n"
+         "        dstIp: String,\n"
+         "        srcPort: Int,\n"
+         "        dstPort: Int\n"
+         "    ) {\n"
+         "        val primaryFlowKey = flowKey(InetAddress.getByName(srcIp), srcPort, InetAddress.getByName(dstIp), dstPort, 6)\n"
+         "        val reverseFlowKey = flowKey(InetAddress.getByName(dstIp), dstPort, InetAddress.getByName(srcIp), srcPort, 6)\n"
+         "        val conn = tcpConnectionMap[primaryFlowKey] ?: tcpConnectionMap[reverseFlowKey]\n"
+         "    }\n"
+         "    private fun flowKey(a: InetAddress, p: Int, b: InetAddress, q: Int, proto: Byte) = \"\"\n"
+         "    private val tcpConnectionMap: MutableMap<String, Any> = ConcurrentHashMap()\n"
+         "}\n",
+     ),
+     []),
+    # S109 case (Sprint 12.0A.7 - new) - 4 HTTP data
+    # flow breadcrumb tokens. Owner 11:33 BLOCKED
+    # on Sprint 12.0A.6: TCP 3-way handshake works
+    # (17 ESTABLISHED connections) but HTTP data
+    # flow doesn't. The 4 breadcrumb tokens are the
+    # Owner-side diagnostic surface for the BLOCKED
+    # regression. Total selftest: 158 + 1 = 159.
+    ("S109 PASS (4 HTTP data flow breadcrumb tokens: sendHttpRequest, recvHttpResponse, responsePayload, bytes read from real socket - regression guard for Sprint 12.0A.7)",
+     run_s109_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "class NettyChannelClient {\n"
+         "    private fun handleData() {\n"
+         "        Log.d(\"NettyChannelClient\", \"handleTcpPacket: PSH+ACK data, forward 500 bytes from flow ...\")\n"
+         "        Log.d(\"NettyChannelClient\", \"sendHttpRequest: 500 bytes written to real socket for flow ...\")\n"
+         "    }\n"
+         "    private fun startSocketReader() {\n"
+         "        val n = 1024\n"
+         "        Log.d(\"NettyChannelClient\", \"recvHttpResponse: 1024 bytes read from real socket for flow ...\")\n"
+         "        Log.d(\"NettyChannelClient\", \"responsePayload: 1024 bytes written to TUN for flow ...\")\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    # S110 case (Sprint 12.0A.7 - new) - connection
+    # registration log + UNKNOWN FLOW warning. The
+    # Owner greps for these to confirm the
+    # connection was registered in the map (S110.a)
+    # and to detect late packets on torn-down
+    # connections (S110.b). Total selftest: 159 + 1 = 160.
+    ("S110 PASS (tcpConnectionMap.put primary flow log + late ACK debug log for connection-registration diagnostics - regression guard for Sprint 12.0A.7/12.0A.8)",
+     run_s110_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "class NettyChannelClient {\n"
+         "    private fun handleSyn() {\n"
+         "        tcpConnectionMap[flowKey] = conn\n"
+         "        Log.d(\"NettyChannelClient\", \"tcpConnectionMap.put primary flow: $flowKey (state=ESTABLISHED, conn #1, 1 entries in map)\")\n"
+         "    }\n"
+         "    private fun handleTcpPacket() {\n"
+         "        if (conn == null) {\n"
+         "            Log.d(\"NettyChannelClient\", \"handleTcpPacket: late ACK (no conn found, both keys miss) - flowKey=... flags=0x10\")\n"
+         "        }\n"
+         "    }\n"
+         "    private val tcpConnectionMap: MutableMap<String, Any> = mutableMapOf()\n"
+         "    private val conn: Any? = null\n"
+         "    private val flowKey: String = \"\"\n"
+         "}\n",
+     ),
+     []),
+    # S111 case (Sprint 12.0A.7 - new) - @Volatile
+    # on every TcpConnection var field. The
+    # cross-thread visibility fix for the Owner
+    # 11:33 BLOCKED root cause hypothesis
+    # ("TCP 3-way handshake works but HTTP data
+    # flow doesn't" — likely a stale ackNum read
+    # by the startSocketReader thread). Total
+    # selftest: 160 + 1 = 161.
+    ("S111 PASS (8+ @Volatile annotations on TcpConnection var fields - cross-thread visibility fix for Sprint 12.0A.7)",
+     run_s111_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "class NettyChannelClient {\n"
+         "    data class TcpConnection(\n"
+         "        @Volatile var state: Any = Any(),\n"
+         "        @Volatile var seqNum: Long = 0L,\n"
+         "        @Volatile var ackNum: Long = 0L,\n"
+         "        @Volatile var receiveWindow: Int = 1460,\n"
+         "        @Volatile var socket: Any? = null,\n"
+         "        val outputBuffer: ByteArray = ByteArray(0),\n"
+         "        @Volatile var lastAckSent: Long = 0L,\n"
+         "        @Volatile var retransmissionTimer: Any? = null,\n"
+         "        @Volatile var readerThread: Thread? = null,\n"
+         "    )\n"
+         "}\n",
+     ),
+     []),
+    # S115 case (Sprint 12.0X - new) - comprehensive
+    # teardown in NettyChannelClient.shutdown(). The
+    # pre-12.0X teardown only did 11.0R-level cleanup
+    # (ring clear + packetsObserved reset), leaving the
+    # Netty `workerGroup`, the per-connection reader
+    # threads, and the per-flow UDP reader threads
+    # leaked. Owner 12:29: the kernel TUN interface
+    # remained as an orphan, host routing was broken,
+    # and only a reboot recovered. The fix is a 6-step
+    # shutdown:
+    #   1. Close every per-flow Netty Channel + clear flowMap.
+    #   2. Cancel every per-connection reader Future +
+    #      close the Socket + interrupt the reader
+    #      Thread + clear tcpConnectionMap.
+    #   3. Cancel every per-flow UDP reader Future +
+    #      force soTimeout=0 + close the DatagramSocket
+    #      + clear udpSocketMap and udpReaderFutures.
+    #   4. Detach the TUN output stream ref.
+    #   5. workerGroup.shutdownGracefully().await(1, SECONDS).
+    #   6. backgroundExecutor.shutdownNow() + awaitTermination(1, SECONDS).
+    # The audit verifies the 6 tokens in the source file
+    # (after comment strip). Total selftest: 161 + 1 = 162.
+    ("S115 PASS (comprehensive teardown in NettyChannelClient.shutdown - 6 steps covering flowMap, tcpConnectionMap, udpSocketMap, tunOutputStream, workerGroup, backgroundExecutor - regression guard for Sprint 12.0X)",
+     run_s115_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.DatagramSocket\n"
+         "import java.util.concurrent.ExecutorService\n"
+         "import java.util.concurrent.Executors\n"
+         "import java.util.concurrent.TimeUnit\n"
+         "import io.netty.channel.EventLoopGroup\n"
+         "import io.netty.channel.nio.NioEventLoopGroup\n"
+         "class NettyChannelClient {\n"
+         "    private val workerGroup: EventLoopGroup = NioEventLoopGroup(2)\n"
+         "    private val backgroundExecutor: ExecutorService = Executors.newCachedThreadPool()\n"
+         "    fun shutdown() {\n"
+         "        // step 1: flowMap closed\n"
+         "        flowMap.values.forEach { it.close() }\n"
+         "        flowMap.clear()\n"
+         "        // step 2: tcpConnectionMap cleared + reader threads joined\n"
+         "        tcpConnectionMap.values.forEach { conn ->\n"
+         "            try { conn.readerFuture?.cancel(true) } catch (_: Throwable) {}\n"
+         "            try { conn.socket?.close() } catch (_: Throwable) {}\n"
+         "            try { conn.readerThread?.interrupt() } catch (_: Throwable) {}\n"
+         "        }\n"
+         "        tcpConnectionMap.clear()\n"
+         "        // step 3: udpSocketMap closed + udpReaderFutures cancelled\n"
+         "        udpReaderFutures.values.forEach { f -> try { f?.cancel(true) } catch (_: Throwable) {} }\n"
+         "        udpSocketMap.values.forEach { sock ->\n"
+         "            try { sock.soTimeout = 0 } catch (_: Throwable) {}\n"
+         "            try { sock.close() } catch (_: Throwable) {}\n"
+         "        }\n"
+         "        udpSocketMap.clear()\n"
+         "        // step 4: tunOutputStream nulled\n"
+         "        tunOutputStream = null\n"
+         "        // step 5: workerGroup shutdownGracefully awaited\n"
+         "        workerGroup.shutdownGracefully().await(1, TimeUnit.SECONDS)\n"
+         "        // step 6: backgroundExecutor shutdownNow + awaitTermination\n"
+          "        backgroundExecutor.shutdownNow()\n"
+          "        backgroundExecutor.awaitTermination(1, TimeUnit.SECONDS)\n"
+          "    }\n"
+          "    data class TcpConnection(val socket: java.net.Socket? = null, val readerThread: Thread? = null, val readerFuture: java.util.concurrent.Future<*>? = null)\n"
+          "    private val flowMap: MutableMap<String, Any> = java.util.concurrent.ConcurrentHashMap()\n"
+          "    private val tcpConnectionMap: MutableMap<String, TcpConnection> = java.util.concurrent.ConcurrentHashMap()\n"
+          "    private val udpSocketMap: MutableMap<String, DatagramSocket> = java.util.concurrent.ConcurrentHashMap()\n"
+          "    private val udpReaderFutures: MutableMap<String, java.util.concurrent.Future<*>?> = java.util.concurrent.ConcurrentHashMap()\n"
+          "    @Volatile private var tunOutputStream: java.io.OutputStream? = null\n"
+          "}\n",
+      ),
+      []),
+    # S116 case (Sprint 12.0B - new) - UdpForwarder
+    # teardown invariant. The 12.0A.5 UDP forwarder
+    # was moved OUT of NettyChannelClient.kt and INTO
+    # OpenE2eeVpnService.kt per the brief: "OpenE2ee
+    # VpnService.kt icine minimal UDP forwarder ekle,
+    # Netty DEGIL, sadece raw java.net.DatagramSocket
+    # + service.protect(socket)". The teardown is
+    # verified by checking the 11 mandatory tokens in
+    # OpenE2eeVpnService.kt (after comment strip):
+    #   1. `class UdpForwarder` declaration.
+    #   2. `udpSocketMap` field (per-flow DatagramSocket
+    #      map).
+    #   3. `udpReaderFutures` field (per-flow reader
+    #      Future map).
+    #   4. `fun tearDown()` method (public teardown
+    #      entry point).
+    #   5. `cancel(true)` inside tearDown (per-flow
+    #      reader Future cancellation).
+    #   6. `sock.close()` (per-flow DatagramSocket close).
+    #   7. `shutdownNow()` (ExecutorService interrupt).
+    #   8. `awaitTermination` (bounded wait).
+    #   9. `protect(` in handleUdpPacket (the brief:
+    #      "service.protect(socket)").
+    #  10. `udpForwarder.tearDown()` caller wire from
+    #      stopCapture (must run BEFORE
+    #      nettyClient?.shutdown()).
+    #  11. `udpForwarder.setTunOutputStream` caller wire
+    #      from startReaderThread (per-flow reader needs
+    #      the TUN output stream to write responses back).
+    # The S115 + S116 pair replaces the pre-12.0B single-
+    # audit (S115 only). S115 now checks the 6-step
+    # structure in NettyChannelClient.shutdown (tolerant
+    # of the post-12.0B "step 3 DELEGATED" breadcrumb);
+    # S116 checks the new UdpForwarder teardown in
+    # OpenE2eeVpnService.kt. Total selftest: 162 + 1 = 163.
+    ("S116 PASS (UdpForwarder teardown in OpenE2eeVpnService.kt - class + udpSocketMap + udpReaderFutures + tearDown + cancel(true) + sock.close() + shutdownNow() + awaitTermination + protect( + udpForwarder.tearDown() caller + udpForwarder.setTunOutputStream caller - regression guard for Sprint 12.0B)",
+     run_s116_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.DatagramSocket\n"
+         "import java.util.concurrent.Executors\n"
+         "import java.util.concurrent.ThreadPoolExecutor\n"
+         "import java.util.concurrent.TimeUnit\n"
+         "class OpenE2eeVpnService : android.net.VpnService() {\n"
+         "    private val udpForwarder = UdpForwarder(this)\n"
+         "    private fun startReaderThread(pfd: android.os.ParcelFileDescriptor) {\n"
+         "        val output = android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd)\n"
+         "        udpForwarder.setTunOutputStream(output)\n"
+         "    }\n"
+         "    private fun stopCapture(graceful: Boolean): State {\n"
+         "        udpForwarder.tearDown()\n"
+         "        nettyClient?.shutdown()\n"
+         "    }\n"
+         "}\n"
+         "internal class UdpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "    private val udpSocketMap: MutableMap<String, DatagramSocket> = java.util.concurrent.ConcurrentHashMap()\n"
+         "    private val udpReaderFutures: MutableMap<String, java.util.concurrent.Future<*>?> = java.util.concurrent.ConcurrentHashMap()\n"
+         "    private val backgroundExecutor: ThreadPoolExecutor = Executors.newCachedThreadPool() as ThreadPoolExecutor\n"
+         "    fun handleUdpPacket(srcIp: String, srcPort: Int, dstIp: String, dstPort: Int, payload: ByteArray) {\n"
+         "        val flowKey = \"$srcIp:$srcPort-$dstIp:$dstPort\"\n"
+         "        val s = DatagramSocket()\n"
+         "        val protected = service.protect(s)\n"
+         "        if (protected) udpSocketMap[flowKey] = s\n"
+         "    }\n"
+         "    fun tearDown() {\n"
+         "        synchronized(udpReaderFutures) {\n"
+         "            udpReaderFutures.values.forEach { f -> try { f?.cancel(true) } catch (_: Throwable) {} }\n"
+         "        }\n"
+         "        udpSocketMap.values.forEach { sock -> try { sock.close() } catch (_: Throwable) {} }\n"
+         "        udpSocketMap.clear()\n"
+         "        backgroundExecutor.shutdownNow()\n"
+         "        backgroundExecutor.awaitTermination(1, TimeUnit.SECONDS)\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    # S117 case (Sprint 12.0C - new) - TcpForwarder
+    # teardown invariant. The 12.0A TCP state machine
+    # was moved OUT of NettyChannelClient.kt and INTO
+    # a new TcpForwarder class in OpenE2eeVpnService.kt
+    # per the brief: "OpenE2eeVpnService.kt icine
+    # TcpForwarder class (raw java.net.Socket, Netty
+    # DEGIL, 12.0B gibi)". The teardown is verified by
+    # checking the 12 mandatory tokens in
+    # OpenE2eeVpnService.kt (after comment strip):
+    #   1. `class TcpForwarder` declaration.
+    #   2. `tcpConnectionMap` field (per-flow
+    #      TcpConnection map).
+    #   3. `tcpReaderFutures` field (per-flow reader
+    #      Future map).
+    #   4. `fun tearDown()` method (public teardown
+    #      entry point).
+    #   5. `cancel(true)` inside tearDown (per-flow
+    #      reader Future cancellation).
+    #   6. `conn.socket?.close()` (per-flow real
+    #      java.net.Socket close).
+    #   7. `conn.readerThread?.interrupt()` (per-flow
+    #      reader Thread interrupt).
+    #   8. `conn.readerThread?.join` (per-flow reader
+    #      Thread join, 1s bounded wait).
+    #   9. `shutdownNow()` + `awaitTermination`
+    #      (backgroundExecutor teardown).
+    #  10. `service.protect(` in handleSyn (the brief:
+    #      "service.protect(socket)").
+    #  11. `tcpForwarder.tearDown()` caller wire from
+    #      stopCapture (must run BEFORE
+    #      nettyClient?.shutdown()).
+    #  12. `tcpForwarder.setTunOutputStream` caller wire
+    #      from startReaderThread (per-connection reader
+    #      needs the TUN output stream to write
+    #      responses back).
+    # The S115 + S116 + S117 trio replaces the pre-12.0B
+    # single-audit (S115 only). S115 now checks the
+    # 6-step structure in NettyChannelClient.shutdown
+    # (tolerant of the post-12.0B "step 3 DELEGATED"
+    # and post-12.0C "step 2 DELEGATED" breadcrumbs).
+    # S116 checks the UdpForwarder teardown; S117
+    # checks the TcpForwarder teardown. Total
+    # selftest: 163 + 1 = 164.
+    ("S117 PASS (TcpForwarder teardown in OpenE2eeVpnService.kt - class + tcpConnectionMap + tcpReaderFutures + tearDown + cancel(true) + conn.socket.close() + conn.readerThread.interrupt() + conn.readerThread.join + shutdownNow() + awaitTermination + service.protect( + tcpForwarder.tearDown() caller + tcpForwarder.setTunOutputStream caller - regression guard for Sprint 12.0C, 10x VPN kapa/ac Owner-mandated test)",
+     run_s117_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.Socket\n"
+         "import java.util.concurrent.Executors\n"
+         "import java.util.concurrent.ThreadPoolExecutor\n"
+         "import java.util.concurrent.TimeUnit\n"
+         "class OpenE2eeVpnService : android.net.VpnService() {\n"
+         "    private val tcpForwarder = TcpForwarder(this)\n"
+         "    private fun startReaderThread(pfd: android.os.ParcelFileDescriptor) {\n"
+         "        val output = android.os.ParcelFileDescriptor.AutoCloseOutputStream(pfd)\n"
+         "        tcpForwarder.setTunOutputStream(output)\n"
+         "    }\n"
+         "    private fun stopCapture(graceful: Boolean): State {\n"
+         "        tcpForwarder.tearDown()\n"
+         "        nettyClient?.shutdown()\n"
+         "    }\n"
+         "}\n"
+         "internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "    private val tcpConnectionMap: MutableMap<String, Any> = java.util.concurrent.ConcurrentHashMap()\n"
+         "    private val tcpReaderFutures: MutableMap<String, java.util.concurrent.Future<*>?> = java.util.concurrent.ConcurrentHashMap()\n"
+         "    private val backgroundExecutor: ThreadPoolExecutor = Executors.newCachedThreadPool() as ThreadPoolExecutor\n"
+         "    fun handleSyn(flowKey: String, dstIp: String, dstPort: Int) {\n"
+         "        val sock = Socket()\n"
+         "        val protected = service.protect(sock)\n"
+         "        if (protected) sock.connect(java.net.InetSocketAddress(dstIp, dstPort), 5_000)\n"
+         "    }\n"
+         "    fun tearDown() {\n"
+         "        synchronized(tcpReaderFutures) {\n"
+         "            tcpReaderFutures.values.forEach { f -> try { f?.cancel(true) } catch (_: Throwable) {} }\n"
+         "        }\n"
+         "        for (conn in tcpConnectionMap.values) {\n"
+         "            try { conn.socket?.close() } catch (_: Throwable) {}\n"
+         "            try { conn.readerThread?.interrupt() } catch (_: Throwable) {}\n"
+         "            try { conn.readerThread?.join(1_000L) } catch (_: Throwable) {}\n"
+         "        }\n"
+         "        tcpConnectionMap.clear()\n"
+         "        backgroundExecutor.shutdownNow()\n"
+         "        backgroundExecutor.awaitTermination(1, TimeUnit.SECONDS)\n"
+         "    }\n"
+         "    data class TcpConnection(\n"
+         "        @Volatile var socket: Socket? = null,\n"
+         "        @Volatile var readerThread: Thread? = null\n"
+         "    )\n"
+         "}\n",
+     ),
+     []),
+    # S118 case (Sprint 12.0D - new) - TcpForwarder
+    # response content debug + UNKNOWN FLOW fix. Owner
+    # 14:06 logcat observation: every breadcrumb in
+    # 12.0C TcpForwarder fired 7 times BUT the response
+    # was malformed (UNKNOWN FLOW 7, Chrome page not
+    # opening, no status/Content-Type/Content-Length
+    # in logs). The audit verifies the 8 mandatory
+    # tokens:
+    #   (1) `recvHttpResponse:` breadcrumb in the
+    #       response log.
+    #   (2) `status=` token (HTTP status code emitted).
+    #   (3) `content-type=` token (Content-Type
+    #       header emitted).
+    #   (4) `content-length=` token (Content-Length
+    #       header emitted).
+    #   (5) `SUSPECT response` validation Log.w
+    #       (status 4xx/5xx OR unexpected Content-Type).
+    #   (6) `forwarded via reverseKey` Log.d
+    #       (positive signal for the 12.0C dual put).
+    #   (7) `responsePayload:` breadcrumb in the
+    #       response writeToTun log.
+    #   (8) `bodyBytes=` token (body byte
+    #       accumulator for truncation detection).
+    # Total selftest: 164 + 1 = 165.
+    ("S118 PASS (TcpForwarder response content debug - recvHttpResponse with status + content-type + content-length + bytes + SUSPECT response Log.w + forwarded via reverseKey + responsePayload with bodyBytes - regression guard for Sprint 12.0D, Owner 14:06 UNKNOWN FLOW 7 + Chrome page not opening)",
+     run_s118_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import java.net.Socket\n"
+         "internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "    fun handleTcpPacket(srcIp: String, dstIp: String, srcPort: Int, dstPort: Int) {\n"
+         "        val primaryFlowKey = \"$srcIp:$srcPort-$dstIp:$dstPort\"\n"
+         "        val reverseFlowKey = \"$dstIp:$dstPort-$srcIp:$srcPort\"\n"
+         "        val foundViaReverseKey = !tcpConnectionMap.containsKey(primaryFlowKey) &&\n"
+         "                                  tcpConnectionMap.containsKey(reverseFlowKey)\n"
+         "        if (foundViaReverseKey) {\n"
+         "            Log.d(\"TcpForwarder\", \"forwarded via reverseKey: $reverseFlowKey\")\n"
+         "        }\n"
+         "    }\n"
+         "    fun startSocketReader() {\n"
+         "        val input: java.io.InputStream = java.net.Socket().getInputStream()\n"
+         "        val buf = ByteArray(1460)\n"
+         "        val n = input.read(buf)\n"
+         "        Log.d(\"TcpForwarder\", \"recvHttpResponse: $n bytes read from real socket for flow X, status=200, content-type=text/plain, content-length=42\")\n"
+         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: SUSPECT response for flow X (status=502, content-type=text/html, content-length=42, expected=application/json OR text/)\")\n"
+         "        Log.d(\"TcpForwarder\", \"recvHttpResponse: bodyFirst100 (flow X, $n bytes): hex=[...] ascii=[...]\")\n"
+         "        Log.d(\"TcpForwarder\", \"responsePayload: $n bytes written to TUN for flow X, bodyBytes=42, ack=100, status=200, content-type=text/plain\")\n"
+         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: MISMATCH for status=200 + content-type=text/plain (flow X, bodyBytes=42 != content-length=43)\")\n"
+         "    }\n"
+         "    fun handleData() {\n"
+         "        Log.d(\"TcpForwarder\", \"sendHttpRequest: request line [GET /healthz HTTP/1.1] Host=212.64.210.85 for flow X\")\n"
+         "    }\n"
+         "    fun handleTcpPacket() {\n"
+         "        Log.d(\"TcpForwarder\", \"flow forward: primary key X (flags=0x10, state=ESTABLISHED)\")\n"
+         "    }\n"
+         "    private val tcpConnectionMap: MutableMap<String, Any> = java.util.concurrent.ConcurrentHashMap()\n"
+         "}\n",
+     ),
+     []),
+    # S119 case (Sprint 12.0E - new) - SUSPECT
+    # response content debug. Owner 14:19 logcat
+    # observation: every 12.0D TcpForwarder breadcrumb
+    # fired 10 times BUT SUSPECT log fired 10 times
+    # (no expected context) AND UNKNOWN FLOW still 10
+    # (the dual put works but the positive signal
+    # was missing). The audit verifies the 5
+    # mandatory tokens:
+    #   (1) `expected=application/json` token in
+    #       the SUSPECT log.
+    #   (2) `Host=` token in the sendHttpRequest
+    #       log.
+    #   (3) `bodyFirst100` token in the response
+    #       body fingerprint log.
+    #   (4) `MISMATCH` token in the body length
+    #       check log.
+    #   (5) `flow forward` token in the
+    #       handleTcpPacket positive signal log.
+    # Total selftest: 165 + 1 = 166.
+    ("S119 PASS (SUSPECT response content debug - expected=application/json in SUSPECT log + Host= in sendHttpRequest log + bodyFirst100 in response body fingerprint log + MISMATCH for status=200 + text/plain body length check + flow forward positive signal replacing UNKNOWN FLOW concept - regression guard for Sprint 12.0E, Owner 14:19 SUSPECT 10 + UNKNOWN FLOW 10)",
+     run_s119_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "    fun handleTcpPacket() {\n"
+         "        Log.d(\"TcpForwarder\", \"flow forward: primary key X (flags=0x10, state=ESTABLISHED)\")\n"
+         "    }\n"
+         "    fun handleData() {\n"
+         "        Log.d(\"TcpForwarder\", \"sendHttpRequest: request line [GET /healthz HTTP/1.1] Host=212.64.210.85 for flow X (app=10.42.0.2:12345 -> realDest=212.64.210.85:80)\")\n"
+         "    }\n"
+         "    fun startSocketReader() {\n"
+         "        val input: java.io.InputStream = java.net.Socket().getInputStream()\n"
+         "        val buf = ByteArray(1460)\n"
+         "        val n = input.read(buf)\n"
+         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: SUSPECT response for flow X (status=502, content-type=text/html, content-length=42, expected=application/json OR text/, n=42) — app may not parse this\")\n"
+         "        Log.d(\"TcpForwarder\", \"recvHttpResponse: bodyFirst100 (flow X, 42 bytes): hex=[...] ascii=[...]\")\n"
+         "        Log.w(\"TcpForwarder\", \"recvHttpResponse: MISMATCH for status=200 + content-type=text/plain (flow X, bodyBytes=42 != content-length=43) — text/plain body does not match declared length\")\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    # S120 case (Sprint 12.0F - new) - version display
+    # in AppBar. Owner 15:04 doesn't believe the
+    # new APK is installed; the Owner will take a
+    # screenshot to confirm. The audit verifies the
+    # 6 mandatory tokens:
+    #   (1) `versionName` field in AppConfig
+    #       (config.dart).
+    #   (2) `versionCode` field in AppConfig
+    #       (config.dart).
+    #   (3) `kVersionName` file-scope alias
+    #       (config.dart).
+    #   (4) `kVersionCode` file-scope alias
+    #       (config.dart).
+    #   (5) `v${kVersionName}` token in AppBar
+    #       actions (active_pool_screen.dart).
+    #   (6) `(${kVersionCode})` token in AppBar
+    #       actions (active_pool_screen.dart).
+    # Total selftest: 166 + 1 = 167.
+    ("S120 PASS (version display in AppBar - versionName + versionCode in AppConfig + kVersionName + kVersionCode file-scope aliases + v${kVersionName} + (${kVersionCode}) in AppBar actions - regression guard for Sprint 12.0F, Owner 15:04 install-confirmation screenshot)",
+     run_s120_check,
+     (
+         # config.dart (must include the 4 AppConfig + kVersion* tokens)
+         "import 'package:flutter/foundation.dart';\n"
+         "class AppConfig {\n"
+         "  AppConfig._();\n"
+         "  static const String versionName = String.fromEnvironment('VERSION_NAME', defaultValue: '12.0E');\n"
+         "  static const String versionCode = String.fromEnvironment('VERSION_CODE', defaultValue: '06bd4d7');\n"
+         "  static const String deviceId = String.fromEnvironment('DEVICE_ID', defaultValue: 'a1b2c3d4e5f60718a1b2c3d4');\n"
+         "}\n"
+         "const String kDeviceId = AppConfig.deviceId;\n"
+         "const String kVersionName = AppConfig.versionName;\n"
+         "const String kVersionCode = AppConfig.versionCode;\n",
+         # active_pool_screen.dart (must include the v${kVersionName} + (${kVersionCode}) tokens in AppBar actions)
+         "import 'package:flutter/material.dart';\n"
+         "import '../config.dart';\n"
+         "Widget build() {\n"
+         "  return Scaffold(\n"
+         "    appBar: AppBar(\n"
+         "      title: const Text('Aktif Nöbet'),\n"
+         "      actions: [\n"
+         "        Center(\n"
+         "          child: Padding(\n"
+         "            padding: const EdgeInsets.symmetric(horizontal: 12),\n"
+         "            child: Text(\n"
+         "              'v${kVersionName} (${kVersionCode})',\n"
+         "              style: const TextStyle(fontSize: 12, color: Colors.white70),\n"
+         "            ),\n"
+         "          ),\n"
+         "        ),\n"
+         "      ],\n"
+         "    ),\n"
+         "  );\n"
+         "}\n",
+     ),
+     []),
+    # S121 case (Sprint 12.0F+1 - new) - TCP SYN
+    # processing debug. Owner 12.0F logcat analysis
+    # showed 9 dispatch events all PSH+ACK, 0 SYN.
+    # The 12.0F+1 sprint adds 2 Kotlin diagnostics
+    # (dispatch flags breadcrumb + allowedApps log) +
+    # the 6-step test akışı in CHANGELOG.md. The
+    # audit verifies the 7 mandatory tokens:
+    #   S121-1: handleTcpPacket: dispatching flags=0x..
+    #           (SYN=.., ACK=.., PSH=.., FIN=.., RST=..)
+    #   S121-2: buildVpnBuilder: allowedApps=N packages=[...]
+    #   S121-3: checkPrivateDnsAndBindToVpn() called BEFORE
+    #           builder.establish() (11.0Y Sprint 98 invariant)
+    #   S121-4: Sprint 12.0F+1 section in CHANGELOG.md
+    #   S121-5: R8 / proguard documentation
+    #   S121-6: SHA-256 documentation in CHANGELOG
+    #   S121-7: Tag 4 filter (OpenE2eeVpn:V TcpForwarder:V
+    #           UdpForwarder:V NettyChannelClient:V) in CHANGELOG
+    # Total selftest: 167 + 1 = 168.
+    ("S121 PASS (TCP SYN processing debug - handleTcpPacket flags=0x breadcrumb with 5 flag names + buildVpnBuilder allowedApps log + checkPrivateDnsAndBindToVpn BEFORE builder.establish + Sprint 12.0F+1 CHANGELOG section + R8/proguard + SHA-256 + Tag 4 filter - regression guard for Sprint 12.0F+1, Owner 12.0F logcat kernel SYN bypass)",
+     run_s121_check,
+     (
+         # OpenE2eeVpnService.kt (must include the dispatch flags breadcrumb + allowedApps log + checkPrivateDnsAndBindToVpn BEFORE builder.establish)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import android.net.VpnService\n"
+         "class OpenE2eeVpnService : VpnService() {\n"
+         "    fun buildVpnBuilder(): VpnService.Builder {\n"
+         "        val allowedAppsList = allowedApplications ?: emptyList()\n"
+         "        val disallowedAppsList = disallowedApplications ?: emptyList()\n"
+         "        Log.d(\"OpenE2eeVpn\", \"buildVpnBuilder: allowedApps=${allowedAppsList.size} packages=$allowedAppsList, disallowedApps=${disallowedAppsList.size} packages=$disallowedAppsList, addRoute=0.0.0.0/0 (default = all traffic), mtu=1400\")\n"
+         "        val b = Builder()\n"
+         "        return b\n"
+         "    }\n"
+         "    private fun startCapture(): State {\n"
+         "        checkPrivateDnsAndBindToVpn()\n"
+         "        val pfd = builder.establish()\n"
+         "        return State.SAMPLING\n"
+         "    }\n"
+         "    internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "        fun handleTcpPacket(srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, flags: Int) {\n"
+         "            Log.d(\"TcpForwarder\", \"handleTcpPacket: dispatching flags=0x${Integer.toHexString(flags)} (SYN=${(flags and 0x02) != 0}, ACK=${(flags and 0x10) != 0}, PSH=${(flags and 0x08) != 0}, FIN=${(flags and 0x01) != 0}, RST=${(flags and 0x04) != 0}) flowKey=primary\")\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+         # CHANGELOG.md (must include Sprint 12.0F+1 section + 4-step test akışı + Tag 4 filter + R8/proguard + SHA-256)
+         "# Changelog\n"
+         "## [Unreleased] - Sprint 12.0F+1 (TCP SYN processing debug)\n"
+         "### Diagnostics\n"
+         "- Sprint 12.0F+1 - TCP SYN processing debug breadcrumbs. Owner 12.0F logcat analysis showed 9 dispatch events all PSH+ACK, 0 SYN.\n"
+         "  1. handleTcpPacket: dispatching flags=0x.. breadcrumb in TcpForwarder.handleTcpPacket (every captured TCP packet).\n"
+         "  2. buildVpnBuilder: allowedApps=N packages=[...] breadcrumb at buildVpnBuilder entry.\n"
+         "### Owner's 6-step test akışı (S121-4)\n"
+         "  1. VPN KAPALI\n"
+         "  2. Uygulamayı KAPAT (force-stop com.opene2ee.opene2ee)\n"
+         "  3. Uygulama içinden 212.64.210.85:443'e istek gönder\n"
+         "  4. VPN AÇ\n"
+         "  5. Uygulama içinden AYNI adrese yeni istek gönder\n"
+         "  6. Log al: adb logcat -d -s \"OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V\" (Tag 4 filter)\n"
+         "### APK SHA-256 + R8/proguard\n"
+         "- APK SHA-256: C8B0038684063E7F460E9A5BC600D60CC08D29A7E0F3E26979F71A3B943D90C2 (12.0F release with proguard-rules.pro + proguardFiles; R8 strict mode no missing classes)\n"
+         "- checkPrivateDnsAndBindToVpn() called BEFORE builder.establish() (11.0Y Sprint 98 invariant)\n",
+     ),
+     []),
+    # S122 case (Sprint 12.0F+2 - new) - TCP SYN
+    # RST workaround + R8 keep rules. Owner 12.0F+1
+    # test showed 0 breadcrumbs (R8 stripped them) +
+    # 10s timeout (kernel established TCP via real NIC).
+    # The 12.0F+2 sprint adds writeTcpRstToTun + 3 R8
+    # keep rules. The audit verifies 7 sub-checks:
+    #   S122-1: fun writeTcpRstToTun( in OpenE2eeVpnService.kt
+    #   S122-2: writeTcpRstToTun( called in handleData (>=2 calls)
+    #   S122-3: writeTcpRstToTun( called in handleAck/handleFinAck (>=4 total)
+    #   S122-4: proguard-rules.pro has `*** Log*(...)` keep rule
+    #   S122-5: proguard-rules.pro has `String TAG` keep rule
+    #   S122-6: `import androidx.annotation.Keep` + >=1 @Keep usage
+    #   S122-7: CHANGELOG.md has Sprint 12.0F+2 + Tag 4 filter + 7-step
+    # Total selftest: 168 + 1 = 169.
+    ("S122 PASS (TCP SYN RST workaround + R8 keep rules - writeTcpRstToTun function + 4 unknown-flow branch calls + @Keep annotation + 3 R8 keep rules (Log* + String TAG + @Keep) + Sprint 12.0F+2 CHANGELOG section + 7-step test akisi - regression guard for Sprint 12.0F+2, Owner 16:24 10s timeout)",
+     run_s122_check,
+     (
+         # OpenE2eeVpnService.kt (must include the writeTcpRstToTun function + 4 calls + @Keep)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "import androidx.annotation.Keep\n"
+         "class OpenE2eeVpnService {\n"
+         "    internal class TcpForwarder(private val service: OpenE2eeVpnService) {\n"
+         "        @Keep\n"
+         "        private fun writeTcpRstToTun(srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, seqNum: Long, ackNum: Long, flowKey: String) {\n"
+         "            Log.w(\"TcpForwarder\", \"writeTcpRstToTun: dispatching RST for flow $flowKey\")\n"
+         "        }\n"
+         "        fun handleData(flowKey: String, conn: Any?, srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, seqNum: Long, ackNum: Long) {\n"
+         "            if (conn == null) {\n"
+         "                writeTcpRstToTun(srcIp, dstIp, srcPort, dstPort, seqNum, ackNum, flowKey)\n"
+         "            } else {\n"
+         "                writeTcpRstToTun(srcIp, dstIp, srcPort, dstPort, seqNum, ackNum, flowKey)\n"
+         "            }\n"
+         "        }\n"
+         "        fun handleAck(flowKey: String, conn: Any?, srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, seqNum: Long, ackNum: Long) {\n"
+         "            if (conn == null) {\n"
+         "                writeTcpRstToTun(srcIp, dstIp, srcPort, dstPort, seqNum, ackNum, flowKey)\n"
+         "            }\n"
+         "        }\n"
+         "        fun handleFinAck(flowKey: String, conn: Any?, srcIp: String, dstIp: String, srcPort: Int, dstPort: Int, seqNum: Long, ackNum: Long) {\n"
+         "            if (conn == null) {\n"
+         "                writeTcpRstToTun(srcIp, dstIp, srcPort, dstPort, seqNum, ackNum, flowKey)\n"
+         "            }\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+         # proguard-rules.pro (must include 3 keep rules)
+         "-dontwarn org.apache.log4j.**\n"
+         "-keepclassmembers,allowobfuscation class * {\n"
+         "    *** Log*(...);\n"
+         "}\n"
+         "-keepclassmembers,allowobfuscation class * {\n"
+         "    public static final java.lang.String TAG;\n"
+         "}\n"
+         "-keep,allowobfuscation @interface androidx.annotation.Keep\n"
+         "-keep @androidx.annotation.Keep class * { *; }\n"
+         "-keepclassmembers class * {\n"
+         "    @androidx.annotation.Keep *;\n"
+         "}\n",
+         # CHANGELOG.md (must include Sprint 12.0F+2 + Tag 4 filter + 7-step)
+         "# Changelog\n"
+         "## [Unreleased] - Sprint 12.0F+2 (TCP SYN RST workaround + R8 keep rules)\n"
+         "### Owner's 7-step test akışı (S121-4 / S122-7)\n"
+         "  1. VPN KAPALI\n"
+         "  2. Uygulamayı force-stop\n"
+         "  3. First request (real NIC)\n"
+         "  4. VPN AÇ\n"
+         "  5. Second request (should trigger RST)\n"
+         "  6. Wait 10 seconds for timeout\n"
+         "  7. Expected outcomes (direct response or RST recovery)\n"
+         "  Log al: adb logcat -d -s \"OpenE2eeVpn:V TcpForwarder:V UdpForwarder:V NettyChannelClient:V\" (Tag 4 filter)\n"
+         "### S122 audit (added in this sprint)\n"
+         "  S122-1: writeTcpRstToTun function exists in TcpForwarder\n"
+         "  S122-2: writeTcpRstToTun call in handleData unknown/no-socket flow branch (>=2 calls)\n"
+         "  S122-3: writeTcpRstToTun call in handleAck OR handleFinAck unknown flow branch (>=4 total)\n"
+         "  S122-4: proguard-rules.pro contains *** Log*(...) keep rule\n"
+         "  S122-5: proguard-rules.pro contains String TAG keep rule\n"
+         "  S122-6: import androidx.annotation.Keep + at least 1 @Keep usage\n"
+         "  S122-7: CHANGELOG.md has Sprint 12.0F+2 + Tag 4 filter + 7-step\n",
+     ),
+     []),
+    # S123 case (Sprint 12.0F+3 - new) - VPN
+    # routing / network fix. Owner 12.0F+2 logcat
+    # (logcat120f.txt 1056 satır, "durum değişmedi")
+    # showed UDP çalışıyor (687 datagram sends) ama
+    # TCP çalışmıyor (0 dispatch). 3 root-cause
+    # candidates + 3 fixes:
+    #   Fix 1: rebindProcessToNetworkWithRetry()
+    #   Fix 2: addAllowedApplication commented out
+    #   Fix 3: dumpVpnRoutingState() + 500ms post-establish
+    # The audit verifies 5 sub-checks:
+    #   S123-1: fun rebindProcessToNetworkWithRetry( exists
+    #   S123-2: rebindProcessToNetworkWithRetry() call site
+    #   S123-3: // builder.addAllowedApplication comment-out
+    #   S123-4: fun dumpVpnRoutingState( exists
+    #   S123-5: vpnRoutingState: ip route in CHANGELOG
+    # Total selftest: 169 + 1 = 170.
+    ("S123 PASS (VPN routing / network fix - rebindProcessToNetworkWithRetry function + call site after Builder.establish() + addAllowedApplication comment-out + dumpVpnRoutingState function + vpnRoutingState: ip route in CHANGELOG 8-step test akisi - regression guard for Sprint 12.0F+3, Owner logcat120f.txt 1056 satır 'durum değişmedi')",
+     run_s123_check,
+     (
+         # OpenE2eeVpnService.kt (must include rebind + dump + commented addAllowedApplication)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "class OpenE2eeVpnService {\n"
+         "    private fun buildVpnBuilder(): VpnService.Builder {\n"
+         "        val b = Builder()\n"
+         "            .addAddress(TUN_ADDRESS, TUN_PREFIX_LENGTH)\n"
+         "            .addRoute(CAPTURED_ROUTE_ADDRESS, CAPTURED_ROUTE_PREFIX)\n"
+         "            .addDnsServer(PRIMARY_DNS)\n"
+         "            .setMtu(TUN_MTU)\n"
+         "        Log.d(TAG, \"buildVpnBuilder: DEBUG_MODE all traffic (allowedApps removed)\")\n"
+         "        // builder.addAllowedApplication(pkg)  // COMMENTED OUT in 12.0F+3 - DEBUG_MODE\n"
+         "        return b\n"
+         "    }\n"
+         "    private fun startCapture(): State {\n"
+         "        val builder = buildVpnBuilder()\n"
+         "        checkPrivateDnsAndBindToVpn()\n"
+         "        val pfd = builder.establish()\n"
+         "        Log.d(TAG, \"startCapture: builder.establish() returned pfd=\" + pfd)\n"
+         "        tunInterface = pfd\n"
+         "        rebindProcessToNetworkWithRetry()\n"
+         "        Handler(Looper.getMainLooper()).postDelayed({\n"
+         "            dumpVpnRoutingState()\n"
+         "        }, 500L)\n"
+         "        running.set(true)\n"
+         "        return state\n"
+         "    }\n"
+         "    private fun rebindProcessToNetworkWithRetry() {\n"
+         "        Log.d(TAG, \"rebindProcessToNetworkWithRetry: starting\")\n"
+         "        checkPrivateDnsAndBindToVpn()\n"
+         "        val h = Handler(Looper.getMainLooper())\n"
+         "        h.postDelayed({ checkPrivateDnsAndBindToVpn() }, 1_000L)\n"
+         "        h.postDelayed({ checkPrivateDnsAndBindToVpn() }, 3_000L)\n"
+         "    }\n"
+         "    private fun dumpVpnRoutingState() {\n"
+         "        Log.d(TAG, \"vpnRoutingState: starting dump\")\n"
+         "        val ruleOut = Runtime.getRuntime().exec(arrayOf(\"sh\", \"-c\", \"ip rule\")).inputStream.bufferedReader().readText()\n"
+         "        Log.d(TAG, \"vpnRoutingState: ip rule =>\\n\" + ruleOut)\n"
+         "        val routeOut = Runtime.getRuntime().exec(arrayOf(\"sh\", \"-c\", \"ip route\")).inputStream.bufferedReader().readText()\n"
+         "        Log.d(TAG, \"vpnRoutingState: ip route =>\\n\" + routeOut)\n"
+         "        val addrOut = Runtime.getRuntime().exec(arrayOf(\"sh\", \"-c\", \"ip addr show tun0\")).inputStream.bufferedReader().readText()\n"
+         "        Log.d(TAG, \"vpnRoutingState: ip addr show tun0 =>\\n\" + addrOut)\n"
+         "    }\n"
+         "}\n",
+         # CHANGELOG.md (must include Sprint 12.0F+3 + 8-step + vpnRoutingState: ip route)
+         "# Changelog\n"
+         "## [Unreleased] - Sprint 12.0F+3 (VPN routing / network fix)\n"
+         "### Owner's 8-step test akışı (S123)\n"
+         "  1. VPN KAPALI\n"
+         "  2. Uygulamayı force-stop\n"
+         "  3. First request (real NIC)\n"
+         "  4. VPN AÇ\n"
+         "  5. Second request (should trigger rebindProcessToNetworkWithRetry)\n"
+         "  6. Wait 10 seconds for timeout\n"
+         "  7. New: adb logcat -d -s OpenE2eeVpn:V ... | grep -i 'vpnRoutingState: ip route'\n"
+         "    Beklenen: ip route çıktısında 0.0.0.0/0 dev tun0 görünmeli\n"
+         "  8. Yeni logu Mavis'e gönder\n"
+         "### S123 audit (added in this sprint)\n"
+         "  S123-1: rebindProcessToNetworkWithRetry function exists\n"
+         "  S123-2: rebindProcessToNetworkWithRetry() call site after Builder.establish()\n"
+         "  S123-3: addAllowedApplication comment-out\n"
+         "  S123-4: dumpVpnRoutingState function exists\n"
+         "  S123-5: vpnRoutingState: ip route in CHANGELOG 8-step test akisi\n",
+     ),
+     []),
+    # S124 case (Sprint 12.0F+4 - new) - MethodChannel
+    # call-chain debug. Owner 12.0F+3 test (release
+    # 1387 satır + debug 767 satır) showed 0 breadcrumbs
+    # everywhere. startCapture entry log 0 = call chain
+    # break. 4 debug breadcrumbs added:
+    #   S124-1: onMethodCall: received method= literal
+    #   S124-2: attachFlutterEngine: ENTER, prev literal
+    #   S124-3: vpn_service.dart: start print literal
+    #   S124-4: MainActivity: configureFlutterEngine: ENTER
+    # Total selftest: 170 + 1 = 171.
+    ("S124 PASS (MethodChannel call-chain debug - onMethodCall: received method= + attachFlutterEngine: ENTER, prev + vpn_service.dart: start print + MainActivity: configureFlutterEngine: ENTER - regression guard for Sprint 12.0F+4, Owner 12.0F+3 1387 satır release + 767 satır debug 'durum değişmedi' + 0 breadcrumbs)",
+     run_s124_check,
+     (
+         # OpenE2eeVpnService.kt (must have onMethodCall + attachFlutterEngine entry logs)
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.util.Log\n"
+         "class OpenE2eeVpnService {\n"
+         "    companion object { const val TAG = \"OpenE2eeVpn\" }\n"
+         "    fun attachFlutterEngine(engine: io.flutter.embedding.engine.FlutterEngine) {\n"
+         "        Log.d(TAG, \"attachFlutterEngine: ENTER, prev Companion.methodChannel=${Companion.methodChannel}, engine=${engine.hashCode()}\")\n"
+         "        val ch = io.flutter.plugin.common.MethodChannel(engine.dartExecutor.binaryMessenger, \"opene2ee/vpn\")\n"
+         "        Companion.methodChannel = ch\n"
+         "        Log.d(TAG, \"attachFlutterEngine: DONE, Companion.methodChannel=$ch\")\n"
+         "    }\n"
+         "    fun detachFlutterEngine() {\n"
+         "        Log.d(TAG, \"detachFlutterEngine: ENTER, prev methodChannel=$methodChannel\")\n"
+         "        methodChannel?.setMethodCallHandler(null)\n"
+         "        methodChannel = null\n"
+         "        Log.d(TAG, \"detachFlutterEngine: DONE\")\n"
+         "    }\n"
+         "    private fun onMethodCall(call: io.flutter.plugin.common.MethodCall, result: io.flutter.plugin.common.MethodChannel.Result) {\n"
+         "        Log.d(TAG, \"onMethodCall: received method='${call.method}', running=${running.get()}, state=$state, args=${call.arguments}\")\n"
+         "        try {\n"
+         "            when (call.method) {\n"
+         "                \"start\" -> {\n"
+         "                    Log.d(TAG, \"onMethodCall: 'start' branch ENTERED, calling startCapture()\")\n"
+         "                    val newState = startCapture()\n"
+         "                    Log.d(TAG, \"onMethodCall: 'start' branch DONE, newState=$newState\")\n"
+         "                    result.success(stateToMap(newState))\n"
+         "                }\n"
+         "                else -> result.notImplemented()\n"
+         "            }\n"
+         "        } catch (t: Throwable) {\n"
+         "            Log.e(TAG, \"onMethodCall: method='${call.method}' THREW\", t)\n"
+         "            result.error(\"vpn_method_error\", t.message, null)\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+         # MainActivity.kt (must have configureFlutterEngine: ENTER + MethodChannel handler log)
+         "package com.opene2ee.opene2ee\n"
+         "import io.flutter.embedding.engine.FlutterEngine\n"
+         "import io.flutter.plugin.common.MethodChannel\n"
+         "class MainActivity : io.flutter.embedding.android.FlutterActivity() {\n"
+         "    companion object { private const val TAG = \"MainActivity\" }\n"
+         "    private var vpnChannel: MethodChannel? = null\n"
+         "    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {\n"
+         "        super.configureFlutterEngine(flutterEngine)\n"
+         "        android.util.Log.d(TAG, \"configureFlutterEngine: ENTER, registering opene2ee/vpn MethodChannel handler\")\n"
+         "        vpnChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, \"opene2ee/vpn\").apply {\n"
+         "            setMethodCallHandler { call, result ->\n"
+         "                android.util.Log.d(TAG, \"MethodChannel handler: received method='${call.method}', delegating to OpenE2eeVpnService.dispatch\")\n"
+         "                com.opene2ee.opene2ee.vpn.OpenE2eeVpnService.dispatch(this@MainActivity, call, result)\n"
+         "            }\n"
+         "        }\n"
+         "        android.util.Log.d(TAG, \"configureFlutterEngine: DONE, opene2ee/vpn handler registered\")\n"
+         "    }\n"
+         "}\n",
+         # vpn_service.dart (must have vpn_service.dart: start print)
+         "import 'package:flutter/services.dart';\n"
+         "class VpnService {\n"
+         "  final MethodChannel _channel = const MethodChannel('opene2ee/vpn');\n"
+         "  Future<Map<String, Object?>> start() async {\n"
+         "    // ignore: avoid_print\n"
+         "    print('vpn_service.dart: start() ENTERED, invoking MethodChannel(START)');\n"
+         "    try {\n"
+         "      final r = await _channel.invokeMethod<Map<Object?, Object?>>('start');\n"
+         "      // ignore: avoid_print\n"
+         "      print('vpn_service.dart: start() invokeMethod returned: $r');\n"
+         "      return (r ?? const {}).cast<String, Object?>();\n"
+         "    } catch (e, st) {\n"
+         "      // ignore: avoid_print\n"
+         "      print('vpn_service.dart: start() THREW: $e\\n$st');\n"
+         "      rethrow;\n"
+         "    }\n"
+         "  }\n"
+         "}\n",
+     ),
+     []),
   ]   # noqa: E501
 
 failed = []

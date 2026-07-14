@@ -36,6 +36,22 @@
 // /api/v1/telemetry and /api/v1/matches need Authorization
 // Bearer jwt."
 //
+// Sprint 12.0F — version display. Owner 15:04
+// doesn't believe the new APK is installed (the
+// install dialog auto-dismisses, the logcat is
+// ambiguous about which APK is running). Fix: add
+// VERSION_NAME + VERSION_CODE to AppConfig so the
+// active_pool_screen.dart AppBar can display
+// `v12.0F (commit-sha)` and the Owner can take a
+// screenshot to confirm the new build is actually
+// running. The VERSION_NAME + VERSION_CODE can be
+// overridden at build time via
+// `--dart-define VERSION_NAME=12.0F` +
+// `--dart-define VERSION_CODE=abc1234` (the Coder
+// pipeline reads the commit SHA + sprint name from
+// the build script and injects them). The defaults
+// keep the out-of-the-box build working.
+//
 // Privacy
 // -------
 // DEVICE_ID is a backend-side correlation key — it identifies a
@@ -54,6 +70,37 @@ import 'package:flutter/foundation.dart';
 /// to rename.
 class AppConfig {
   AppConfig._();
+
+  /// Sprint 12.0F — VERSION_NAME. The semantic
+  /// version tag (e.g., `12.0F`). Injected at
+  /// build time via `--dart-define
+  /// VERSION_NAME=12.0F`. Default is `12.0E` so
+  /// an out-of-the-box build shows a recent
+  /// version. The active_pool_screen.dart
+  /// AppBar displays this value as `v${version}`
+  /// so the Owner can take a screenshot to
+  /// confirm the new APK is actually running.
+  static const String versionName = String.fromEnvironment(
+    'VERSION_NAME',
+    defaultValue: '12.0E',
+  );
+
+  /// Sprint 12.0F — VERSION_CODE. The 7-char
+  /// git commit SHA of the build (e.g.,
+  /// `06bd4d7`). Injected at build time via
+  /// `--dart-define VERSION_CODE=abc1234`. The
+  /// Coder pipeline reads `git rev-parse
+  /// --short=7 HEAD` and injects the result
+  /// so the Owner can match the AppBar display
+  /// against `git log --oneline -1` (the Owner
+  /// will see the same 7-char SHA at the start
+  /// of the commit message). Default is
+  /// `06bd4d7` (the Sprint 12.0E commit) so an
+  /// out-of-the-box build shows a recent commit.
+  static const String versionCode = String.fromEnvironment(
+    'VERSION_CODE',
+    defaultValue: '06bd4d7',
+  );
 
   /// Build-time device identity. The BFF aggregator uses this
   /// to stitch telemetry / matcher polls from the same physical
@@ -106,6 +153,8 @@ const String kDeviceId = AppConfig.deviceId;
 const String kApiKey = AppConfig.apiKey;
 const String kApiBase = AppConfig.apiBase;
 const String kApiVersion = AppConfig.apiVersion;
+const String kVersionName = AppConfig.versionName;
+const String kVersionCode = AppConfig.versionCode;
 
 /// True when the build is a debug build (kReleaseMode == false
 /// AND kDebugMode == true). The active pool screen uses this to

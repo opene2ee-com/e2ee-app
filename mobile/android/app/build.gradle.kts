@@ -37,6 +37,35 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Sprint 11.0Z — R8 (release minifier) needs the
+            // Netty `-dontwarn` rules defined in
+            // `proguard-rules.pro`, otherwise it aborts the
+            // release build with "Missing class
+            // org.apache.log4j.Level" and 14 sibling
+            // references. The bundled `proguard-android.txt`
+            // is the AGP default; we layer our keep rules
+            // on top.
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    // Sprint 11.0Z — exclude META-INF/INDEX.LIST from
+    // the APK packaging. The `io.netty:netty-all:4.1.107.Final`
+    // bundle is an all-in-one JAR that contains
+    // `META-INF/INDEX.LIST` from EVERY Netty module
+    // (netty-buffer, netty-codec, netty-handler,
+    // netty-transport, netty-resolver-dns, etc.).
+    // Android's `mergeDebugJavaResource` task refuses
+    // to merge 34 jars with the same `META-INF/INDEX.LIST`
+    // file — it would silently overwrite each other.
+    // `pickFirst` tells Gradle to use the first
+    // occurrence and skip the rest.
+    packaging {
+        resources {
+            excludes += setOf("META-INF/INDEX.LIST", "META-INF/io.netty.versions.properties")
         }
     }
 
