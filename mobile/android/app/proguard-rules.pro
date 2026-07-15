@@ -76,3 +76,35 @@
 -keepclassmembers class * {
     @androidx.annotation.Keep *;
 }
+
+# ───── Sprint 14 — VpnService keep rules ─────
+# (Sprint 13.0 + 12.0F+9 dersleri)
+
+# 1. Tüm Log.* çağrıları (R8 release build'de strip edebilir)
+-keepclassmembers,allowobfuscation class * {
+    *** Log*(...);
+}
+
+# 2. public static final String TAG field'ları
+-keepclassmembers,allowobfuscation class * {
+    public static final java.lang.String TAG;
+}
+
+# 3. @Keep annotation ve annotated sınıflar
+-keep,allowobfuscation @interface androidx.annotation.Keep
+-keep @androidx.annotation.Keep class * { *; }
+-keepclassmembers class * {
+    @androidx.annotation.Keep *;
+}
+
+# 4. VpnService companion object'leri (R8 strip etmesin)
+-keepclassmembers class com.opene2ee.opene2ee.vpn.** {
+    public static ** Companion;
+    public static ** INSTANCE;
+}
+
+# 5. OpenE2eeVpnService native bridge (JNI yok ama yine de)
+-keep class com.opene2ee.opene2ee.vpn.OpenE2eeVpnService { *; }
+
+# 6. Tüm vpn/ paketi için Keep (defense-in-depth)
+-keep class com.opene2ee.opene2ee.vpn.** { *; }

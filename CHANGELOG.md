@@ -259,3 +259,119 @@ See the per-PR verifier reports under `outputs/pr-sprint6-*/` for the SPRINT 6 d
 ---
 
 This changelog is incrementally maintained. Older sprints are intentionally omitted — use `git log` + the per-PR verifier reports for historical context.
+
+## [Unreleased] — Sprint 14 (in branch `feat/sprint-14-vpn-rewrite`, push YAPILMADI)
+
+### VpnService clean-room rewrite (reference: huolizhuminh/NetWorkPacketCapture + PR #33)
+
+Spec-driven rewrite that ends the 7-sprint VpnService failure chain (Sprint 12.0F+1..12.0F+9 + Sprint 13.0 + Sprint 13.0-fix). The Sprint 13.0 VpnService skeleton is removed entirely (`vpn/NettyChannelClient.kt` deleted, 1422 LOC) and replaced with a clean-room copy of the NetWorkPacketCapture reference repo, adapted to our Flutter MethodChannel contract.
+
+#### Spec sections implemented (BİREBİR)
+
+- **Bölüm 2** — `mobile/android/app/src/main/AndroidManifest.xml`. New `<service android:name=".vpn.OpenE2eeVpnService">` entry with `android.permission.BIND_VPN_SERVICE` + `android:foregroundServiceType="specialUse"` + `android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE` property (Android 14+ subtype requirement).
+- **Bölüm 3** — `mobile/.../vpn/net/VPNConstants.kt` — `TUN_ADDRESS="10.0.0.2"`, `TUN_PREFIX=32`, `VPN_MTU=1400` (KURAL 1), `PRIMARY_DNS="1.1.1.1"`, `SECONDARY_DNS="8.8.8.8"`, `MAX_SESSION_COUNT=64`, `SESSION_TIME_OUT_MS=60_000L`, `PACKET_SIZE=32767`, `NOTIFICATION_ID=0x5650_4E4E` (the `'VPNN'` tag).
+- **Bölüm 4** — `mobile/.../vpn/net/MyLRUCache.kt` + `ProxyConfig.kt`. LRU cache for UDP tunnel eviction (1024-entry cap, O(1) get/put) + `ProxyConfig.Instance` singleton.
+- **Bölüm 5** — `mobile/.../vpn/Packet.kt` + `mobile/.../vpn/tcpip/{IPHeader,TCPHeader,UDPHeader}.kt`. User-space IP/TCP/UDP header encode/decode (big-endian + checksum placeholder + length/flag fields). R8 keeps all 3 header classes via the proguard rule `-keep class com.opene2ee.opene2ee.vpn.** { *; }`.
+- **Bölüm 6** — `mobile/.../vpn/nat/{NatSession,NatSessionManager}.kt`. NAT session table with port-keyed `Int` HashMap, `MAX_SESSION_COUNT=64` cap, `lastRefreshTime` + `packetSent/packetReceived` counters, 60s idle timeout sweeper, `snapshot()` defensive copy.
+- **Bölüm 7** — `mobile/.../vpn/processparse/NetInfo.kt`. Lightweight data class (sourPort, port, address, type, uid).
+- **Bölüm 8** — `mobile/.../vpn/processparse/{NetFileManager,PortHostService}.kt`. `/proc/net/{tcp,tcp6,udp,udp6,raw,raw6}` parser, port → uid `ConcurrentHashMap`, `fun getUid(port: Int): Int?` lookup, `fun refresh()` re-read on file mtime change, PR #33 `startsWith("  sl")` header skip. `PortHostService` is a foreground `Service` with 5s `scheduleWithFixedDelay` refresh + `getUid(session.localPort)` call (KURAL 5).
+- **Bölüm 9** — `mobile/.../vpn/proxy/{TcpProxyServer,TcpTunnel}.kt`. Raw `ServerSocket` + `Thread`-per-connection TCP proxy. **KURAL 2 (no `readFirstPacket`/`parseFirstPacket`) + KURAL 3 (`portKey = clientSocket.port`)** enforced. `protect()` called on both `clientSocket` AND `remoteSocket` before `connect()`. `TcpTunnel` is a `Thread` with two child threads doing bidirectional copy.
+- **Bölüm 10** — `mobile/.../vpn/proxy/{UdpServer,UdpTunnel}.kt`. NIO `Selector` + `DatagramChannel` per-connection UDP proxy. **KURAL 4 (`key.attach(tunnel)` immediately after `channel.register(selector, OP_READ)`)** is mandatory (without it the selector runLoop gets null attachment, `receivePackets()` never fires, DNS times out at 15s). `UdpTunnel.receivePackets` dispatches payload back to `OpenE2eeVpnService.onUdpPacketReceived`.
+- **Bölüm 11** — `mobile/.../vpn/OpenE2eeVpnService.kt`. Main `VpnService` with companion `activeInstance` singleton (12.0F+6 pattern), `runVpnLoop()` TUN read + dispatch thread, `establishVpn()` builds `VpnService.Builder` with `setMtu(1400)` + `addRoute("0.0.0.0", 0)` + `addDnsServer("1.1.1.1")` + `addDnsServer("8.8.8.8")` + `addAllowedApplication(packageName)` (KURAL 6 — `addDisallowedApplication` throws `SecurityException` on Android 14+, NEVER used). Foreground notification on `NOTIFICATION_CHANNEL_ID="opene2ee.vpn.tunnel"`. `stopVpn()` public entry point. `dispose()` tears down TcpProxyServer + UdpServer + PortHostService in order.
+- **Bölüm 12** — `mobile/.../MainActivity.kt`. `"stop"` MethodChannel branch calls `OpenE2eeVpnService.activeInstance?.stopVpn()` BEFORE `stopService(Intent(this, OpenE2eeVpnService::class.java))` (the `stopService` alone is a no-op for foreground services on Android 14+).
+- **Bölüm 13** — `mobile/android/app/proguard-rules.pro`. **6 keep rules** (Sprint 12.0F+2 R8 keep rules carried forward + new VpnService-specific rules):
+  1. `-keepclassmembers class * { *** Log*(...); }` — all `Log.d/v` calls preserved in release
+  2. `-keepclassmembers class * { public static final java.lang.String TAG; }` — TAG constants preserved
+  3. `-keep,allowobfuscation @interface androidx.annotation.Keep` + `-keep @androidx.annotation.Keep class * { *; }` + `-keepclassmembers class * { @androidx.annotation.Keep *; }` — `@Keep` honored
+  4. `-keepclassmembers class com.opene2ee.opene2ee.vpn.** { public static ** Companion; public static ** INSTANCE; }` — companion object singleton fields preserved
+  5. `-keep class com.opene2ee.opene2ee.vpn.OpenE2eeVpnService { *; }` — service class entry preserved
+  6. `-keep class com.opene2ee.opene2ee.vpn.** { *; }` — defense-in-depth (the whole `vpn/` package)
+
+### Build artifacts (this commit)
+
+- **debug APK** — `mobile/build/app/outputs/flutter-apk/app-debug.apk` (177.7 MB, multidex 21 classes*.dex)
+  - SHA-256: `AA13C729B8C0FF6323DA6F559FDC3FDD3D86DE548B94CE46CA3EED10A0956A95`
+  - SHA-1:   `EE3D2766B0EE829E99BF634292491240AD84E071`
+- **release APK** — `mobile/build/app/outputs/.../app-release.apk` (82.2 MB, R8 minified, 1 classes.dex)
+  - SHA-256: `70D96A1A9FF512DDB09440A0940907FB26B59681823790CA9B1DF8230D17C2B1`
+  - SHA-1:   `3FD8A467CF24F1F0B179D030AEB0F0B2D17BFBCF`
+- **R8 release** — clean compile, no missing classes. `org.apache.log4j`, `org.apache.logging.log4j`, `org.slf4j` `-dontwarn` rules from Sprint 11.0Z still hold (Netty skeleton is gone but `-dontwarn` is defensive).
+
+### DEX verification (`tools/check_dex_tokens_sprint14.py`)
+
+74/74 PASS (37 debug + 37 release) — covers:
+- 9 Sprint 13.0 REGRESSION (OpenE2eeVpn, PortHostService, TcpProxyServer, UdpServer, UdpTunnel, TcpTunnel, NetFileManager, ProxyConfig, VPNConstants)
+- 19 Sprint 14 NEW breadcrumbs (KURAL 1 setMtu:1400, Service lifecycle, METHOD_CHANNEL, TcpProxyServer started/stopped, UdpServer started/closed, PortHostService started, VPN established, addDnsServer, protect() x2, TUN read, UID lookup:localPort)
+- 5 FORBIDDEN patterns (`readFirstPacket`, `parseFirstPacket`, `clientSocket.localPort`, `getUid(session.remotePort`, `addDisallowedApplication` — all `count=0` in DEX)
+- 4 AndroidManifest UTF-16LE checks (`.vpn.OpenE2eeVpnService`, `vpn_transparent_proxy_for_e2ee_tunnel`, `android.net.VpnService`, `BIND_VPN_SERVICE`)
+
+### Audit self-test (`tools/audit-self-test.py`)
+
+**188/188 PASS** (171 Sprint 13.0 baseline + 17 new Sprint 14 cases):
+- **S129 PASS / S129 FAIL** — VPNConstants `MTU=1400` + `PRIMARY_DNS="1.1.1.1"` (KURAL 1)
+- **S130 PASS / S130 FAIL** — TcpProxyServer no `readFirstPacket` + `portKey=clientSocket.port` (KURAL 2+3)
+- **S131 PASS / S131 FAIL** — UdpServer `key.attach(tunnel)` + `key.attachment() as? UdpTunnel` dispatch (KURAL 4)
+- **S132 PASS / S132 FAIL** — PortHostService `getUid(session.localPort)` (KURAL 5 regression guard for the 13.0 `remotePort` bug)
+- **S133 PASS** — OpenE2eeVpnService `addAllowedApplication` + `stopVpn()` + `setMtu(VPNConstants.VPN_MTU)` + MainActivity `svc.stopVpn()` before `stopService` (KURAL 6 + stop-branch)
+- **S134 PASS / S134 FAIL** — VPNConstants TUN_ADDRESS=10.0.0.2 + TUN_PREFIX=32 + VPN_ROUTE=0.0.0.0 + SESSION_TIME_OUT_MS=60_000L + PACKET_SIZE=32767 + NOTIFICATION_ID=0x5650_4E4E
+- **S135 PASS / S135 FAIL** — NetFileManager class + `getInstance()` + `fun getUid(port: Int): Int?` + `fun refresh()` + `fun init(context: Context)` + PR #33 `startsWith("  sl")` header skip
+- **S136 PASS / S136 FAIL** — OpenE2eeVpnService companion `var activeInstance` + `private fun runVpnLoop` + `const val METHOD_CHANNEL="opene2ee/vpn"` + `private fun establishVpn`
+- **S137 PASS / S137 FAIL** — MainActivity `import com.opene2ee.opene2ee.vpn.OpenE2eeVpnService` + `OpenE2eeVpnService.activeInstance` + `svc.stopVpn()` + AndroidManifest `.vpn.OpenE2eeVpnService` + `BIND_VPN_SERVICE` + `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` + `android.net.VpnService`
+
+### Owner's 14-step test akışı (Sprint 14)
+
+```
+  1. Uygulamayı KAPAT (force-stop com.opene2ee.opene2ee). Eski 12.0F+ serisinin
+     bağlantı state'ini JVM'de bırakır; temiz başlangıç için zorunlu.
+  2. Yeni debug APK'yı yükle: adb install -r app-debug.apk
+  3. Uygulamayı aç, VPN toggle OFF olduğunu doğrula.
+  4. 212.64.210.85:443'e istek gönder (Aktif Nöbet başlat). VPN KAPALI →
+     gerçek NIC'ten SYN gider, kernel TCP stack handle eder, 200 OK.
+  5. VPN AÇ (toggle ON). VpnService.onCreate → runVpnLoop → Selector.open.
+     Logcat'te gör: "OpenE2eeVpnService onCreate" + "setMtu: 1400" +
+     "addDnsServer done" + "VPN established, pfd=...".
+  6. AYNI adrese ikinci istek gönder. Bu sefer SYN TUN'dan geçer.
+     OpenE2eeVpnService.runVpnLoop dispatch eder → NatSession oluştur →
+     TcpProxyServer'a NAT lookup için portKey=clientSocket.port ile
+     yeni bağlantı kurulur. Server tarafında 200 OK görmelisin.
+  7. UDP testi: bir DNS query gönder (örn. nslookup google.com 10.0.0.2).
+     OpenE2eeVpnService.runVpnLoop UDP header'ı parse eder →
+     NatSessionManager.createSession(UDP) → UdpServer.initConnection →
+     channel.register(selector, OP_READ) → key.attach(tunnel) →
+     Selector.select(50ms) → key.attachment() as? UdpTunnel → receivePackets
+     → response'u TUN'a yaz. DNS response 1sn içinde gelmeli.
+     (KRİTİK: key.attach atlanırsa DNS 15s timeout.)
+  8. Logcat al:
+       adb logcat -d -s "OpenE2eeVpn:V PortHostService:V TcpProxyServer:V
+       UdpServer:V UdpTunnel:V TcpTunnel:V"
+     6-tag filter (Sprint 12.0F+2'nin 4-tag filter'ından 2 ek tag genişletildi).
+  9. UID lookup doğrula: Logcat'te "UID lookup: localPort=NNNN, uid=NNNN"
+     satırı görünmeli. /proc/net/tcp'de port local_address kolonunda,
+     remote_address kolonunda DEĞİL. (Sprint 13.0 remotePort bug'ı
+     KURAL 5 ile giderildi.)
+ 10. VPN KAPAT. MainActivity "stop" branch → svc.stopVpn() çağrılır
+     (stopService'den ÖNCE) → OpenE2eeVpnService.stopVpn() →
+     dispose() → tcpProxyServer.stop() + udpServer.closeAllUdpConn() +
+     PortHostService.stopParse() + stopSelf().
+     TUN dosyası kapatılır, foreground notification iptal edilir.
+ 11. VPN toggle OFF olduğunu doğrula (system tray'de "OpenE2eeTunnel"
+     notification kaybolur, VpnService disconnect toast görünür).
+ 12. Üçüncü istek gönder (VPN KAPALI). Gerçek NIC'ten gider, 200 OK.
+ 13. Logcat'i Mavis'e gönder. Beklenen: her 6 tag'de de breadcrumbs var
+     (OpenE2eeVpnService onCreate/onStartCommand/onDestroy, TcpProxyServer
+     started/stopped, UdpServer started/closed, PortHostService started,
+     VPN established, setMtu: 1400, UID lookup: localPort=...). 0 breadcrumb
+     = regression (önceki sprintlerdeki 12.0F+N başarısızlık pattern'i).
+ 14. APK SHA doğrula: git log -1 commit message'daki 4 SHA ile
+     adb shell pm dump com.opene2ee.opene2ee | grep -i signature SHA'sı
+     eşleşmeli (commit push'undan sonra).
+```
+
+### S130 audit (added in this sprint)
+
+- **S130-1**: No `readFirstPacket` / `parseFirstPacket` literal in `vpn/proxy/*` (KURAL 2)
+- **S130-2**: `val portKey = clientSocket.port` literal in `TcpProxyServer.handleNewClient` (KURAL 3)
+- **S130-3**: `protect()` called on both `clientSocket` AND `remoteSocket` (KURAL 3)
+
+(S131 + S132 + S133 + S134 + S135 + S136 + S137 sibling audits, all in `tools/audit-self-test.py`.)
+

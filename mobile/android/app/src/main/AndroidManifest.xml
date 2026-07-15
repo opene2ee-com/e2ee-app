@@ -158,20 +158,28 @@
           required by Android 14+ specialUse subtype. See
           docs/ADR-0006-anonimlik.md §"Veri Minimizasyonu".
         -->
+        <!--
+          Sprint 14 — VpnService clean-room rewrite.
+          Replaces Sprint 12.0C/12.0F+/13.0 service entry with the
+          .vpn.OpenE2eeVpnService class relocated into the
+          com.opene2ee.opene2ee.vpn package. android:exported is
+          now false (only the MainActivity's explicit Intent
+          starts it; the system binds via BIND_VPN_SERVICE).
+          android:description removed (no string reference
+          needed — the notification title is the user-visible
+          surface, the channel description is set in code).
+        -->
         <service
-            android:name="com.opene2ee.opene2ee.vpn.OpenE2eeVpnService"
-            android:exported="true"
+            android:name=".vpn.OpenE2eeVpnService"
+            android:exported="false"
             android:permission="android.permission.BIND_VPN_SERVICE"
-            android:foregroundServiceType="specialUse"
-            android:description="@string/open_e2ee_sifreleme_dogrulama_service_description">
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="network_diagnostic_sampling_for_e2ee_proof" />
-            <intent-filter>
-                <action
-                    android:name="android.net.VpnService"
-                    android:permission="android.permission.BIND_VPN_SERVICE" />
-            </intent-filter>
+            android:foregroundServiceType="specialUse">
+          <property
+              android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+              android:value="vpn_transparent_proxy_for_e2ee_tunnel" />
+          <intent-filter>
+            <action android:name="android.net.VpnService" />
+          </intent-filter>
         </service>
 
         <meta-data

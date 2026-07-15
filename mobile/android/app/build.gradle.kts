@@ -22,11 +22,12 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.opene2ee.opene2ee"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // Sprint 14 — minSdk = 26 (Android 8+). NotificationChannel
+        // + foreground service + startForegroundService için. Önceki
+        // Sprint 12.0C/12.0F+ kodu minSdk = flutter.minSdkVersion
+        // kullanıyordu; Sprint 14 VPN kodu 26+ gerektirir.
+        minSdk = 26
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -37,52 +38,10 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
-            // Sprint 11.0Z — R8 (release minifier) needs the
-            // Netty `-dontwarn` rules defined in
-            // `proguard-rules.pro`, otherwise it aborts the
-            // release build with "Missing class
-            // org.apache.log4j.Level" and 14 sibling
-            // references. The bundled `proguard-android.txt`
-            // is the AGP default; we layer our keep rules
-            // on top.
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-        }
-    }
-
-    // Sprint 11.0Z — exclude META-INF/INDEX.LIST from
-    // the APK packaging. The `io.netty:netty-all:4.1.107.Final`
-    // bundle is an all-in-one JAR that contains
-    // `META-INF/INDEX.LIST` from EVERY Netty module
-    // (netty-buffer, netty-codec, netty-handler,
-    // netty-transport, netty-resolver-dns, etc.).
-    // Android's `mergeDebugJavaResource` task refuses
-    // to merge 34 jars with the same `META-INF/INDEX.LIST`
-    // file — it would silently overwrite each other.
-    // `pickFirst` tells Gradle to use the first
-    // occurrence and skip the rest.
-    packaging {
-        resources {
-            excludes += setOf("META-INF/INDEX.LIST", "META-INF/io.netty.versions.properties")
-        }
-    }
-
-    // Sprint 11.0Z — exclude META-INF/INDEX.LIST from
-    // the APK packaging. The `io.netty:netty-all:4.1.107.Final`
-    // bundle is an all-in-one JAR that contains
-    // `META-INF/INDEX.LIST` from EVERY Netty module
-    // (netty-buffer, netty-codec, netty-handler,
-    // netty-transport, netty-resolver-dns, etc.).
-    // Android's `mergeDebugJavaResource` task refuses
-    // to merge 34 jars with the same `META-INF/INDEX.LIST`
-    // file — it would silently overwrite each other.
-    // `pickFirst` tells Gradle to use the first
-    // occurrence and skip the rest.
-    packaging {
-        resources {
-            excludes += setOf("META-INF/INDEX.LIST", "META-INF/io.netty.versions.properties")
         }
     }
 }
@@ -95,30 +54,4 @@ kotlin {
 
 flutter {
     source = "../.."
-}
-
-// Sprint 11.0Z — user-space TCP/IP stack via Netty.
-// The pre-11.0Z code did transparent passthrough
-// (write the IP packet back to the TUN output and
-// let the kernel route it). Owner 22:08 root cause:
-// the kernel cannot route the packet because the
-// OpenE2ee VPN does not own a real network interface
-// — the captured packets have no corresponding
-// outbound socket. The fix is a user-space
-// TCP/IP stack: read IP packets from the TUN, parse
-// the IP+TCP/UDP headers, create a real socket to
-// the destination (with `VpnService.protect(socket)`
-// so the socket bypasses the VPN and uses the real
-// NIC), and forward the data bidirectionally.
-// Netty provides the async NIO socket layer;
-// the IP/TCP/UDP header parsing is done in
-// `NettyChannelClient.kt` (user-space protocol
-// stack). `io.netty:netty-all:4.1.107.Final` is
-// the all-in-one bundle (transport + buffer +
-// codec + handler). 4.1.107 is the current stable
-// (Nov 2023). S99 audit verifies the dep is
-// declared + `VpnService.protect` is called + the
-// `NettyChannelClient` class is present.
-dependencies {
-    implementation("io.netty:netty-all:4.1.107.Final")
 }
