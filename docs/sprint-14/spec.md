@@ -1528,9 +1528,9 @@ class TcpProxyServer(private val initialPort: Int) {
     @Keep
     fun start() {
         serverSocket = ServerSocket()
-        serverSocket!!.bind(InetSocketAddress(InetAddress.getLoopbackAddress(), initialPort))
+        serverSocket!!.bind(InetSocketAddress(initialPort))
         this.port = serverSocket!!.localPort
-        VPNLog.d(TAG, "TcpProxyServer started, listening on loopback:${this.port}")
+        VPNLog.d(TAG, "TcpProxyServer started, listening on 0.0.0.0:${this.port}")
 
         val acceptThread = Thread({
             try {
