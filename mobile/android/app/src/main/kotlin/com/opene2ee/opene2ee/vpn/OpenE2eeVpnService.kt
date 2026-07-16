@@ -355,9 +355,13 @@ class OpenE2eeVpnService : VpnService(), Runnable {
         DebugLog.i("addAddress: ${localIp.address}/${localIp.prefixLength}")
 
         builder.addRoute(VPNConstants.VPN_ROUTE, VPNConstants.VPN_ROUTE_PREFIX)
+        // Sprint 15.1: 4 DNS server — referans huolizhuminh/NetWorkPacketCapture sırasıyla.
+        // 1.1.1.1 Türkiye'de (TT 4G) timeout alıyordu, 8.8.8.8 primary oldu.
         builder.addDnsServer(VPNConstants.PRIMARY_DNS)
         builder.addDnsServer(VPNConstants.SECONDARY_DNS)
-        DebugLog.i("addDnsServer done")
+        builder.addDnsServer(VPNConstants.TERTIARY_DNS)
+        builder.addDnsServer(VPNConstants.QUATERNARY_DNS)
+        DebugLog.i("addDnsServer done: ${VPNConstants.PRIMARY_DNS}, ${VPNConstants.SECONDARY_DNS}, ${VPNConstants.TERTIARY_DNS}, ${VPNConstants.QUATERNARY_DNS}")
 
         // KURAL 6: addDisallowedApplication KULLANMA.
         // Varsayılan: tüm trafik (null = no filter). İleride allowlist istense:
