@@ -144,6 +144,7 @@ class OpenE2eeVpnService : VpnService(), Runnable {
     @Keep
     fun stopVpn() {
         DebugLog.i("OpenE2eeVpnService stopVpn called")
+        isRunning = false  // Sprint 14.1 fix: stop the worker thread's while(isRunning) loop
         try { dispose() } catch (e: Exception) { DebugLog.e("stopVpn.dispose failed: $e") }
         try { stopSelf() } catch (e: Exception) { DebugLog.e("stopVpn.stopSelf failed: $e") }
     }
@@ -390,6 +391,7 @@ class OpenE2eeVpnService : VpnService(), Runnable {
     @Keep
     @Synchronized
     private fun dispose() {
+        isRunning = false  // Sprint 14.1 fix: defense in depth — even if stopVpn forgot, dispose stops the worker
         try {
             disconnectVpn()
             tcpProxyServer?.stop()
