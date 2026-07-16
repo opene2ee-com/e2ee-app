@@ -44,6 +44,31 @@ class UdpHeader(
         checkSum = calculateChecksum()
     }
 
+    /**
+     * Returns a deep copy of this UDP header.
+     *
+     * Allocates a fresh byte array sized to the IP header + UDP header (28 bytes
+     * for IPv4, 48 bytes for IPv6) and re-parses the IP header from it. The
+     * original packet byte array is left untouched.
+     *
+     * This is required because UdpRealTunnel constructs a request/response
+     * template by swapping source/destination addresses and ports in place;
+     * doing so on the caller's packet would corrupt the original DNS query
+     * (see Sprint 18 spec §1 root cause and Sprint 17 verifier diagnosis).
+     */
+    fun copy(): UdpHeader {
+        val newPacket = ByteArray(ipHeader.headerLength + UDP_HEADER_LENGTH) { i ->
+            packet[i]
+        }.also { arr ->
+            // UDP length = header-only (8) for the request/response template
+            arr.writeShort(UDP_HEADER_LENGTH.toShort(), offset + OFFSET_LENGTH)
+        }
+        val newIpHeader = IPHeader.parse(newPacket, newPacket.size, 0)
+            ?: error("UdpHeader.copy: failed to re-parse IP header")
+        newIpHeader.totalLength = newIpHeader.headerLength + UDP_HEADER_LENGTH
+        return UdpHeader(newIpHeader, newPacket, offset)
+    }
+
     private fun calculateChecksum(): Short {
         val dataLength = ipHeader.dataLength
         var sum: Int = ipHeader.addressSum

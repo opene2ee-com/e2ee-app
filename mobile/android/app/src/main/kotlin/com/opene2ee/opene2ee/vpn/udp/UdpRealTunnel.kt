@@ -24,7 +24,7 @@ internal class UdpRealTunnel(
 ) : DatagramSocketNioTunnel() {
 
     private val tag = "UdpRealTunnel"
-    private val header: UdpHeader = udpHeader.also {
+    private val header: UdpHeader = udpHeader.copy().also {
         val localAddress = it.ipHeader.sourceAddress
         val localPort = it.sourcePort
         val remoteAddress = it.ipHeader.destinationAddress
