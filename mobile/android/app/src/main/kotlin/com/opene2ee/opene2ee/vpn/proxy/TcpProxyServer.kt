@@ -47,9 +47,14 @@ class TcpProxyServer(private val initialPort: Int) {
     @Keep
     fun start() {
         serverSocket = ServerSocket()
-        serverSocket!!.bind(InetSocketAddress(InetAddress.getLoopbackAddress(), initialPort))
+        // KURAL 7 (Sprint 15): bind wildcard 0.0.0.0, ASLA InetAddress.getLoopbackAddress()
+        // TUN'dan gelen rewritten packet dst=10.0.0.2:PROXY_PORT; 127.0.0.1 listener'da
+        // kernel SYN'i teslim edemez (RST exchange = "to net=23, from net=16" logu).
+        // 0.0.0.0 = tüm local IP'ler (127.0.0.1, 10.0.0.2) için kabul eder.
+        // Referans: huolizhuminh/NetWorkPacketCapture TcpProxyServer.java:46 (wildcard bind).
+        serverSocket!!.bind(InetSocketAddress(initialPort))  // 0.0.0.0 wildcard
         this.port = serverSocket!!.localPort
-        VPNLog.d(TAG, "TcpProxyServer started, listening on loopback:${this.port}")
+        VPNLog.d(TAG, "TcpProxyServer started, listening on 0.0.0.0:${this.port}")
 
         val acceptThread = Thread({
             try {
