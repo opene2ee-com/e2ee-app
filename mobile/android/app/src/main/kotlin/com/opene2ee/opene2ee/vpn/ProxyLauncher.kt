@@ -103,15 +103,12 @@ internal class PacketDispatcher(
                 }
                 if (length <= 0) continue
 
-                val packet = Packet(buffer.copyOf(length), length)
-                val ipHeader = IPHeader.parse(packet.packet, packet.length, 0) ?: continue
-                val protocol = Protocol.parse(ipHeader.dataProtocol)
-                val interceptor = interceptors[protocol] ?: continue
-
+                // Sprint 19 TRANSPARENT: interceptor bypass, TUN read → TUN write
                 try {
-                    interceptor.intercept(ipHeader, packet, outputStream)
+                    outputStream.write(buffer, 0, length)
+                    VPNLogger.d(tag, "Sprint 19 TRANSPARENT: wrote $length bytes back to TUN")
                 } catch (e: Exception) {
-                    VPNLogger.e(tag, "interceptor error", e)
+                    VPNLogger.e(tag, "Sprint 19 TRANSPARENT: TUN write failed", e)
                 }
             }
         } catch (e: Exception) {
