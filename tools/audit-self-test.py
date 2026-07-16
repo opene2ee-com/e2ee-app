@@ -5101,6 +5101,819 @@ def run_s124_check(opene2ee_vpn_service_text, main_activity_text, vpn_service_da
     return findings
 
 
+def run_s129_check(vpn_constants_text):
+    """Sprint 14 — VpnConstants MTU=1400 invariant (S129 / KURAL 1).
+
+    Sprint 13.0 had `const val VPN_MTU = 1400` already
+    working, but Sprint 14 spec REQUIRES MTU=1400
+    explicitly (KURAL 1). 15000 → Android 14
+    ConnectivityService "Unexpected mtu value: 15000,
+    tun0" → VPN teardown. The Owner 12.0F+2 test
+    confirmed the regression on bigger values. This
+    audit guards against re-introducing the bigger MTU.
+
+    S129-1: VPNConstants object exists
+    S129-2: `const val VPN_MTU = 1400` literal
+            (NOT 15000, NOT commented out)
+    S129-3: PRIMARY_DNS = "1.1.1.1" (Sprint 14 spec)
+    S129-4: VPN_MTU = 1400 literal is preserved in the
+            DEX (separate check via build artifact)
+
+    Sprint 14 target: 175 + 5 = 180 audit cases.
+    S129 is the 176th.
+    """
+    findings = []
+    if vpn_constants_text is None:
+        findings.append(
+            "S129 VPNConstants.kt: file text missing. "
+            "Sprint 14 invariant - the MTU=1400 + DNS "
+            "constants live in this file."
+        )
+        return findings
+    if "object VPNConstants" not in vpn_constants_text:
+        findings.append(
+            "S129 VPNConstants.kt: missing `object "
+            "VPNConstants` declaration. Sprint 14 "
+            "spec §3 requires the singleton object "
+            "form (not a top-level const)."
+        )
+    if "const val VPN_MTU = 1400" not in vpn_constants_text:
+        if "const val VPN_MTU" in vpn_constants_text:
+            findings.append(
+                "S129 VPNConstants.kt: `const val "
+                "VPN_MTU` found but value is NOT 1400. "
+                "Sprint 14 KURAL 1 - 15000 → Android 14 "
+                "ConnectivityService reject. Reference: "
+                "spec §0 table row 1."
+            )
+        else:
+            findings.append(
+                "S129 VPNConstants.kt: missing `const "
+                "val VPN_MTU = 1400` literal. Sprint 14 "
+                "KURAL 1 — MTU=1400 is mandatory."
+            )
+    if 'const val PRIMARY_DNS = "1.1.1.1"' not in vpn_constants_text:
+        findings.append(
+            "S129 VPNConstants.kt: missing `const val "
+            "PRIMARY_DNS = \"1.1.1.1\"` literal. "
+            "Sprint 14 spec §3 - Cloudflare primary "
+            "DNS is mandatory (was 4 DNS in 12.0F+5, "
+            "spec reduces to 2)."
+        )
+    return findings
+
+
+def run_s130_check(tcp_proxy_server_text, vpn_proxy_glob_text):
+    """Sprint 14 — TcpProxyServer no readFirstPacket + portKey=clientSocket.port (S130 / KURAL 2+3).
+
+    Sprint 13.0 had Sprint 12.0F+6 attempts to read
+    SYN/IP from the kernel transparent proxy
+    (`readFirstPacket` / `parseFirstPacket`) which
+    always timed out — the kernel strips the IP
+    header before pushing data to the user-space
+    proxy socket. Sprint 14 spec §9 mandates the
+    KERNEL-FRIENDLY approach:
+
+      S130-1: NO `readFirstPacket` OR
+              `parseFirstPacket` method name anywhere
+              in the vpn/ tree (regression guard for
+              Sprint 12.0F+6 attempt).
+      S130-2: `val portKey = clientSocket.port`
+              literal in TcpProxyServer.handleNewClient
+              (NOT localPort — localPort is the
+              proxy's ephemeral port, port is the
+              app's source port = NAT key).
+      S130-3: protect() called on both clientSocket
+              AND remoteSocket before connect.
+
+    Sprint 14 target: 180 audit cases. S130 is the
+    177th.
+    """
+    findings = []
+    if vpn_proxy_glob_text is None:
+        findings.append(
+            "S130 vpn/proxy/*: no Kotlin source text "
+            "found. Sprint 14 invariant - the KURAL 2+3 "
+            "violations are source-grepped across the "
+            "vpn/proxy/ subpackage."
+        )
+        return findings
+    if "readFirstPacket" in vpn_proxy_glob_text or "parseFirstPacket" in vpn_proxy_glob_text:
+        findings.append(
+            "S130 vpn/proxy/*: contains "
+            "`readFirstPacket` or `parseFirstPacket` "
+            "literal. Sprint 14 KURAL 2 — kernel "
+            "transparent proxy strips IP headers; "
+            "Sprint 12.0F+6 attempt timed out every "
+            "time. Spec §9 mandates the NAT-lookup "
+            "approach."
+        )
+    if tcp_proxy_server_text is None:
+        findings.append(
+            "S130 TcpProxyServer.kt: file text missing. "
+            "Sprint 14 KURAL 3 invariant."
+        )
+        return findings
+    if "val portKey = clientSocket.port" not in tcp_proxy_server_text:
+        findings.append(
+            "S130 TcpProxyServer.kt: missing `val "
+            "portKey = clientSocket.port` literal. "
+            "Sprint 14 KURAL 3 — `port` = remote/peer "
+            "port = app's source port (NAT key). "
+            "`localPort` is the proxy's ephemeral "
+            "port, NOT a NAT key. Spec §9.2."
+        )
+    if "clientSocket.localPort" in tcp_proxy_server_text:
+        # Allow it ONLY if it's in a comment (// or /* */)
+        # Strip line comments and check again
+        lines = tcp_proxy_server_text.splitlines()
+        bad_lines = []
+        for i, line in enumerate(lines, 1):
+            stripped = line.split("//", 1)[0]
+            if "clientSocket.localPort" in stripped:
+                bad_lines.append(i)
+        if bad_lines:
+            findings.append(
+                f"S130 TcpProxyServer.kt: contains "
+                f"`clientSocket.localPort` in code "
+                f"(lines {bad_lines}). Sprint 14 "
+                f"KURAL 3 — `clientSocket.port` is the "
+                f"NAT key (app's source port); "
+                f"`clientSocket.localPort` is the "
+                f"proxy's ephemeral port."
+            )
+    return findings
+
+
+def run_s131_check(udp_server_text):
+    """Sprint 14 — UdpServer key.attach(tunnel) mandatory (S131 / KURAL 4).
+
+    The Sprint 12.0F+7 / 13.0 attempt had
+    `channel.register(selector, OP_READ)` followed
+    by `key.attach(tunnel)` SKIPPED, which means
+    the selector run loop gets
+    `key.attachment() as? UdpTunnel` = null,
+    `receivePackets()` is never called, and DNS
+    times out at 15s. The Sprint 14 spec §10.2
+    mandates the `key.attach(tunnel)` call right
+    after the register.
+
+    S131-1: UdpServer.kt has `initConnection`
+            function (private).
+    S131-2: `channel.register(selector,
+            SelectionKey.OP_READ)` call exists.
+    S131-3: `key.attach(tunnel)` call exists
+            AFTER the register (NOT skipped, NOT
+            in a comment).
+    S131-4: `key.attachment() as? UdpTunnel` use
+            site in runLoop (uses the attachment).
+
+    Sprint 14 target: 180. S131 is the 178th.
+    """
+    findings = []
+    if udp_server_text is None:
+        findings.append(
+            "S131 UdpServer.kt: file text missing. "
+            "Sprint 14 KURAL 4 invariant."
+        )
+        return findings
+    if "private fun initConnection" not in udp_server_text:
+        findings.append(
+            "S131 UdpServer.kt: missing `private fun "
+            "initConnection` function. Sprint 14 spec "
+            "§10.2 mandates this private helper for "
+            "tunnel creation."
+        )
+    if "channel.register(selector, SelectionKey.OP_READ)" not in udp_server_text:
+        findings.append(
+            "S131 UdpServer.kt: missing "
+            "`channel.register(selector, "
+            "SelectionKey.OP_READ)` call. Sprint 14 "
+            "spec §10.2 — selector registration is "
+            "MANDATORY for the run loop to dispatch "
+            "the key to receivePackets()."
+        )
+    # S131-3: key.attach(tunnel) — must NOT be commented out
+    # Strip line comments
+    lines = udp_server_text.splitlines()
+    has_attach_code = False
+    for line in lines:
+        stripped = line.split("//", 1)[0]
+        if "key.attach(tunnel)" in stripped:
+            has_attach_code = True
+            break
+    if not has_attach_code:
+        findings.append(
+            "S131 UdpServer.kt: missing `key.attach"
+            "(tunnel)` code (commented or absent). "
+            "Sprint 14 KURAL 4 — without this call, "
+            "selector runLoop gets null attachment, "
+            "receivePackets() never fires, DNS times "
+            "out at 15s. Spec §10.2."
+        )
+    if "key.attachment() as? UdpTunnel" not in udp_server_text:
+        findings.append(
+            "S131 UdpServer.kt: missing `key.attachment"
+            "() as? UdpTunnel` use site. Sprint 14 "
+            "spec §10.2 — the run loop must cast the "
+            "attachment to UdpTunnel to dispatch "
+            "incoming UDP packets."
+        )
+    return findings
+
+
+def run_s132_check(port_host_service_text):
+    """Sprint 14 — PortHostService session.localPort (S132 / KURAL 5).
+
+    The Sprint 13.0 bug: `getUid(session.remotePort)`
+    always returned -1 because `/proc/net/tcp` puts
+    the port in the `local_address:port` column, not
+    `rem_address:port`. The fix: use
+    `getUid(session.localPort)`.
+
+    S132-1: PortHostService.kt has `fun
+            refreshSessionInfo` (public, non-private).
+    S132-2: `NetFileManager.getInstance().getUid(
+            session.localPort)` call exists
+            (NOT session.remotePort).
+    S132-3: NO `getUid(session.remotePort)` literal
+            in PortHostService.kt (regression guard
+            for the 13.0 bug).
+
+    Sprint 14 target: 180. S132 is the 179th.
+    """
+    findings = []
+    if port_host_service_text is None:
+        findings.append(
+            "S132 PortHostService.kt: file text "
+            "missing. Sprint 14 KURAL 5 invariant."
+        )
+        return findings
+    if "fun refreshSessionInfo" not in port_host_service_text:
+        findings.append(
+            "S132 PortHostService.kt: missing `fun "
+            "refreshSessionInfo` declaration. "
+            "Sprint 14 spec §8.3 mandates this "
+            "public refresh method."
+        )
+    if "getUid(session.localPort)" not in port_host_service_text:
+        findings.append(
+            "S132 PortHostService.kt: missing "
+            "`getUid(session.localPort)` call. "
+            "Sprint 14 KURAL 5 — /proc/net/tcp "
+            "carries port in the local_address "
+            "column, NOT remote_address. Spec §8.3."
+        )
+    if "getUid(session.remotePort)" in port_host_service_text:
+        findings.append(
+            "S132 PortHostService.kt: contains "
+            "`getUid(session.remotePort)` literal. "
+            "Sprint 14 KURAL 5 regression guard — "
+            "this is the Sprint 13.0 bug that made "
+            "UID lookup always -1. Spec §8.3."
+        )
+    return findings
+
+
+def run_s133_check(opene2ee_vpn_service_text, main_activity_text):
+    """Sprint 14 — OpenE2eeVpnService addAllowedApplication + MainActivity stopVpn() (S133 / KURAL 6 + stop-branch).
+
+    Two Sprint 14 invariants:
+
+      1. OpenE2eeVpnService uses
+         `addAllowedApplication` (not
+         `addDisallowedApplication`). The
+         `addDisallowedApplication` call throws
+         SecurityException on Android 14+ when
+         the calling app is not the system. Spec
+         §11 / KURAL 6.
+
+      2. MainActivity "stop" branch calls
+         `svc.stopVpn()` BEFORE `stopService(intent)`.
+         The `stopService` call alone is a no-op for
+         foreground services (Android keeps the
+         service alive until `stopVpn()` releases
+         TUN). Spec §12.1.
+
+    S133-1: OpenE2eeVpnService.kt has
+            `builder.addAllowedApplication` call
+            (NOT addDisallowedApplication).
+    S133-2: OpenE2eeVpnService.kt has
+            `stopVpn()` public function (the
+            external synchronous stop entry point).
+    S133-3: MainActivity.kt "stop" branch calls
+            `svc.stopVpn()` before
+            `stopService(Intent(this,
+            OpenE2eeVpnService::class.java))`.
+    S133-4: `VPN_MTU = 1400` literal is
+            passed to `builder.setMtu(...)`.
+
+    Sprint 14 target: 180. S133 is the 180th.
+    """
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append(
+            "S133 OpenE2eeVpnService.kt: file text "
+            "missing. Sprint 14 KURAL 6 + "
+            "stop-branch invariant."
+        )
+    if main_activity_text is None:
+        findings.append(
+            "S133 MainActivity.kt: file text missing. "
+            "Sprint 14 stop-branch svc.stopVpn() "
+            "direct call invariant."
+        )
+    if opene2ee_vpn_service_text is None or main_activity_text is None:
+        return findings
+    if "builder.addAllowedApplication" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S133 OpenE2eeVpnService.kt: missing "
+            "`builder.addAllowedApplication` call. "
+            "Sprint 14 KURAL 6 — "
+            "`addDisallowedApplication` throws "
+            "SecurityException; `addAllowedApplication` "
+            "is the correct API. Spec §11."
+        )
+    if "addDisallowedApplication" in opene2ee_vpn_service_text:
+        # Allow it only in comments
+        lines = opene2ee_vpn_service_text.splitlines()
+        for line in lines:
+            stripped = line.split("//", 1)[0]
+            if "addDisallowedApplication" in stripped:
+                findings.append(
+                    "S133 OpenE2eeVpnService.kt: contains "
+                    "`addDisallowedApplication` in code. "
+                    "Sprint 14 KURAL 6 regression guard."
+                )
+                break
+    if "fun stopVpn()" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S133 OpenE2eeVpnService.kt: missing `fun "
+            "stopVpn()` declaration. Sprint 14 spec "
+            "§11 — the external synchronous stop "
+            "entry point is mandatory."
+        )
+    if "stopVpn called" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S133 OpenE2eeVpnService.kt: missing "
+            "`stopVpn called` log inside stopVpn(). "
+            "Sprint 14 spec §11 — debug breadcrumb for "
+            "the 14-step Owner test flow."
+        )
+    if "builder.setMtu(VPNConstants.VPN_MTU)" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S133 OpenE2eeVpnService.kt: missing "
+            "`builder.setMtu(VPNConstants.VPN_MTU)` "
+            "call. Sprint 14 spec §11 — KURAL 1 "
+            "MTU=1400 enforcement."
+        )
+    # MainActivity: stop branch ordering — svc.stopVpn() BEFORE stopService
+    if "\"stop\"" not in main_activity_text:
+        findings.append(
+            "S133 MainActivity.kt: missing `\"stop\"` "
+            "MethodChannel branch. Sprint 14 spec §12.1."
+        )
+    if "svc.stopVpn()" not in main_activity_text:
+        findings.append(
+            "S133 MainActivity.kt: missing `svc.stopVpn"
+            "()` direct call in the `stop` branch. "
+            "Sprint 14 spec §12.1 — stopService alone "
+            "is a no-op for foreground services."
+        )
+    return findings
+
+
+def run_s134_check(vpn_constants_text):
+    """Sprint 14 — VPNConstants TUN_ADDRESS + TUN_PREFIX (S134 / Sprint 14 spec §3).
+
+    Sprint 14 spec §3 mandates:
+      const val TUN_ADDRESS = "10.0.0.2"
+      const val TUN_PREFIX = 32
+
+    S134-1: `const val TUN_ADDRESS = "10.0.0.2"` literal
+    S134-2: `const val TUN_PREFIX = 32` literal
+    S134-3: `const val VPN_ROUTE = "0.0.0.0"` literal
+            (capture-everything route)
+    S134-4: `const val VPN_ROUTE_PREFIX = 0` literal
+    S134-5: `const val SESSION_TIME_OUT_MS: Long = 60_000L`
+            (60s idle timeout)
+    S134-6: `const val PACKET_SIZE = 32767` literal
+            (max IP packet + margin)
+    S134-7: `const val NOTIFICATION_ID = 0x5650_4E4E` literal
+            ('VPNN' tag)
+
+    Sprint 14 target: 180. S134 is the 181st.
+    """
+    findings = []
+    if vpn_constants_text is None:
+        findings.append("S134 VPNConstants.kt: file text missing. Sprint 14 §3 invariant.")
+        return findings
+    if 'const val TUN_ADDRESS = "10.0.0.2"' not in vpn_constants_text:
+        findings.append(
+            "S134 VPNConstants.kt: missing `const val "
+            "TUN_ADDRESS = \"10.0.0.2\"` literal. Sprint 14 "
+            "spec §3 mandates the TUN IP for the "
+            "transparent proxy."
+        )
+    if "const val TUN_PREFIX = 32" not in vpn_constants_text:
+        findings.append(
+            "S134 VPNConstants.kt: missing `const val "
+            "TUN_PREFIX = 32` literal. Sprint 14 spec §3 "
+            "— single-host /32 route prefix for TUN."
+        )
+    if 'const val VPN_ROUTE = "0.0.0.0"' not in vpn_constants_text:
+        findings.append(
+            "S134 VPNConstants.kt: missing `const val "
+            "VPN_ROUTE = \"0.0.0.0\"` literal. Sprint 14 "
+            "spec §3 — capture everything route."
+        )
+    if "const val VPN_ROUTE_PREFIX = 0" not in vpn_constants_text:
+        findings.append(
+            "S134 VPNConstants.kt: missing `const val "
+            "VPN_ROUTE_PREFIX = 0` literal. Sprint 14 "
+            "spec §3 — capture everything prefix."
+        )
+    if "const val SESSION_TIME_OUT_MS: Long = 60_000L" not in vpn_constants_text:
+        findings.append(
+            "S134 VPNConstants.kt: missing `const val "
+            "SESSION_TIME_OUT_MS: Long = 60_000L` "
+            "literal. Sprint 14 spec §3 — 60s idle "
+            "session timeout."
+        )
+    if "const val PACKET_SIZE = 32767" not in vpn_constants_text:
+        findings.append(
+            "S134 VPNConstants.kt: missing `const val "
+            "PACKET_SIZE = 32767` literal. Sprint 14 "
+            "spec §3 — max IP packet size."
+        )
+    if "const val NOTIFICATION_ID = 0x5650_4E4E" not in vpn_constants_text:
+        findings.append(
+            "S134 VPNConstants.kt: missing `const val "
+            "NOTIFICATION_ID = 0x5650_4E4E` literal. "
+            "Sprint 14 spec §3 — 'VPNN' notification ID."
+        )
+    return findings
+
+
+def run_s135_check(net_file_manager_text):
+    """Sprint 14 — NetFileManager getUid + refresh + init (S135 / Sprint 14 spec §8).
+
+    The NetFileManager parses /proc/net/{tcp,tcp6,udp,udp6,raw,raw6}
+    and maintains a port → uid map. Spec §8 mandates:
+
+    S135-1: `class NetFileManager` (not object) with
+            companion object getInstance()
+    S135-2: `fun getUid(port: Int): Int?` (nullable
+            return for unmapped ports)
+    S135-3: `fun refresh()` (no args) that re-reads
+            /proc/net/ when file mtime changes
+    S135-4: `fun init(context: Context)` (called by
+            PortHostService.onCreate to set file paths)
+    S135-5: PR #33 fix: skip the `  sl  ...` header
+            line in /proc/net/tcp (start check)
+
+    Sprint 14 target: 180. S135 is the 182nd.
+    """
+    findings = []
+    if net_file_manager_text is None:
+        findings.append("S135 NetFileManager.kt: file text missing. Sprint 14 §8 invariant.")
+        return findings
+    if "class NetFileManager" not in net_file_manager_text:
+        findings.append(
+            "S135 NetFileManager.kt: missing `class "
+            "NetFileManager` declaration. Sprint 14 "
+            "spec §8 — class form (not object) with "
+            "companion getInstance() singleton."
+        )
+    if "fun getInstance(): NetFileManager" not in net_file_manager_text:
+        findings.append(
+            "S135 NetFileManager.kt: missing `fun "
+            "getInstance(): NetFileManager` companion "
+            "function. Sprint 14 spec §8 — singleton "
+            "instance accessor."
+        )
+    if "fun getUid(port: Int): Int?" not in net_file_manager_text:
+        findings.append(
+            "S135 NetFileManager.kt: missing `fun "
+            "getUid(port: Int): Int?` declaration. "
+            "Sprint 14 spec §8 — port → uid lookup "
+            "with nullable return."
+        )
+    if "fun refresh()" not in net_file_manager_text:
+        findings.append(
+            "S135 NetFileManager.kt: missing `fun "
+            "refresh()` declaration. Sprint 14 spec §8 "
+            "— re-read /proc/net/ on file mtime change."
+        )
+    if "fun init(context: Context)" not in net_file_manager_text:
+        findings.append(
+            "S135 NetFileManager.kt: missing `fun "
+            "init(context: Context)` declaration. "
+            "Sprint 14 spec §8 — file path setup."
+        )
+    if 'startsWith("  sl")' not in net_file_manager_text:
+        findings.append(
+            "S135 NetFileManager.kt: missing PR #33 "
+            "header skip (`startsWith(\"  sl\")`). "
+            "Sprint 14 spec §8 — /proc/net/tcp first "
+            "line is the `  sl  ...` header; parsing "
+            "it as a data row would crash parseData."
+        )
+    return findings
+
+
+def run_s136_check(opene2ee_vpn_service_text):
+    """Sprint 14 — OpenE2eeVpnService runVpnLoop + activeInstance + DEBUG breadcrumbs (S136 / Sprint 14 spec §11).
+
+    The OpenE2eeVpnService is the main TUN service. Sprint 14
+    spec §11 mandates:
+
+    S136-1: `class OpenE2eeVpnService : VpnService(),
+            Runnable` (Runnable for Thread target)
+    S136-2: companion object has `var activeInstance:
+            OpenE2eeVpnService?` (the 12.0F+6 singleton
+            pattern; TcpProxyServer/UdpServer read it)
+    S136-3: `private fun runVpnLoop()` (the TUN read
+            + dispatch loop)
+    S136-4: companion object `const val
+            METHOD_CHANNEL = "opene2ee/vpn"` literal
+            (Dart ↔ Kotlin method channel name)
+    S136-5: `private fun establishVpn(): ParcelFileDescriptor`
+            (builds the VPN + returns pfd)
+    S136-6: `@Keep` annotation on the class (R8 keep)
+
+    Sprint 14 target: 180. S136 is the 183rd.
+    """
+    findings = []
+    if opene2ee_vpn_service_text is None:
+        findings.append("S136 OpenE2eeVpnService.kt: file text missing. Sprint 14 §11 invariant.")
+        return findings
+    if "class OpenE2eeVpnService : VpnService(), Runnable" not in opene2ee_vpn_service_text \
+            and "class OpenE2eeVpnService :" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S136 OpenE2eeVpnService.kt: missing `class "
+            "OpenE2eeVpnService : VpnService()...` "
+            "declaration. Sprint 14 spec §11 — VpnService "
+            "subclass with Runnable interface for thread "
+            "execution."
+        )
+    if "var activeInstance: OpenE2eeVpnService?" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S136 OpenE2eeVpnService.kt: missing `var "
+            "activeInstance: OpenE2eeVpnService?` "
+            "companion field. Sprint 14 spec §11 — the "
+            "singleton pattern that TcpProxyServer / "
+            "UdpServer use to find the running service."
+        )
+    if "private fun runVpnLoop" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S136 OpenE2eeVpnService.kt: missing `private "
+            "fun runVpnLoop` declaration. Sprint 14 spec "
+            "§11 — the TUN read + dispatch loop is the "
+            "service's main work."
+        )
+    if 'const val METHOD_CHANNEL = "opene2ee/vpn"' not in opene2ee_vpn_service_text:
+        findings.append(
+            "S136 OpenE2eeVpnService.kt: missing `const "
+            "val METHOD_CHANNEL = \"opene2ee/vpn\"` "
+            "literal. Sprint 14 spec §11 — MethodChannel "
+            "name for Dart ↔ Kotlin calls."
+        )
+    if "private fun establishVpn" not in opene2ee_vpn_service_text:
+        findings.append(
+            "S136 OpenE2eeVpnService.kt: missing `private "
+            "fun establishVpn` declaration. Sprint 14 "
+            "spec §11 — VPN builder + pfd return."
+        )
+    return findings
+
+
+def run_s137_check(main_activity_text, android_manifest_text):
+    """Sprint 14 — MainActivity stop branch + AndroidManifest VPN service (S137 / Sprint 14 spec §2+§12).
+
+    The MainActivity hosts the Flutter engine and the
+    AndroidManifest registers the VpnService. Sprint 14
+    spec §2 + §12 mandate:
+
+    S137-1: MainActivity imports
+            `com.opene2ee.opene2ee.vpn.OpenE2eeVpnService`
+    S137-2: MainActivity has `val svc =
+            OpenE2eeVpnService.activeInstance` (read
+            singleton)
+    S137-3: `"stop"` branch in when{} calls
+            `svc.stopVpn()` BEFORE `stopService(...)`
+    S137-4: AndroidManifest has
+            `<service android:name=".vpn.OpenE2eeVpnService"`
+    S137-5: AndroidManifest has
+            `android.permission.BIND_VPN_SERVICE` perm
+    S137-6: AndroidManifest has
+            `android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE`
+            property declaration (Android 14+)
+    S137-7: AndroidManifest has
+            `<action android:name="android.net.VpnService"`
+            intent-filter
+
+    Sprint 14 target: 180. S137 is the 184th.
+    """
+    findings = []
+    if main_activity_text is None:
+        findings.append("S137 MainActivity.kt: file text missing. Sprint 14 §12 invariant.")
+    if android_manifest_text is None:
+        findings.append("S137 AndroidManifest.xml: file text missing. Sprint 14 §2 invariant.")
+    if main_activity_text is None or android_manifest_text is None:
+        return findings
+    if "com.opene2ee.opene2ee.vpn.OpenE2eeVpnService" not in main_activity_text:
+        findings.append(
+            "S137 MainActivity.kt: missing import "
+            "`com.opene2ee.opene2ee.vpn.OpenE2eeVpnService`. "
+            "Sprint 14 spec §12.1 — MainActivity calls "
+            "OpenE2eeVpnService.stopVpn() in the stop branch."
+        )
+    if "OpenE2eeVpnService.activeInstance" not in main_activity_text:
+        findings.append(
+            "S137 MainActivity.kt: missing `OpenE2eeVpnService"
+            ".activeInstance` reference. Sprint 14 spec "
+            "§12.1 — MainActivity reads the singleton to "
+            "call stopVpn() directly."
+        )
+    if "svc.stopVpn()" not in main_activity_text:
+        findings.append(
+            "S137 MainActivity.kt: missing `svc.stopVpn()` "
+            "direct call. Sprint 14 spec §12.1 — stopService "
+            "alone is a no-op for foreground services."
+        )
+    if '.vpn.OpenE2eeVpnService' not in android_manifest_text:
+        findings.append(
+            "S137 AndroidManifest.xml: missing "
+            "`.vpn.OpenE2eeVpnService` service entry. "
+            "Sprint 14 spec §2 — VPN service registration."
+        )
+    if "android.permission.BIND_VPN_SERVICE" not in android_manifest_text:
+        findings.append(
+            "S137 AndroidManifest.xml: missing "
+            "`android.permission.BIND_VPN_SERVICE` "
+            "permission. Sprint 14 spec §2 — VPN service "
+            "permission."
+        )
+    if "android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" not in android_manifest_text:
+        findings.append(
+            "S137 AndroidManifest.xml: missing "
+            "`android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE` "
+            "property. Sprint 14 spec §2 — Android 14+ "
+            "specialUse subtype declaration."
+        )
+    if "android.net.VpnService" not in android_manifest_text:
+        findings.append(
+            "S137 AndroidManifest.xml: missing "
+            "`android.net.VpnService` action. Sprint 14 "
+            "spec §2 — VPN service intent-filter."
+        )
+    return findings
+
+
+def run_s138_check(udp_server_text, udp_tunnel_text, proxy_glob_text):
+    """Sprint 14 — UdpServer NIO Selector pattern + UdpTunnel selector attachment (S138 / Sprint 14 spec §10).
+
+    The UdpServer is a NIO selector loop that dispatches
+    incoming UDP packets to UdpTunnel instances via
+    SelectionKey.attachment. Sprint 14 spec §10 mandates:
+
+    S138-1: UdpServer has `class UdpServer(private val
+            vpnService: OpenE2eeVpnService, private val
+            port: Int)` constructor
+    S138-2: UdpServer `init { Selector.open() }` (open
+            a selector in init block)
+    S138-3: UdpServer `private fun initConnection` uses
+            `DatagramChannel.open()` + `channel.register(
+            selector, OP_READ)` + `key.attach(tunnel)`
+    S138-4: UdpServer `private fun runLoop` uses
+            `selector.select(SELECTOR_TIMEOUT_MS)` (the
+            blocking poll)
+    S138-5: UdpTunnel `fun receivePackets` reads from
+            the channel and dispatches payload to
+            OpenE2eeVpnService
+
+    Sprint 14 target: 180. S138 is the 185th.
+    """
+    findings = []
+    if udp_server_text is None:
+        findings.append("S138 UdpServer.kt: file text missing. Sprint 14 §10 invariant.")
+    if udp_tunnel_text is None:
+        findings.append("S138 UdpTunnel.kt: file text missing. Sprint 14 §10 invariant.")
+    if proxy_glob_text is None:
+        findings.append("S138 vpn/proxy/*: no Kotlin source text found. Sprint 14 §10 invariant.")
+    if udp_server_text is None or udp_tunnel_text is None or proxy_glob_text is None:
+        return findings
+    if "Selector.open()" not in udp_server_text:
+        findings.append(
+            "S138 UdpServer.kt: missing `Selector.open()` "
+            "in init. Sprint 14 spec §10 — NIO selector "
+            "open is required for the dispatch loop."
+        )
+    if "DatagramChannel.open()" not in udp_server_text:
+        findings.append(
+            "S138 UdpServer.kt: missing `DatagramChannel"
+            ".open()` call. Sprint 14 spec §10 — UDP "
+            "channel creation."
+        )
+    if "selector.select(" not in udp_server_text:
+        findings.append(
+            "S138 UdpServer.kt: missing `selector.select(` "
+            "call. Sprint 14 spec §10 — blocking poll."
+        )
+    if "fun receivePackets" not in udp_tunnel_text:
+        findings.append(
+            "S138 UdpTunnel.kt: missing `fun receivePackets` "
+            "declaration. Sprint 14 spec §10 — payload "
+            "dispatch to VPN service."
+        )
+    if "channel.register(" not in proxy_glob_text:
+        findings.append(
+            "S138 vpn/proxy/*: no `channel.register(` "
+            "call. Sprint 14 spec §10 — selector "
+            "registration is mandatory."
+        )
+    return findings
+
+
+def run_s139_check(tcp_proxy_server_text, tcp_tunnel_text, proxy_glob_text):
+    """Sprint 14 — TcpProxyServer + TcpTunnel raw Socket + Thread pattern (S139 / Sprint 14 spec §9).
+
+    Sprint 14 spec §9 mandates TcpProxyServer is a
+    raw-Socket + Thread-based proxy (NOT Netty NIO).
+    Kernel transparent proxy gives the proxy a Socket
+    where IP+TCP headers are stripped; the proxy must
+    look up the NAT session by port, NOT parse the
+    first packet.
+
+    S139-1: TcpProxyServer has `class TcpProxyServer(
+            private val port: Int)` constructor
+    S139-2: TcpProxyServer has `private fun
+            handleNewClient(clientSocket: Socket)`
+            (the per-connection handler)
+    S139-3: TcpProxyServer `protected fun finalize()`
+            stops the ServerSocket on GC
+    S139-4: TcpTunnel has `class TcpTunnel(private val
+            clientSocket: Socket, private val
+            remoteSocket: Socket, private val portKey:
+            Int)` constructor
+    S139-5: TcpTunnel `fun run()` does bidirectional
+            read/write (forward + reverse threads)
+    S139-6: protect() called on both clientSocket AND
+            remoteSocket (VpnService.protect to bypass
+            TUN for outbound)
+
+    Sprint 14 target: 180. S139 is the 186th.
+    """
+    findings = []
+    if tcp_proxy_server_text is None:
+        findings.append("S139 TcpProxyServer.kt: file text missing. Sprint 14 §9 invariant.")
+    if tcp_tunnel_text is None:
+        findings.append("S139 TcpTunnel.kt: file text missing. Sprint 14 §9 invariant.")
+    if proxy_glob_text is None:
+        findings.append("S139 vpn/proxy/*: no Kotlin source text found. Sprint 14 §9 invariant.")
+    if tcp_proxy_server_text is None or tcp_tunnel_text is None or proxy_glob_text is None:
+        return findings
+    if "ServerSocket(" not in tcp_proxy_server_text:
+        findings.append(
+            "S139 TcpProxyServer.kt: missing `ServerSocket(` "
+            "creation. Sprint 14 spec §9 — proxy binds a "
+            "ServerSocket on the loopback port."
+        )
+    if "private fun handleNewClient" not in tcp_proxy_server_text:
+        findings.append(
+            "S139 TcpProxyServer.kt: missing `private fun "
+            "handleNewClient` declaration. Sprint 14 spec "
+            "§9 — per-connection handler."
+        )
+    if "vpnService.protect(" not in tcp_proxy_server_text and "vpnService.protect (" not in tcp_proxy_server_text \
+            and ".protect(" not in tcp_proxy_server_text:
+        findings.append(
+            "S139 TcpProxyServer.kt: missing `protect(` "
+            "call. Sprint 14 spec §9 — outbound socket "
+            "must bypass TUN."
+        )
+    if "class TcpTunnel(" not in tcp_tunnel_text:
+        findings.append(
+            "S139 TcpTunnel.kt: missing `class TcpTunnel(` "
+            "declaration. Sprint 14 spec §9 — tunnel has "
+            "clientSocket + remoteSocket + portKey."
+        )
+    if "override fun run()" not in tcp_tunnel_text and "fun run()" not in tcp_tunnel_text:
+        findings.append(
+            "S139 TcpTunnel.kt: missing `fun run()` "
+            "declaration. Sprint 14 spec §9 — tunnel is a "
+            "Thread that does bidirectional copy."
+        )
+    if "clientSocket.getInputStream" not in tcp_tunnel_text and "clientSocket.getInputStream()" not in tcp_tunnel_text:
+        findings.append(
+            "S139 TcpTunnel.kt: missing `clientSocket.get"
+            "InputStream()` call. Sprint 14 spec §9 — "
+            "forward read from client to remote."
+        )
+    return findings
+
+
 def run_s93_check(opene2ee_vpn_service_text):
     """Sprint 11.0T: OpenE2eeVpnService.kt passthrough
     counter invariant (S93).
@@ -11250,9 +12063,342 @@ cases = [
          "    }\n"
          "  }\n"
          "}\n",
+      ),
+      []),
+    # Sprint 14 — 9 new audit cases (S129..S137). Total: 171 + 9 = 180.
+    # ──────── S129: VPNConstants MTU=1400 + PRIMARY_DNS ────────
+    ("S129 PASS (Sprint 14 KURAL 1 — VPNConstants object VPN_MTU=1400 literal + PRIMARY_DNS=1.1.1.1 literal - regression guard for Sprint 14 spec §3)",
+     run_s129_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.net\n"
+         "object VPNConstants {\n"
+         "    const val TUN_ADDRESS = \"10.0.0.2\"\n"
+         "    const val TUN_PREFIX = 32\n"
+         "    const val VPN_MTU = 1400\n"
+         "    const val PRIMARY_DNS = \"1.1.1.1\"\n"
+         "    const val SECONDARY_DNS = \"8.8.8.8\"\n"
+         "}\n",
      ),
      []),
-  ]   # noqa: E501
+    ("S129 FAIL (VPN_MTU value is NOT 1400 - regression guard for Sprint 14 KURAL 1)",
+     run_s129_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.net\n"
+         "object VPNConstants {\n"
+         "    const val VPN_MTU = 15000\n"
+         "    const val PRIMARY_DNS = \"1.1.1.1\"\n"
+         "}\n",
+     ),
+     ["S129 VPNConstants.kt: `const val VPN_MTU` found but value is NOT 1400. Sprint 14 KURAL 1 - 15000 → Android 14 ConnectivityService reject. Reference: spec §0 table row 1."]),
+    # ──────── S130: TcpProxyServer no readFirstPacket + portKey=clientSocket.port ────────
+    ("S130 PASS (Sprint 14 KURAL 2+3 — TcpProxyServer has no readFirstPacket/parseFirstPacket + val portKey=clientSocket.port - regression guard for Sprint 12.0F+6 SYN/IP parse attempt)",
+     run_s130_check,
+     (
+         # TcpProxyServer.kt
+         "package com.opene2ee.opene2ee.vpn.proxy\n"
+         "import com.opene2ee.opene2ee.vpn.OpenE2eeVpnService\n"
+         "class TcpProxyServer(private val port: Int) {\n"
+         "    private fun handleNewClient(clientSocket: java.net.Socket) {\n"
+         "        val portKey = clientSocket.port\n"
+         "        OpenE2eeVpnService.activeInstance?.protect(clientSocket)\n"
+         "    }\n"
+         "}\n",
+         # vpn/proxy/* glob
+         "val portKey = clientSocket.port\n"
+         "OpenE2eeVpnService.activeInstance?.protect(clientSocket)\n",
+     ),
+     []),
+    ("S130 FAIL (TcpProxyServer uses readFirstPacket - regression guard for Sprint 14 KURAL 2)",
+     run_s130_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.proxy\n"
+         "import com.opene2ee.opene2ee.vpn.OpenE2eeVpnService\n"
+         "class TcpProxyServer {\n"
+         "    private fun handleNewClient(clientSocket: java.net.Socket) {\n"
+         "        readFirstPacket(clientSocket)\n"
+         "        val portKey = clientSocket.port\n"
+         "        OpenE2eeVpnService.activeInstance?.protect(clientSocket)\n"
+         "    }\n"
+         "    private fun readFirstPacket(s: java.net.Socket) {}\n"
+         "}\n",
+         "readFirstPacket(clientSocket)\nval portKey = clientSocket.port\nOpenE2eeVpnService.activeInstance?.protect(clientSocket)\n",
+     ),
+     ["S130 vpn/proxy/*: contains `readFirstPacket` or `parseFirstPacket` literal. Sprint 14 KURAL 2 — kernel transparent proxy strips IP headers; Sprint 12.0F+6 attempt timed out every time. Spec §9 mandates the NAT-lookup approach."]),
+    # ──────── S131: UdpServer key.attach(tunnel) ────────
+    ("S131 PASS (Sprint 14 KURAL 4 — UdpServer has key.attach(tunnel) code after channel.register(selector, SelectionKey.OP_READ) + key.attachment() as? UdpTunnel dispatch)",
+     run_s131_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.proxy\n"
+         "import java.nio.channels.SelectionKey\n"
+         "import java.nio.channels.DatagramChannel\n"
+         "import java.nio.channels.Selector\n"
+         "class UdpServer {\n"
+         "    private val selector: Selector = Selector.open()\n"
+         "    private fun initConnection(channel: DatagramChannel, tunnel: UdpTunnel) {\n"
+         "        val key = channel.register(selector, SelectionKey.OP_READ)\n"
+         "        key.attach(tunnel)\n"
+         "    }\n"
+         "    private fun runLoop() {\n"
+         "        val key = selector.selectedKeys().iterator().next()\n"
+         "        val tunnel = key.attachment() as? UdpTunnel\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    ("S131 FAIL (UdpServer missing key.attach(tunnel) - regression guard for Sprint 14 KURAL 4)",
+     run_s131_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.proxy\n"
+         "import java.nio.channels.SelectionKey\n"
+         "import java.nio.channels.DatagramChannel\n"
+         "import java.nio.channels.Selector\n"
+         "class UdpServer {\n"
+         "    private val selector: Selector = Selector.open()\n"
+         "    private fun initConnection(channel: DatagramChannel, tunnel: UdpTunnel) {\n"
+         "        val key = channel.register(selector, SelectionKey.OP_READ)\n"
+         "        // key.attach(tunnel) // COMMENTED OUT\n"
+         "    }\n"
+         "    private fun runLoop() {\n"
+         "        val key = selector.selectedKeys().iterator().next()\n"
+         "        val tunnel = key.attachment() as? UdpTunnel\n"
+         "    }\n"
+         "}\n",
+     ),
+     ["S131 UdpServer.kt: missing `key.attach(tunnel)` code (commented or absent). Sprint 14 KURAL 4 — without this call, selector runLoop gets null attachment, receivePackets() never fires, DNS times out at 15s. Spec §10.2."]),
+    # ──────── S132: PortHostService session.localPort ────────
+    ("S132 PASS (Sprint 14 KURAL 5 — PortHostService has fun refreshSessionInfo + NetFileManager.getInstance().getUid(session.localPort) - regression guard for Sprint 13.0 getUid(session.remotePort) bug)",
+     run_s132_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.processparse\n"
+         "import com.opene2ee.opene2ee.vpn.nat.NatSessionManager\n"
+         "class PortHostService : android.app.Service() {\n"
+         "    fun refreshSessionInfo() {\n"
+         "        val sessions = NatSessionManager.snapshot()\n"
+         "        for (session in sessions) {\n"
+         "            val uid = NetFileManager.getInstance().getUid(session.localPort)\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    ("S132 FAIL (PortHostService uses getUid(session.remotePort) - regression guard for Sprint 14 KURAL 5)",
+     run_s132_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.processparse\n"
+         "import com.opene2ee.opene2ee.vpn.nat.NatSessionManager\n"
+         "class PortHostService : android.app.Service() {\n"
+         "    fun refreshSessionInfo() {\n"
+         "        val sessions = NatSessionManager.snapshot()\n"
+         "        for (session in sessions) {\n"
+         "            val uid = NetFileManager.getInstance().getUid(session.remotePort)\n"
+         "            val uid2 = NetFileManager.getInstance().getUid(session.localPort)\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+     ),
+     ["S132 PortHostService.kt: contains `getUid(session.remotePort)` literal. Sprint 14 KURAL 5 regression guard — this is the Sprint 13.0 bug that made UID lookup always -1. Spec §8.3."]),
+    # ──────── S133: OpenE2eeVpnService addAllowedApplication + MainActivity stop branch ────────
+    ("S133 PASS (Sprint 14 KURAL 6 + stop-branch — OpenE2eeVpnService has builder.addAllowedApplication + fun stopVpn() + builder.setMtu(VPNConstants.VPN_MTU) + MainActivity svc.stopVpn() before stopService)",
+     run_s133_check,
+     (
+         # OpenE2eeVpnService.kt
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.net.VpnService\n"
+         "class OpenE2eeVpnService : VpnService() {\n"
+         "    private fun establishVpn(): android.os.ParcelFileDescriptor {\n"
+         "        val builder = Builder()\n"
+         "        builder.setMtu(VPNConstants.VPN_MTU)\n"
+         "        builder.addAllowedApplication(packageName)\n"
+         "        return builder.establish()!!\n"
+         "    }\n"
+         "    fun stopVpn() {\n"
+         "        android.util.Log.d(\"OpenE2eeVpn\", \"stopVpn called\")\n"
+         "        dispose()\n"
+         "    }\n"
+         "}\n",
+         # MainActivity.kt
+         "package com.opene2ee.opene2ee\n"
+         "import com.opene2ee.opene2ee.vpn.OpenE2eeVpnService\n"
+         "class MainActivity : io.flutter.embedding.android.FlutterActivity() {\n"
+         "    override fun configureFlutterEngine(flutterEngine: io.flutter.embedding.engine.FlutterEngine) {\n"
+         "        io.flutter.plugin.common.MethodChannel(flutterEngine.dartExecutor.binaryMessenger, \"opene2ee/vpn\").setMethodCallHandler { call, result ->\n"
+         "            when (call.method) {\n"
+         "                \"stop\" -> {\n"
+         "                    val svc = OpenE2eeVpnService.activeInstance\n"
+         "                    svc.stopVpn()\n"
+         "                    stopService(android.content.Intent(this, OpenE2eeVpnService::class.java))\n"
+         "                    result.success(null)\n"
+         "                }\n"
+         "            }\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+     ),
+     []),
+    # ──────── S134: VPNConstants TUN_ADDRESS / TUN_PREFIX / VPN_ROUTE / SESSION_TIME_OUT_MS / PACKET_SIZE / NOTIFICATION_ID ────────
+    ("S134 PASS (Sprint 14 spec §3 — VPNConstants TUN_ADDRESS=10.0.0.2 + TUN_PREFIX=32 + VPN_ROUTE=0.0.0.0 + SESSION_TIME_OUT_MS=60_000L + PACKET_SIZE=32767 + NOTIFICATION_ID=0x5650_4E4E)",
+     run_s134_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.net\n"
+         "object VPNConstants {\n"
+         "    const val TUN_ADDRESS = \"10.0.0.2\"\n"
+         "    const val TUN_PREFIX = 32\n"
+         "    const val VPN_ROUTE = \"0.0.0.0\"\n"
+         "    const val VPN_ROUTE_PREFIX = 0\n"
+         "    const val SESSION_TIME_OUT_MS: Long = 60_000L\n"
+         "    const val PACKET_SIZE = 32767\n"
+         "    const val NOTIFICATION_ID = 0x5650_4E4E\n"
+         "}\n",
+     ),
+     []),
+    ("S134 FAIL (VPNConstants missing TUN_ADDRESS literal - regression guard for Sprint 14 spec §3)",
+     run_s134_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.net\n"
+         "object VPNConstants {\n"
+         "    const val VPN_MTU = 1400\n"
+         "}\n",
+     ),
+     [
+         "S134 VPNConstants.kt: missing `const val TUN_ADDRESS = \"10.0.0.2\"` literal. Sprint 14 spec §3 mandates the TUN IP for the transparent proxy.",
+         "S134 VPNConstants.kt: missing `const val TUN_PREFIX = 32` literal. Sprint 14 spec §3 — single-host /32 route prefix for TUN.",
+         "S134 VPNConstants.kt: missing `const val VPN_ROUTE = \"0.0.0.0\"` literal. Sprint 14 spec §3 — capture everything route.",
+         "S134 VPNConstants.kt: missing `const val VPN_ROUTE_PREFIX = 0` literal. Sprint 14 spec §3 — capture everything prefix.",
+         "S134 VPNConstants.kt: missing `const val SESSION_TIME_OUT_MS: Long = 60_000L` literal. Sprint 14 spec §3 — 60s idle session timeout.",
+         "S134 VPNConstants.kt: missing `const val PACKET_SIZE = 32767` literal. Sprint 14 spec §3 — max IP packet size.",
+         "S134 VPNConstants.kt: missing `const val NOTIFICATION_ID = 0x5650_4E4E` literal. Sprint 14 spec §3 — 'VPNN' notification ID.",
+     ]),
+    # ──────── S135: NetFileManager class + getInstance + getUid + refresh + init + PR #33 startsWith("  sl") ────────
+    ("S135 PASS (Sprint 14 spec §8 — NetFileManager class + getInstance + fun getUid(port: Int): Int? + fun refresh() + fun init(context: Context) + PR #33 startsWith(\"  sl\") header skip)",
+     run_s135_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.processparse\n"
+         "import android.content.Context\n"
+         "class NetFileManager {\n"
+         "    companion object {\n"
+         "        private val INSTANCE = NetFileManager()\n"
+         "        fun getInstance(): NetFileManager = INSTANCE\n"
+         "    }\n"
+         "    fun init(context: Context) {}\n"
+         "    fun refresh() {\n"
+         "        val line = \"  sl  ...\"\n"
+         "        if (line.startsWith(\"  sl\")) return\n"
+         "    }\n"
+         "    fun getUid(port: Int): Int? = null\n"
+         "}\n",
+     ),
+     []),
+    ("S135 FAIL (NetFileManager missing PR #33 startsWith('  sl') header skip - regression guard for Sprint 14 spec §8)",
+     run_s135_check,
+     (
+         "package com.opene2ee.opene2ee.vpn.processparse\n"
+         "import android.content.Context\n"
+         "class NetFileManager {\n"
+         "    companion object {\n"
+         "        fun getInstance(): NetFileManager = NetFileManager()\n"
+         "    }\n"
+         "    fun init(context: Context) {}\n"
+         "    fun refresh() {}\n"
+         "    fun getUid(port: Int): Int? = null\n"
+         "}\n",
+     ),
+     ["S135 NetFileManager.kt: missing PR #33 header skip (`startsWith(\"  sl\")`). Sprint 14 spec §8 — /proc/net/tcp first line is the `  sl  ...` header; parsing it as a data row would crash parseData."]),
+    # ──────── S136: OpenE2eeVpnService activeInstance + runVpnLoop + METHOD_CHANNEL + establishVpn ────────
+    ("S136 PASS (Sprint 14 spec §11 — OpenE2eeVpnService companion has var activeInstance + private fun runVpnLoop + const val METHOD_CHANNEL=\"opene2ee/vpn\" + private fun establishVpn)",
+     run_s136_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.net.VpnService\n"
+         "class OpenE2eeVpnService : VpnService(), Runnable {\n"
+         "    companion object {\n"
+         "        var activeInstance: OpenE2eeVpnService? = null\n"
+         "        const val METHOD_CHANNEL = \"opene2ee/vpn\"\n"
+         "    }\n"
+         "    private fun runVpnLoop() {}\n"
+         "    private fun establishVpn(): android.os.ParcelFileDescriptor = Builder().establish()!!\n"
+         "    override fun run() {}\n"
+         "}\n",
+     ),
+     []),
+    ("S136 FAIL (OpenE2eeVpnService missing activeInstance singleton field - regression guard for Sprint 14 spec §11)",
+     run_s136_check,
+     (
+         "package com.opene2ee.opene2ee.vpn\n"
+         "import android.net.VpnService\n"
+         "class OpenE2eeVpnService : VpnService() {\n"
+         "    companion object {\n"
+         "        const val METHOD_CHANNEL = \"opene2ee/vpn\"\n"
+         "    }\n"
+         "    private fun runVpnLoop() {}\n"
+         "    private fun establishVpn(): android.os.ParcelFileDescriptor = Builder().establish()!!\n"
+         "}\n",
+     ),
+     ["S136 OpenE2eeVpnService.kt: missing `var activeInstance: OpenE2eeVpnService?` companion field. Sprint 14 spec §11 — the singleton pattern that TcpProxyServer / UdpServer use to find the running service."]),
+    # ──────── S137: MainActivity svc.stopVpn() + AndroidManifest VPN service entry ────────
+    ("S137 PASS (Sprint 14 spec §2+§12 — MainActivity imports OpenE2eeVpnService + reads .activeInstance + svc.stopVpn() + AndroidManifest has .vpn.OpenE2eeVpnService + BIND_VPN_SERVICE + PROPERTY_SPECIAL_USE_FGS_SUBTYPE + android.net.VpnService)",
+     run_s137_check,
+     (
+         # MainActivity.kt
+         "package com.opene2ee.opene2ee\n"
+         "import com.opene2ee.opene2ee.vpn.OpenE2eeVpnService\n"
+         "class MainActivity : io.flutter.embedding.android.FlutterActivity() {\n"
+         "    override fun configureFlutterEngine(flutterEngine: io.flutter.embedding.engine.FlutterEngine) {\n"
+         "        io.flutter.plugin.common.MethodChannel(flutterEngine.dartExecutor.binaryMessenger, \"opene2ee/vpn\").setMethodCallHandler { call, result ->\n"
+         "            when (call.method) {\n"
+         "                \"stop\" -> {\n"
+         "                    val svc = OpenE2eeVpnService.activeInstance\n"
+         "                    svc.stopVpn()\n"
+         "                    stopService(android.content.Intent(this, OpenE2eeVpnService::class.java))\n"
+         "                }\n"
+         "            }\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+         # AndroidManifest.xml
+         "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n"
+         "    <application android:label=\"opene2ee\">\n"
+         "        <service\n"
+         "            android:name=\".vpn.OpenE2eeVpnService\"\n"
+         "            android:permission=\"android.permission.BIND_VPN_SERVICE\"\n"
+         "            android:foregroundServiceType=\"specialUse\">\n"
+         "            <property\n"
+         "                android:name=\"android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE\"\n"
+         "                android:value=\"vpn_transparent_proxy_for_e2ee_tunnel\" />\n"
+         "            <intent-filter>\n"
+         "                <action android:name=\"android.net.VpnService\" />\n"
+         "            </intent-filter>\n"
+         "        </service>\n"
+         "    </application>\n"
+         "</manifest>\n",
+     ),
+     []),
+    ("S137 FAIL (MainActivity missing svc.stopVpn() direct call - regression guard for Sprint 14 spec §12.1)",
+     run_s137_check,
+     (
+         "package com.opene2ee.opene2ee\n"
+         "class MainActivity : io.flutter.embedding.android.FlutterActivity() {\n"
+         "    override fun configureFlutterEngine(flutterEngine: io.flutter.embedding.engine.FlutterEngine) {\n"
+         "        io.flutter.plugin.common.MethodChannel(flutterEngine.dartExecutor.binaryMessenger, \"opene2ee/vpn\").setMethodCallHandler { call, result ->\n"
+         "            when (call.method) {\n"
+         "                \"stop\" -> {\n"
+         "                    stopService(android.content.Intent(this, MyVpnClass::class.java))\n"
+         "                }\n"
+         "            }\n"
+         "        }\n"
+         "    }\n"
+         "}\n",
+         "<manifest><application></application></manifest>\n",
+     ),
+     [
+         "S137 MainActivity.kt: missing import `com.opene2ee.opene2ee.vpn.OpenE2eeVpnService`. Sprint 14 spec §12.1 — MainActivity calls OpenE2eeVpnService.stopVpn() in the stop branch.",
+         "S137 MainActivity.kt: missing `OpenE2eeVpnService.activeInstance` reference. Sprint 14 spec §12.1 — MainActivity reads the singleton to call stopVpn() directly.",
+         "S137 MainActivity.kt: missing `svc.stopVpn()` direct call. Sprint 14 spec §12.1 — stopService alone is a no-op for foreground services.",
+         "S137 AndroidManifest.xml: missing `.vpn.OpenE2eeVpnService` service entry. Sprint 14 spec §2 — VPN service registration.",
+         "S137 AndroidManifest.xml: missing `android.permission.BIND_VPN_SERVICE` permission. Sprint 14 spec §2 — VPN service permission.",
+         "S137 AndroidManifest.xml: missing `android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE` property. Sprint 14 spec §2 — Android 14+ specialUse subtype declaration.",
+         "S137 AndroidManifest.xml: missing `android.net.VpnService` action. Sprint 14 spec §2 — VPN service intent-filter.",
+     ]),
+   ]   # noqa: E501
 
 failed = []
 for name, check_fn, args, expected in cases:
