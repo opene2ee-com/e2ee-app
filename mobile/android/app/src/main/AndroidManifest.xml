@@ -138,47 +138,36 @@
         </activity>
 
         <!--
-          OpenE2eeVpnService — the Android VpnService implementation.
+          OpenE2eeVpnService — the Android VpnService implementation
+          (Sprint 16 — wirebare-tarzı VpnService, ACTION_START/STOP).
 
           android:permission="android.permission.BIND_VPN_SERVICE" restricts
           who can bind to this service to the system (so only the OS VPN
           framework can deliver a TUN descriptor). android:exported="true"
-          is required for the VPN framework to bind to us.
+          is required for the VPN framework to bind to us, plus the
+          custom START/STOP actions must be visible to the MainActivity
+          (which sends them via startService(startIntent)).
 
-          android:foregroundServiceType="specialUse" is the Android 14+
-          requirement for VPN services that don't fall under the system
-          category. The <property> tag explains the special use case.
+          android:foregroundServiceType="dataSync" replaces Sprint 14's
+          "specialUse" — wirebare default; Android 14+ (API 34) on most
+          OEM ROMs (MIUI, OxygenOS) prefers dataSync for VPN services.
+          The dataSync permission (FOREGROUND_SERVICE_DATA_SYNC) is
+          already declared above in this manifest (Sprint 11.0A).
 
-          Sprint 11.0A — Service description updated to mirror the
-          new "OpenE2EE Şifreleme Doğrulama" notification title
-          (S25 invariant: no "VPN" string anywhere user-visible).
-          The PRIVACY_TEXT eki ("Ağınızda şifreleme bütünlüğü
-          doğrulama oturumu — sadece /24 (IPv4) ve /48 (IPv6) maskeli
-          IP üstbilgisi cihazdan dışarı çıkar") is the disclosure
-          required by Android 14+ specialUse subtype. See
-          docs/ADR-0006-anonimlik.md §"Veri Minimizasyonu".
-        -->
-        <!--
-          Sprint 14 — VpnService clean-room rewrite.
-          Replaces Sprint 12.0C/12.0F+/13.0 service entry with the
-          .vpn.OpenE2eeVpnService class relocated into the
-          com.opene2ee.opene2ee.vpn package. android:exported is
-          now false (only the MainActivity's explicit Intent
-          starts it; the system binds via BIND_VPN_SERVICE).
-          android:description removed (no string reference
-          needed — the notification title is the user-visible
-          surface, the channel description is set in code).
+          The <intent-filter> now exposes three actions:
+            - android.net.VpnService        → system BIND_VPN_SERVICE
+            - com.opene2ee...action.START   → MainActivity
+            - com.opene2ee...action.STOP    → MainActivity
         -->
         <service
-            android:name=".vpn.OpenE2eeVpnService"
-            android:exported="false"
+            android:name="com.opene2ee.opene2ee.vpn.OpenE2eeVpnService"
+            android:exported="true"
             android:permission="android.permission.BIND_VPN_SERVICE"
-            android:foregroundServiceType="specialUse">
-          <property
-              android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-              android:value="vpn_transparent_proxy_for_e2ee_tunnel" />
+            android:foregroundServiceType="dataSync">
           <intent-filter>
             <action android:name="android.net.VpnService" />
+            <action android:name="com.opene2ee.opene2ee.vpn.action.START" />
+            <action android:name="com.opene2ee.opene2ee.vpn.action.STOP" />
           </intent-filter>
         </service>
 

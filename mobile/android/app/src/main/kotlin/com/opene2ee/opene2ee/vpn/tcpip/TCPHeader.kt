@@ -1,85 +1,84 @@
-// mobile/android/app/src/main/kotlin/com/opene2ee/opene2ee/vpn/tcpip/TCPHeader.kt
-//
-// Sprint 14 — TCP header parser/mutator.
-// Referans: huolizhuminh/NetWorkPacketCapture TCPHeader.java.
-
 package com.opene2ee.opene2ee.vpn.tcpip
 
-import androidx.annotation.Keep
-import com.opene2ee.opene2ee.vpn.util.CommonMethods
+import com.opene2ee.opene2ee.vpn.net.IPHeader
+import com.opene2ee.opene2ee.vpn.net.Port
+import com.opene2ee.opene2ee.vpn.util.calculateSum
+import com.opene2ee.opene2ee.vpn.util.readByte
+import com.opene2ee.opene2ee.vpn.util.readInt
+import com.opene2ee.opene2ee.vpn.util.readShort
+import com.opene2ee.opene2ee.vpn.util.writeByte
+import com.opene2ee.opene2ee.vpn.util.writeShort
+import kotlin.experimental.and
 
-@Keep
-class TCPHeader {
-    @Keep
+class TcpHeader(
+    private val ipHeader: IPHeader,
+    private val packet: ByteArray,
+    private val offset: Int
+) {
     companion object {
-        const val OFFSET_SRC_PORT = 0
-        const val OFFSET_DST_PORT = 2
-        const val OFFSET_SEQ = 4
-        const val OFFSET_ACK = 8
-        const val OFFSET_LEN_RES = 12      // 4-bit length + 4-bit reserved
-        const val OFFSET_FLAG = 13
-        const val OFFSET_WIN = 14
-        const val OFFSET_CRC = 16
-        const val OFFSET_URP = 18
-
-        const val FIN: Int = 1
-        const val SYN: Int = 2
-        const val RST: Int = 4
-        const val PSH: Int = 8
-        const val ACK: Int = 16
-        const val URG: Int = 32
+        private const val OFFSET_SOURCE_PORT = 0
+        private const val OFFSET_DESTINATION_PORT = 2
+        private const val OFFSET_SEQUENCE_NUMBER = 4
+        private const val OFFSET_ACKNOWLEDGMENT_NUMBER = 8
+        private const val OFFSET_OFFSET = 12
+        private const val OFFSET_FLAG = 13
+        private const val OFFSET_WINDOW = 14
+        private const val OFFSET_CHECK_SUM = 16
+        private const val MASK_FIN: Byte = 0b00000001
+        private const val MASK_SYN: Byte = 0b00000010
+        private const val MASK_RST: Byte = 0b00000100
+        private const val MASK_PSH: Byte = 0b00001000
+        private const val MASK_ACK: Byte = 0b00010000
     }
 
-    @Keep var mData: ByteArray = ByteArray(0)
-    @Keep var mOffset: Int = 0
+    var sourcePort: Port
+        get() = Port(packet.readShort(offset + OFFSET_SOURCE_PORT))
+        set(value) = packet.writeShort(value.port, offset + OFFSET_SOURCE_PORT)
 
-    @Keep constructor()
+    var destinationPort: Port
+        get() = Port(packet.readShort(offset + OFFSET_DESTINATION_PORT))
+        set(value) = packet.writeShort(value.port, offset + OFFSET_DESTINATION_PORT)
 
-    @Keep
-    constructor(data: ByteArray, offset: Int) {
-        mData = data
-        mOffset = offset
+    val sequenceNumber: Int get() = packet.readInt(offset + OFFSET_SEQUENCE_NUMBER)
+    val acknowledgmentNumber: Int get() = packet.readInt(offset + OFFSET_ACKNOWLEDGMENT_NUMBER)
+
+    val headerLength: Int
+        get() = packet.readByte(offset + OFFSET_OFFSET).toInt() and 0xFF ushr 4 shl 2
+
+    val dataLength: Int get() = ipHeader.dataLength - headerLength
+
+    var flag: Byte
+        get() = packet.readByte(offset + OFFSET_FLAG)
+        set(value) = packet.writeByte(value, offset + OFFSET_FLAG)
+
+    val fin: Boolean get() = flag and MASK_FIN == MASK_FIN
+    val syn: Boolean get() = flag and MASK_SYN == MASK_SYN
+    val rst: Boolean get() = flag and MASK_RST == MASK_RST
+    val psh: Boolean get() = flag and MASK_PSH == MASK_PSH
+    val ack: Boolean get() = flag and MASK_ACK == MASK_ACK
+
+    var window: Int
+        get() = packet.readShort(OFFSET_WINDOW).toInt() and 0xFFFF
+        set(value) = packet.writeShort((value and 0xFFFF).toShort(), offset + OFFSET_CHECK_SUM)
+
+    var checkSum: Short
+        get() = packet.readShort(offset + OFFSET_CHECK_SUM)
+        private set(value) = packet.writeShort(value, offset + OFFSET_CHECK_SUM)
+
+    fun notifyCheckSum() {
+        checkSum = 0.toShort()
+        checkSum = calculateChecksum()
     }
 
-    @Keep
-    fun getHeaderLength(): Int {
-        val lenres = mData[mOffset + OFFSET_LEN_RES].toInt() and 0xFF
-        return (lenres shr 4) * 4
-    }
-
-    @Keep
-    fun getSourcePort(): Int {
-        return CommonMethods.readShort(mData, mOffset + OFFSET_SRC_PORT).toInt() and 0xFFFF
-    }
-
-    @Keep
-    fun setSourcePort(value: Int) {
-        CommonMethods.writeShort(mData, mOffset + OFFSET_SRC_PORT, (value and 0xFFFF).toShort())
-    }
-
-    @Keep
-    fun getDestinationPort(): Int {
-        return CommonMethods.readShort(mData, mOffset + OFFSET_DST_PORT).toInt() and 0xFFFF
-    }
-
-    @Keep
-    fun setDestinationPort(value: Int) {
-        CommonMethods.writeShort(mData, mOffset + OFFSET_DST_PORT, (value and 0xFFFF).toShort())
-    }
-
-    @Keep
-    fun getFlag(): Byte {
-        return mData[mOffset + OFFSET_FLAG]
-    }
-
-    override fun toString(): String {
-        val f = getFlag().toInt() and 0xFF
-        return "TCPHeader{sp=${getSourcePort()}, dp=${getDestinationPort()}, flag=${
-            (if (f and SYN != 0) "SYN" else "") +
-            (if (f and ACK != 0) "ACK" else "") +
-            (if (f and PSH != 0) "PSH" else "") +
-            (if (f and FIN != 0) "FIN" else "") +
-            (if (f and RST != 0) "RST" else "")
-        }}"
+    private fun calculateChecksum(): Short {
+        val totalLength = ipHeader.dataLength
+        var sum: Int = ipHeader.addressSum
+        sum += ipHeader.dataProtocol.toInt() and 0xF
+        sum += totalLength
+        sum += packet.calculateSum(offset, totalLength)
+        while ((sum shr 16) != 0) {
+            sum = (sum and 0xFFFF) + (sum shr 16)
+        }
+        return sum.inv().toShort()
     }
 }
