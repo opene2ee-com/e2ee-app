@@ -1,0 +1,98 @@
+/*
+ * MIT License
+ *
+ * Copyright (c) 2025 KokomiQAQ
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http
+
+import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpInterceptChain
+import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpTunnel
+import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.TcpSession
+import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.Clock
+
+class HttpTcpInterceptor(
+    configuration: WireBareConfiguration
+) : TcpInterceptor {
+    private val httpVirtualGateway = HttpVirtualGateway(configuration)
+    private val sessionMap = ConcurrentHashMap<TcpSession, HttpSession>()
+    override fun onRequest(
+        chain: TcpInterceptChain,
+        buffer: ByteBuffer,
+        session: TcpSession,
+        tunnel: TcpTunnel
+    ) {
+        httpVirtualGateway.onRequest(buffer, takeHttpSession(session), tunnel)
+        super.onRequest(chain, buffer, session, tunnel)
+    }
+
+    override fun onRequestFinished(
+        chain: TcpInterceptChain,
+        session: TcpSession,
+        tunnel: TcpTunnel
+    ) {
+        httpVirtualGateway.onRequestFinished(takeHttpSession(session), tunnel)
+        super.onRequestFinished(chain, session, tunnel)
+    }
+
+    override fun onResponse(
+        chain: TcpInterceptChain,
+        buffer: ByteBuffer,
+        session: TcpSession,
+        tunnel: TcpTunnel
+    ) {
+        httpVirtualGateway.onResponse(buffer, takeHttpSession(session), tunnel)
+        super.onResponse(chain, buffer, session, tunnel)
+    }
+
+    override fun onResponseFinished(
+        chain: TcpInterceptChain,
+        session: TcpSession,
+        tunnel: TcpTunnel
+    ) {
+        val httpSession = takeHttpSession(session)
+        httpVirtualGateway.onResponseFinished(httpSession, tunnel)
+        super.onResponseFinished(chain, session, tunnel)
+    }
+
+    private fun takeHttpSession(tcpSession: TcpSession): HttpSession {
+        return sessionMap.getOrPut(tcpSession) {
+            val requestTime = Clock.System.now().toEpochMilliseconds()
+            val request = HttpRequest().also {
+                it.requestTime = requestTime
+                it.sourcePort = tcpSession.sourcePort.port
+                it.destinationAddress = tcpSession.destinationAddress.stringIP
+                it.destinationPort = tcpSession.destinationPort.port
+            }
+            val response = HttpResponse().also {
+                it.requestTime = requestTime
+                it.sourcePort = tcpSession.sourcePort.port
+                it.destinationAddress = tcpSession.destinationAddress.stringIP
+                it.destinationPort = tcpSession.destinationPort.port
+            }
+            HttpSession(request, response, tcpSession)
+        }
+    }
+}

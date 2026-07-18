@@ -1,0 +1,70 @@
+[versions]
+minSdk = "23"
+targetSdk = "36"
+ndk = "27.0.11902837"
+versionCode = "3"
+versionName = "0.2"
+
+androidxCoreKtx = "1.17.0"
+androidxAppcompat = "1.7.1"
+androidMeterial = "1.13.0"
+androidxLifecycle = "2.10.0"
+jetpackCompose = "1.7.8"
+activityCompose = "1.12.2"
+composeBom = "2025.12.01"
+datastore = "1.2.0"
+coilComposeKt = "2.7.0"
+brotliDec = "0.1.2"
+kotlinxCoroutines = "1.10.2"
+ktxJson = "1.9.0"
+bouncycastle = "1.70"
+androidxRoom = "2.8.4"
+vico = "2.3.6"
+okhttp = "5.3.2"
+ktxDatetime = "0.7.1"
+
+agp = "8.13.2"
+kotlin = "2.3.0"
+ksp = "2.3.4"
+kotlinParcelize = "2.3.0"
+
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCoreKtx" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "androidxAppcompat" }
+android-material = { group = "com.google.android.material", name = "material", version.ref = "androidMeterial" }
+androidx-lifecycle = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "androidxLifecycle" }
+androidx-lifecycle-service = { group = "androidx.lifecycle", name = "lifecycle-service", version.ref = "androidxLifecycle" }
+androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "androidxLifecycle" }
+activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+compose-ui = { group = "androidx.compose.ui", name = "ui" }
+compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+datastore-preference = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+coil-compose-kt = { group = "io.coil-kt", name = "coil-compose", version.ref = "coilComposeKt" }
+ktx-coroutines = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+ktx-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "ktxJson"}
+bouncycastle-bcpkix = { group = "org.bouncycastle", name = "bcpkix-jdk15on", version.ref = "bouncycastle" }
+bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk15on", version.ref = "bouncycastle" }
+brotli-dec = { group = "org.brotli", name = "dec", version.ref = "brotliDec" }
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "androidxRoom"}
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "androidxRoom"}
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "androidxRoom"}
+vico-core = { group = "com.patrykandpatrick.vico", name = "core", version.ref = "vico" }
+vico-compose = { group = "com.patrykandpatrick.vico", name = "compose", version.ref = "vico" }
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+ktx-datetime = { group = "org.jetbrains.kotlinx", name = "kotlinx-datetime", version.ref = "ktxDatetime" }
+
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+jetbrains-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+kotlin-symbol-processing = { id = "com.google.devtools.ksp", version.ref = "ksp"}
+kotlin-parcelize = { id = "org.jetbrains.kotlin.plugin.parcelize", version.ref = "kotlinParcelize" }
+
