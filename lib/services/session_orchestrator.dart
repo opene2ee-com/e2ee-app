@@ -328,14 +328,32 @@ class SessionOrchestrator {
     }
   }
 
-  /// Tear down: close the peer connection. The
-  /// `DELETE /api/v1/sessions/{id}` round-trip is skipped —
-  /// the route isn't in Kong on the test environment as of
-  /// Sprint 23.0 (the server-side 15-minute TTL is the
-  /// safety net). Idempotent.
+  /// Tear down: close the peer connection + DELETE the
+  /// session from the backend. The DELETE is best-effort
+  /// (404 = already gone, network error = server-side 15-min
+  /// TTL takes over). The route was missing in Kong
+  /// during Sprint 23.0 but was re-enabled in Sprint 23.2
+  /// (returns `{"deleted":true}` with 200, idempotent on
+  /// replay).
   Future<void> tearDown() async {
     _tornDown = true;
     await _webrtc.close();
+    final id = _sessionId;
+    if (id != null) {
+      try {
+        final headers = await _auth.authHeaders();
+        await _client
+            .delete(
+              Uri.parse('${AppConfig.apiBase}/api/v1/sessions/$id'),
+              headers: headers,
+            )
+            .timeout(const Duration(seconds: 5));
+      } catch (_) {
+        // Best-effort: the server's 15-minute TTL cleans up
+        // orphan sessions anyway. Don't fail tearDown over
+        // a DELETE error.
+      }
+    }
     _sessionId = null;
     _mode = null;
     _taskType = null;

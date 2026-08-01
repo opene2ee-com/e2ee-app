@@ -310,28 +310,86 @@ void main() {
     });
   });
 
-  group('tearDown (Sprint 23.0)', () {
-    test('does NOT call DELETE /api/v1/sessions/{id} (route missing)',
+  group('tearDown (Sprint 23.2)', () {
+    test('calls DELETE /api/v1/sessions/{id} (route re-enabled in 23.2)',
         () async {
       var deleteCalled = false;
+      String? deletePath;
       final orch = buildOrch(
         client: MockClient((req) async => http.Response('', 204)),
         extraHandler: (req) async {
+          if (req.url.path == '/api/v1/sessions' && req.method == 'POST') {
+            return http.Response(
+              jsonEncode({
+                'id': 'b841b8b6-ece6-413b-ab8c-b5db78cca445',
+                'mode': 'p2p', 'task_type': 'whatsapp_image',
+                'status': 'pending',
+              }),
+              201,
+              headers: {'Content-Type': 'application/json'},
+            );
+          }
           if (req.method == 'DELETE' &&
               req.url.path.contains('/api/v1/sessions/')) {
             deleteCalled = true;
-            return http.Response('', 204);
+            deletePath = req.url.path;
+            return http.Response(
+              jsonEncode({
+                'deleted': true,
+                'session_id': 'b841b8b6-ece6-413b-ab8c-b5db78cca445',
+              }),
+              200,
+              headers: {'Content-Type': 'application/json'},
+            );
           }
           return http.Response('not found', 404);
         },
       );
 
+      await orch.startSession(
+        mode: SessionMode.p2p,
+        taskType: TaskType.whatsappImage,
+      );
       await orch.tearDown();
-      expect(deleteCalled, isFalse,
-          reason: 'Sprint 23.0: DELETE /api/v1/sessions/{id} is NOT '
-              'in Kong on the test environment — tearDown must NOT '
-              'attempt the round-trip. Re-enable in Sprint 24+ when '
-              'the route is added back.');
+      expect(deleteCalled, isTrue,
+          reason: 'Sprint 23.2: DELETE /api/v1/sessions/{id} is back '
+              'in Kong — tearDown MUST clean up the server-side row.');
+      expect(deletePath, '/api/v1/sessions/b841b8b6-ece6-413b-ab8c-b5db78cca445');
+      orch.close();
+    });
+
+    test('DELETE failure does NOT throw (best-effort cleanup)', () async {
+      final orch = buildOrch(
+        client: MockClient((req) async => http.Response('', 204)),
+        extraHandler: (req) async {
+          if (req.url.path == '/api/v1/sessions' && req.method == 'POST') {
+            return http.Response(
+              jsonEncode({
+                'id': 'b841b8b6-ece6-413b-ab8c-b5db78cca445',
+                'mode': 'p2p', 'task_type': 'whatsapp_image',
+                'status': 'pending',
+              }),
+              201,
+              headers: {'Content-Type': 'application/json'},
+            );
+          }
+          if (req.method == 'DELETE') {
+            return http.Response('server error', 500);
+          }
+          return http.Response('not found', 404);
+        },
+      );
+
+      await orch.startSession(
+        mode: SessionMode.p2p,
+        taskType: TaskType.whatsappImage,
+      );
+      // Should NOT throw despite the 500.
+      await orch.tearDown();
+      // Local state still cleared.
+      expect(orch.sessionId, isNull);
+      expect(orch.mode, isNull);
+      expect(orch.taskType, isNull);
       orch.close();
     });
 
@@ -349,6 +407,12 @@ void main() {
               }),
               201,
               headers: {'Content-Type': 'application/json'},
+            );
+          }
+          if (req.method == 'DELETE') {
+            return http.Response(
+              jsonEncode({'deleted': true}),
+              200,
             );
           }
           return http.Response('not found', 404);

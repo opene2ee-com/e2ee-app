@@ -4,13 +4,22 @@
 # NOT production tools — keep them local for ad-hoc
 # debugging, but do NOT ship them to the repo.
 probe.py
-probe_v2.py
-probe_v3_jwt.py
-probe_v4_iss.py
-probe_v5_claim.py
-probe_v6_secret.py
-probe_v7_full.py
-probe_v8_routes.py
+tools/probe_v2.py
+tools/probe_v3_jwt.py
+tools/probe_v4_iss.py
+tools/probe_v5_claim.py
+tools/probe_v6_secret.py
+tools/probe_v7_full.py
+tools/probe_v8_routes.py
+tools/probe_v9_telemetry_delete.py
+tools/probe_v10_schema.py
+tools/probe_v11_summary_schema.py
+tools/probe_v12_summary_real.py
+tools/probe_v13_full_lifecycle.py
+# KEEP probe_v14_v1_observation.py — that's the
+# production integration probe for the v1 schema;
+# tracked in git so CI / future contributors can
+# reproduce the Sprint 23.2 contract validation.
 
 # Python test artifacts
 __pycache__/

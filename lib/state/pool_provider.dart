@@ -259,7 +259,9 @@ class PoolNotifier extends StateNotifier<PoolState> {
   }
 
   /// Real API tick — pings the P2P matcher, drains the VPN
-  /// ring, and pushes telemetry. Updates the 5 debug fields.
+  /// ring (belt-and-suspenders), and pushes ONE telemetry
+  /// observation per tick (Sprint 23.2: v1 schema — single
+  /// observation, no `packets` array).
   Future<void> _apiTick() async {
     if (!state.isAlici) return;
     state = state.copyWith(
@@ -270,16 +272,41 @@ class PoolNotifier extends StateNotifier<PoolState> {
       // 1. P2P match poll. Returns a `List<String>` of
       //    active-receiver session ids other than ourselves.
       final peers = await _matcher.findActiveReceivers(_sessionId);
-      // 2. Drain the VPN ring + push to telemetry if non-empty.
-      //    Sprint 22.10+ — `getSampledPackets()` returns the
-      //    typed `List<SampledPacket>` directly (no map helper
-      //    needed). Belt-and-suspenders pull path: most packets
+      // 2. Drain the VPN ring (pull fallback — most packets
       //    arrive via `packetStream` in `_onPacketsSampled`,
       //    but the 5s poll still pulls in case the push was
-      //    missed (app backgrounded, activity destroyed).
+      //    missed: app backgrounded, activity destroyed, or
+      //    a brief IPC failure). Sprint 23.2: the samples
+      //    are NOT sent as `packets[]` anymore — the v1
+      //    schema has no such field. We only use the COUNT
+      //    (`samples.length`) to update the on-screen counter
+      //    and pick a representative masked IP for the
+      //    `ip_subnet` observation field.
       final samples = await _vpn.getSampledPackets();
-      if (samples.isNotEmpty) {
-        await _telemetry.send(samples);
+      // 3. Push ONE telemetry observation (v1 schema).
+      //    Skip when the pool is empty AND no samples — the
+      //    backend's per-minute rate limit (60/min) is plenty
+      //    for a 5s cadence but we'd rather not pollute the
+      //    DB with zero-information rows. We always push on
+      //    a non-empty samples window so the backend's
+      //    per-session counters advance.
+      if (samples.isNotEmpty || state.apiCallCount % 6 == 0) {
+        // Send one v1 observation per tick. The Dart-side
+        // `fromStubs` factory already wires the right
+        // device_id_hash / public_key_fp / tls_fp /
+        // operator / app; we add the per-session `sessionId`
+        // + `matchMode: 'p2p'` and the entropy = 0.0
+        // placeholder (real entropy lands in Sprint 24+).
+        // `ip_subnet` is intentionally NOT sent — the v1
+        // schema's `additionalProperties:false` rejects any
+        // unmapped field (probe_v14 confirmed).
+        await _telemetry.sendObservation(
+          TelemetryObservation.fromStubs(
+            deviceIdHash: kDeviceId,
+            sessionId: _sessionId,
+            matchMode: 'p2p',
+          ),
+        );
       }
       final ts = DateTime.now();
       // Real counts — samples.length is the per-tick packet

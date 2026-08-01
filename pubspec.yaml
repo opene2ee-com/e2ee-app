@@ -29,6 +29,14 @@ dependencies:
   # POST /api/v1/telemetry, GET /api/v1/matches).
   http: ^1.2.0
 
+  # Sprint 23.2 — SHA-256 hashing for `public_key_fp` and
+  # `tls_fp` stubs in `TelemetryService`. Pulled in as a
+  # direct dependency (vs. `crypto` from `flutter_webrtc`)
+  # because the wire-side fingerprinting (Sprint 24+) will
+  # keep this in pure-Dart, not in the wirebare-kernel
+  # layer.
+  crypto: ^3.0.3
+
   # Sprint 22 — WebRTC P2P (Sprint 11.0B). Renamed from `webrtc`
   # to `flutter_webrtc` in 2024; the older `webrtc` 0.0.1 is
   # incompatible with Dart 3.12.1. Native AAR adds ~30 MB to
