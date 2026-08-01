@@ -22,10 +22,10 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.common
+package com.opene2ee.e2ee_ap_v2.vpn.common
 
 import androidx.annotation.IntRange
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.annotation.Experimental
+import com.opene2ee.e2ee_ap_v2.vpn.annotation.Experimental
 
 @Experimental
 class DynamicConfiguration {

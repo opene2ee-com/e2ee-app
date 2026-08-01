@@ -22,15 +22,15 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.service
+package com.opene2ee.e2ee_ap_v2.vpn.service
 
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.OsConstants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.isActive
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.service.PacketDispatcher.Companion.dispatchWith
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.service.PacketDispatcher.Companion.dispatchWith
 
 /**
  * VPN 代理服务的启动器

@@ -22,10 +22,10 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.util
+package com.opene2ee.e2ee_ap_v2.vpn.util
 
 import android.util.Log
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Session
+import com.opene2ee.e2ee_ap_v2.vpn.net.Session
 
 object WireBareLogger {
 

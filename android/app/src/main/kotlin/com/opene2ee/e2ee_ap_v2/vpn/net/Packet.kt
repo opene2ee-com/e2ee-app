@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.net
+package com.opene2ee.e2ee_ap_v2.vpn.net
 
 /**
  * 数据包

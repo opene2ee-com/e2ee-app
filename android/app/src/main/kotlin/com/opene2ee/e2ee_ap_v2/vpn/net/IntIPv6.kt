@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.net
+package com.opene2ee.e2ee_ap_v2.vpn.net
 
 data class IntIPv6(
     val high64: Long,

@@ -22,10 +22,10 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.async
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.async
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpHeaderParser
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpSession
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpHeaderParser
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpSession
 import java.nio.ByteBuffer
 
 /**

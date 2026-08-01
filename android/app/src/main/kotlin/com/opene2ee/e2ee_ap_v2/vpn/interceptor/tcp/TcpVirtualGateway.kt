@@ -22,11 +22,11 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpTcpInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.TcpSession
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpTcpInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.net.TcpSession
 import java.nio.ByteBuffer
 
 /**

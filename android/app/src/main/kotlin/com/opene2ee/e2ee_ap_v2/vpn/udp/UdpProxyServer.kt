@@ -22,20 +22,20 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.udp
+package com.opene2ee.e2ee_ap_v2.vpn.udp
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Port
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.UdpHeader
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.UdpSessionStore
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.proxy.NioProxyServer
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.service.WireBareProxyService
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.closeSafely
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.convertPortToInt
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.net.Port
+import com.opene2ee.e2ee_ap_v2.vpn.net.UdpHeader
+import com.opene2ee.e2ee_ap_v2.vpn.net.UdpSessionStore
+import com.opene2ee.e2ee_ap_v2.vpn.proxy.NioProxyServer
+import com.opene2ee.e2ee_ap_v2.vpn.service.WireBareProxyService
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.util.closeSafely
+import com.opene2ee.e2ee_ap_v2.vpn.util.convertPortToInt
 import java.io.OutputStream
 import java.nio.channels.DatagramChannel
 import java.nio.channels.Selector

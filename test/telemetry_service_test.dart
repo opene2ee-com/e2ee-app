@@ -1,0 +1,183 @@
+// test/telemetry_service_test.dart
+//
+// Sprint 22 — TelemetryService tests with a MockClient.
+// Verifies the 3 documented response cases:
+//   1. 202 Accepted → success (no throw)
+//   2. 401 Unauthorized → TelemetryException with statusCode 401
+//   3. 429 Too Many Requests → TelemetryException with statusCode 429
+//
+// Privacy
+// -------
+// The test body is built from a small fixture list of
+// `SampledPacket` instances — same shape the live code uses.
+// We never send raw packet bytes.
+
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:e2ee_ap_v2/services/packet_parser.dart';
+import 'package:e2ee_ap_v2/services/telemetry_service.dart';
+
+void main() {
+  group('TelemetryService', () {
+    test('202 Accepted → returns normally', () async {
+      http.Client client = MockClient((req) async {
+        expect(req.method, 'POST');
+        expect(
+          req.headers['Authorization'],
+          startsWith('Bearer '),
+        );
+        expect(req.headers['Content-Type'], 'application/json');
+        final body = jsonDecode(req.body) as Map<String, Object?>;
+        expect(body['sessionId'], isA<String>());
+        expect(body['sampledAt'], isA<String>());
+        expect(body['samplingCap'], 10);
+        expect(body['packets'], isA<List<dynamic>>());
+        return http.Response('', 202);
+      });
+      final svc = TelemetryService(
+        client: client,
+        apiKey: 'test-key',
+        sessionId: 'sess-test',
+      );
+      final packets = [
+        SampledPacket(
+          version: 4,
+          protocol: 'tcp',
+          protocolNumber: 6,
+          packetLength: 40,
+          srcIpMasked: '10.0.0.0',
+          dstIpMasked: '93.184.216.0',
+          srcPort: 54321,
+          dstPort: 443,
+          tcpFlags: 0x12,
+        ),
+      ];
+      await svc.send(packets);
+      svc.close();
+    });
+
+    test('401 Unauthorized → throws TelemetryException', () async {
+      http.Client client = MockClient((req) async {
+        return http.Response('unauthorized', 401);
+      });
+      final svc = TelemetryService(client: client, apiKey: 'bad-key');
+      expect(
+        () => svc.send([
+          SampledPacket(
+            version: 4,
+            protocol: 'udp',
+            protocolNumber: 17,
+            packetLength: 28,
+            srcIpMasked: '0.0.0.0',
+            dstIpMasked: '0.0.0.0',
+            srcPort: 12345,
+            dstPort: 53,
+          ),
+        ]),
+        throwsA(
+          isA<TelemetryException>()
+              .having((e) => e.statusCode, 'statusCode', 401),
+        ),
+      );
+      svc.close();
+    });
+
+    test('429 Too Many Requests → throws TelemetryException', () async {
+      http.Client client = MockClient((req) async {
+        return http.Response('rate-limited', 429);
+      });
+      final svc = TelemetryService(client: client, apiKey: 'test-key');
+      expect(
+        () => svc.send([
+          SampledPacket(
+            version: 6,
+            protocol: 'tcp',
+            protocolNumber: 6,
+            packetLength: 60,
+            srcIpMasked: '2001:db8:0:0:0:0:0:0',
+            dstIpMasked: '2001:db8:1:0:0:0:0:0',
+            srcPort: 49152,
+            dstPort: 443,
+            tcpFlags: 0x18,
+          ),
+        ]),
+        throwsA(
+          isA<TelemetryException>()
+              .having((e) => e.statusCode, 'statusCode', 429),
+        ),
+      );
+      svc.close();
+    });
+
+    test('Empty packet list → no HTTP call (no-op)', () async {
+      var calls = 0;
+      http.Client client = MockClient((req) async {
+        calls += 1;
+        return http.Response('', 202);
+      });
+      final svc = TelemetryService(client: client);
+      await svc.send(const <SampledPacket>[]);
+      expect(calls, 0);
+      svc.close();
+    });
+
+    test('sendSummary 202 Accepted → posts to /api/v1/sessions/{id}/telemetry',
+        () async {
+      http.Client client = MockClient((req) async {
+        expect(req.method, 'POST');
+        expect(req.url.path, '/api/v1/sessions/sess-test/telemetry');
+        final body = jsonDecode(req.body) as Map<String, Object?>;
+        expect(body['sessionId'], 'sess-test');
+        expect(body['totalPackets'], 1234);
+        expect(body['encryptedPackets'], 1230);
+        expect(body['packetLossPct'], 0.4);
+        expect(body['meanLatencyMs'], 12.7);
+        expect(body['jitterMs'], 3.2);
+        expect(body['encryptionIntegrityPct'], 99.7);
+        expect(body['windowStart'], isA<String>());
+        expect(body['windowEnd'], isA<String>());
+        return http.Response('', 202);
+      });
+      final svc = TelemetryService(
+        client: client,
+        apiKey: 'test-key',
+        sessionId: 'sess-test',
+      );
+      await svc.sendSummary(
+        totalPackets: 1234,
+        encryptedPackets: 1230,
+        packetLossPct: 0.4,
+        meanLatencyMs: 12.7,
+        jitterMs: 3.2,
+        encryptionIntegrityPct: 99.7,
+      );
+      svc.close();
+    });
+
+    test('sendSummary 401 → throws TelemetryException', () async {
+      http.Client client = MockClient((req) async {
+        return http.Response('unauthorized', 401);
+      });
+      final svc = TelemetryService(
+        client: client,
+        apiKey: 'bad-key',
+        sessionId: 'sess-test',
+      );
+      expect(
+        () => svc.sendSummary(
+          totalPackets: 0,
+          encryptedPackets: 0,
+          packetLossPct: 0,
+          meanLatencyMs: 0,
+          jitterMs: 0,
+          encryptionIntegrityPct: 0,
+        ),
+        throwsA(isA<TelemetryException>()),
+      );
+      svc.close();
+    });
+  });
+}

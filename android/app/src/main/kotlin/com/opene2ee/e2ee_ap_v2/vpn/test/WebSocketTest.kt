@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.test
+package com.opene2ee.e2ee_ap_v2.vpn.test
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,9 +35,9 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.annotation.Test
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.annotation.Test
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket

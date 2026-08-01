@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl
+package com.opene2ee.e2ee_ap_v2.vpn.ssl
 
 enum class EnginePhase {
     Initial,

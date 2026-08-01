@@ -22,9 +22,9 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl
+package com.opene2ee.e2ee_ap_v2.vpn.ssl
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Port
+import com.opene2ee.e2ee_ap_v2.vpn.net.Port
 import java.security.KeyManagementException
 import java.security.KeyStore
 import java.security.PrivateKey

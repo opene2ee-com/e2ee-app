@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.service
+package com.opene2ee.e2ee_ap_v2.vpn.service
 
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
@@ -30,14 +30,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IPHeader
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Packet
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Protocol
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.tcp.TcpPacketInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.udp.UdpPacketInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.closeSafely
+import com.opene2ee.e2ee_ap_v2.vpn.capture.PacketCapture
+import com.opene2ee.e2ee_ap_v2.vpn.capture.extractSampled
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.net.IPHeader
+import com.opene2ee.e2ee_ap_v2.vpn.net.Packet
+import com.opene2ee.e2ee_ap_v2.vpn.net.Protocol
+import com.opene2ee.e2ee_ap_v2.vpn.tcp.TcpPacketInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.udp.UdpPacketInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.util.closeSafely
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InterruptedIOException
@@ -114,6 +116,25 @@ internal class PacketDispatcher private constructor(
                     val packet = Packet(buffer, length)
 
                     val ipHeader: IPHeader = IPHeader.parse(packet.packet, packet.length, 0) ?: continue
+
+                    // Sprint 22.10 — observe EVERY parsed packet
+                    // (including unknown protocols the dispatcher
+                    // would otherwise `continue` past) BEFORE the
+                    // protocol-specific interceptor runs. The
+                    // observer is non-blocking, non-throwing, and
+                    // returns a SampledPacket that has already been
+                    // privacy-masked (ADR-0006 /24 for IPv4, /48
+                    // for IPv6). Failed parses return null and
+                    // are silently dropped — telemetry never
+                    // receives a partial header.
+                    try {
+                        val sample = extractSampled(ipHeader, packet)
+                        if (sample != null) {
+                            PacketCapture.observe(sample)
+                        }
+                    } catch (e: Exception) {
+                        WireBareLogger.error(TAG, "packet observe failed", e)
+                    }
 
                     val interceptor = interceptors[Protocol.parse(ipHeader.dataProtocol)]
                     if (interceptor == null) {

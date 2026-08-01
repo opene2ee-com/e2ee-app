@@ -22,13 +22,13 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.http
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpInterceptChain
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpTunnel
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.TcpSession
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp.TcpInterceptChain
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp.TcpInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp.TcpTunnel
+import com.opene2ee.e2ee_ap_v2.vpn.net.TcpSession
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Clock

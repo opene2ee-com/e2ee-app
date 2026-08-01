@@ -22,12 +22,12 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.net
+package com.opene2ee.e2ee_ap_v2.vpn.net
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.convertIPv4ToInt
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.convertIPv4ToString
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.convertIPv6ToInt
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.convertIPv6ToString
+import com.opene2ee.e2ee_ap_v2.vpn.util.convertIPv4ToInt
+import com.opene2ee.e2ee_ap_v2.vpn.util.convertIPv4ToString
+import com.opene2ee.e2ee_ap_v2.vpn.util.convertIPv6ToInt
+import com.opene2ee.e2ee_ap_v2.vpn.util.convertIPv6ToString
 
 /**
  * ip 地址

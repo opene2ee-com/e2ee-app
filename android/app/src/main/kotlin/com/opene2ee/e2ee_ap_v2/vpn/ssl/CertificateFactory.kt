@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl
+package com.opene2ee.e2ee_ap_v2.vpn.ssl
 
 import android.os.Build
 import org.bouncycastle.asn1.ASN1InputStream
@@ -44,7 +44,7 @@ import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.operator.ContentSigner
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.closeSafely
+import com.opene2ee.e2ee_ap_v2.vpn.util.closeSafely
 import java.io.ByteArrayInputStream
 import java.math.BigInteger
 import java.security.Key

@@ -22,14 +22,14 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.net
+package com.opene2ee.e2ee_ap_v2.vpn.net
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.calculateSum
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.readByte
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.readInt
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.readShort
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.writeByte
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.writeShort
+import com.opene2ee.e2ee_ap_v2.vpn.util.calculateSum
+import com.opene2ee.e2ee_ap_v2.vpn.util.readByte
+import com.opene2ee.e2ee_ap_v2.vpn.util.readInt
+import com.opene2ee.e2ee_ap_v2.vpn.util.readShort
+import com.opene2ee.e2ee_ap_v2.vpn.util.writeByte
+import com.opene2ee.e2ee_ap_v2.vpn.util.writeShort
 import kotlin.experimental.and
 
 /**

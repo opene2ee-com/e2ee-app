@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.dashboard
+package com.opene2ee.e2ee_ap_v2.vpn.dashboard
 
 /**
  * @param value 带宽数值，单位：Byte/s

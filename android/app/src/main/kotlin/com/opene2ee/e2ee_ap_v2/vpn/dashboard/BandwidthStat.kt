@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.dashboard
+package com.opene2ee.e2ee_ap_v2.vpn.dashboard
 
 import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
@@ -31,9 +31,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.annotation.Experimental
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.service.WireBareProxyService
+import com.opene2ee.e2ee_ap_v2.vpn.annotation.Experimental
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare
+import com.opene2ee.e2ee_ap_v2.vpn.service.WireBareProxyService
 import java.util.concurrent.atomic.AtomicLong
 
 @Experimental

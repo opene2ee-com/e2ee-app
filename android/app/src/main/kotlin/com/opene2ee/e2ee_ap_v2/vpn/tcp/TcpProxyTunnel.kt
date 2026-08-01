@@ -22,16 +22,16 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.tcp
+package com.opene2ee.e2ee_ap_v2.vpn.tcp
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpTunnel
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpVirtualGateway
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Port
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.TcpSession
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.nio.SocketNioTunnel
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.closeSafely
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp.TcpTunnel
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp.TcpVirtualGateway
+import com.opene2ee.e2ee_ap_v2.vpn.net.Port
+import com.opene2ee.e2ee_ap_v2.vpn.net.TcpSession
+import com.opene2ee.e2ee_ap_v2.vpn.nio.SocketNioTunnel
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.util.closeSafely
 import java.nio.ByteBuffer
 import java.nio.channels.Selector
 import java.nio.channels.SocketChannel

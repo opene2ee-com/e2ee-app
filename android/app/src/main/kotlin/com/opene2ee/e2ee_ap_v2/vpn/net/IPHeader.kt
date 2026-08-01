@@ -22,10 +22,10 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.net
+package com.opene2ee.e2ee_ap_v2.vpn.net
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.readByte
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.util.readByte
 
 interface IPHeader {
 

@@ -22,16 +22,16 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.udp
+package com.opene2ee.e2ee_ap_v2.vpn.udp
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IPHeader
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Packet
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.UdpHeader
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.UdpSessionStore
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.service.PacketInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.service.WireBareProxyService
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.net.IPHeader
+import com.opene2ee.e2ee_ap_v2.vpn.net.Packet
+import com.opene2ee.e2ee_ap_v2.vpn.net.UdpHeader
+import com.opene2ee.e2ee_ap_v2.vpn.net.UdpSessionStore
+import com.opene2ee.e2ee_ap_v2.vpn.service.PacketInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.service.WireBareProxyService
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
 import java.io.OutputStream
 
 /**

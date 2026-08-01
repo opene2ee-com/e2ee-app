@@ -1,4 +1,4 @@
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.annotation
+package com.opene2ee.e2ee_ap_v2.vpn.annotation
 
 /**
  * 标记一个功能是实验性的，可能存在漏洞

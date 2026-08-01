@@ -22,4 +22,4 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.util
+package com.opene2ee.e2ee_ap_v2.vpn.util

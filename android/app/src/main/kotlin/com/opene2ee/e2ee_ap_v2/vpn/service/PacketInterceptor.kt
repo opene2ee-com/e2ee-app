@@ -22,10 +22,10 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.service
+package com.opene2ee.e2ee_ap_v2.vpn.service
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IPHeader
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Packet
+import com.opene2ee.e2ee_ap_v2.vpn.net.IPHeader
+import com.opene2ee.e2ee_ap_v2.vpn.net.Packet
 import java.io.OutputStream
 
 /**

@@ -24,7 +24,7 @@
 
 @file:Suppress("PropertyName")
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.http
 
 import java.io.Serializable
 

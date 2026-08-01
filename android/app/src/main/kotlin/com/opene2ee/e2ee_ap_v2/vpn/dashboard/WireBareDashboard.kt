@@ -22,14 +22,14 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.dashboard
+package com.opene2ee.e2ee_ap_v2.vpn.dashboard
 
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.annotation.Experimental
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.DynamicConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.annotation.Experimental
+import com.opene2ee.e2ee_ap_v2.vpn.common.DynamicConfiguration
 
 @Experimental
 object WireBareDashboard {

@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.service
+package com.opene2ee.e2ee_ap_v2.vpn.service
 
 import android.app.Notification
 import android.content.Intent
@@ -37,12 +37,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.ProxyStatus
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.service.ProxyLauncher.Companion.launchWith
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.closeSafely
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.defaultNotification
+import com.opene2ee.e2ee_ap_v2.vpn.common.ProxyStatus
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare
+import com.opene2ee.e2ee_ap_v2.vpn.service.ProxyLauncher.Companion.launchWith
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.util.closeSafely
+import com.opene2ee.e2ee_ap_v2.vpn.util.defaultNotification
 
 @Suppress("VpnServicePolicy")
 abstract class WireBareProxyService : VpnService(),

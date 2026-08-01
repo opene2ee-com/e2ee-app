@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.proxy
+package com.opene2ee.e2ee_ap_v2.vpn.proxy
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

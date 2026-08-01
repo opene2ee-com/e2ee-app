@@ -22,11 +22,11 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.http
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl.SSLPredicate
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.newString
+import com.opene2ee.e2ee_ap_v2.vpn.ssl.SSLPredicate
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.util.newString
 import java.nio.ByteBuffer
 
 object HttpHeaderParser {

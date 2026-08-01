@@ -22,17 +22,17 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.async
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.async
 
 import kotlinx.coroutines.runBlocking
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.IProxyStatusListener
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.ProxyStatus
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpInterceptChain
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpSession
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpTunnel
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.deepCopy
+import com.opene2ee.e2ee_ap_v2.vpn.common.IProxyStatusListener
+import com.opene2ee.e2ee_ap_v2.vpn.common.ProxyStatus
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpInterceptChain
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpSession
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp.TcpTunnel
+import com.opene2ee.e2ee_ap_v2.vpn.util.deepCopy
 import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor

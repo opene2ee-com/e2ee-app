@@ -1,5 +1,5 @@
 [versions]
-minSdk = "23"
+minSdk = "24"
 targetSdk = "36"
 ndk = "27.0.11902837"
 versionCode = "3"

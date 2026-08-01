@@ -22,15 +22,15 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.ssl
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.ssl
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpIndexedInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpInterceptChain
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpSession
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpTunnel
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl.isHttpsPacket
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.newString
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.readShort
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpIndexedInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpInterceptChain
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpSession
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp.TcpTunnel
+import com.opene2ee.e2ee_ap_v2.vpn.ssl.isHttpsPacket
+import com.opene2ee.e2ee_ap_v2.vpn.util.newString
+import com.opene2ee.e2ee_ap_v2.vpn.util.readShort
 import java.nio.ByteBuffer
 import java.util.Locale
 

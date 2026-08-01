@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.common
+package com.opene2ee.e2ee_ap_v2.vpn.common
 
 import android.content.Context
 import android.content.Intent
@@ -31,14 +31,14 @@ import android.os.Handler
 import android.os.Looper
 import androidx.annotation.MainThread
 import androidx.core.content.ContextCompat
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare.addImportantEventListener
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare.addVpnProxyStatusListener
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare.removeImportantEventListener
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare.removeVpnProxyStatusListener
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare.startProxy
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare.stopProxy
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.service.WireBareProxyService
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare.addImportantEventListener
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare.addVpnProxyStatusListener
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare.removeImportantEventListener
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare.removeVpnProxyStatusListener
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare.startProxy
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare.stopProxy
+import com.opene2ee.e2ee_ap_v2.vpn.service.WireBareProxyService
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
 import java.net.DatagramSocket
 import java.net.Socket
 

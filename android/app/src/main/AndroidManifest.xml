@@ -56,6 +56,17 @@
                 <action android:name="com.opene2ee.e2ee_ap_v2.vpn.core.action.Stop" />
             </intent-filter>
         </service>
+
+        <!--
+            Sprint 21.1 fix: WireBareInitializer ContentProvider. App process baslangicinda
+            onCreate() cagirilir, icindeki `WireBare attach context!!` satiri `appContext` field'ini
+            set eder. Bu olmadan WireBare.startProxy() icindeki `ContextCompat.startForegroundService(appContext, ...)`
+            UninitializedPropertyAccessException firlatir.
+        -->
+        <provider
+            android:name="com.opene2ee.e2ee_ap_v2.vpn.common.WireBareInitializer"
+            android:exported="false"
+            android:authorities="com.opene2ee.e2ee_ap_v2.wirebare.init" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
@@ -63,6 +74,28 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <!-- WhatsApp deep link görünürlüğü (Sprint 22.3).
+             Android 11+ (API 30+) paket görünürlüğü kısıtlaması
+             nedeniyle wa.me + intent:// her iki yöntem de
+             canLaunchUrl=false döndürüyordu. Manifest'te
+             explicit olarak WhatsApp paketi + wa.me şeması +
+             SEND intent'i tanımlamak gerekiyor. -->
+        <package android:name="com.whatsapp" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" android:host="wa.me" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="whatsapp" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:scheme="whatsapp" />
+        </intent>
+
+        <!-- Flutter engine'in text processing için kullandığı
+             PROCESS_TEXT intent görünürlüğü. -->
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

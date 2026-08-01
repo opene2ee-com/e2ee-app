@@ -1,11 +1,11 @@
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.util
+package com.opene2ee.e2ee_ap_v2.vpn.util
 
 import android.net.ConnectivityManager
 import android.os.Build
 import android.os.Process
 import androidx.core.content.getSystemService
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Session
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare
+import com.opene2ee.e2ee_ap_v2.vpn.net.Session
 import java.net.InetSocketAddress
 
 private val connectivityManager by lazy {

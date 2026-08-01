@@ -22,10 +22,10 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.util
+package com.opene2ee.e2ee_ap_v2.vpn.util
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IntIPv6
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IPVersion
+import com.opene2ee.e2ee_ap_v2.vpn.net.IntIPv6
+import com.opene2ee.e2ee_ap_v2.vpn.net.IPVersion
 
 
 /**

@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.common
+package com.opene2ee.e2ee_ap_v2.vpn.common
 
 /**
  * 用来回调一些关键性的事件，通常是一些错误

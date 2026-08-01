@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.common
+package com.opene2ee.e2ee_ap_v2.vpn.common
 
 import android.net.VpnService
 import androidx.activity.ComponentActivity

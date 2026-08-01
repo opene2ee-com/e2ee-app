@@ -22,13 +22,13 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.http
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpTunnel
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl.RequestSSLCodec
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl.ResponseSSLCodec
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl.SSLCallback
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp.TcpTunnel
+import com.opene2ee.e2ee_ap_v2.vpn.ssl.RequestSSLCodec
+import com.opene2ee.e2ee_ap_v2.vpn.ssl.ResponseSSLCodec
+import com.opene2ee.e2ee_ap_v2.vpn.ssl.SSLCallback
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
 import java.nio.ByteBuffer
 
 class HttpFlushInterceptor(

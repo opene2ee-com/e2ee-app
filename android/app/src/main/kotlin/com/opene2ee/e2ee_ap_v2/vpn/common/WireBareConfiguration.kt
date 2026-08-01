@@ -22,14 +22,14 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.common
+package com.opene2ee.e2ee_ap_v2.vpn.common
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpHeaderParserInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.HttpInterceptorFactory
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.async.AsyncHttpHeaderParserInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http.async.AsyncHttpInterceptorFactory
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl.JKS
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpHeaderParserInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.HttpInterceptorFactory
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.async.AsyncHttpHeaderParserInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.http.async.AsyncHttpInterceptorFactory
+import com.opene2ee.e2ee_ap_v2.vpn.ssl.JKS
 
 class WireBareConfiguration internal constructor() {
 

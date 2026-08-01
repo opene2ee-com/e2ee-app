@@ -22,11 +22,11 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl
+package com.opene2ee.e2ee_ap_v2.vpn.ssl
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.TcpSession
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.readUnsignedByte
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.readUnsignedShort
+import com.opene2ee.e2ee_ap_v2.vpn.net.TcpSession
+import com.opene2ee.e2ee_ap_v2.vpn.util.readUnsignedByte
+import com.opene2ee.e2ee_ap_v2.vpn.util.readUnsignedShort
 import java.nio.ByteBuffer
 
 abstract class SSLCodec {

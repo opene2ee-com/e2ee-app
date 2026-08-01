@@ -22,9 +22,9 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.http
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.http
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.TcpSession
+import com.opene2ee.e2ee_ap_v2.vpn.net.TcpSession
 
 data class HttpSession(
     val request: HttpRequest,

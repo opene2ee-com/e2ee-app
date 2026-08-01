@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp
+package com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp
 
 import java.nio.ByteBuffer
 

@@ -22,11 +22,11 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.proxy
+package com.opene2ee.e2ee_ap_v2.vpn.proxy
 
 import kotlinx.coroutines.isActive
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.nio.NioCallback
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.nio.NioCallback
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
 import java.nio.channels.Selector
 
 /**

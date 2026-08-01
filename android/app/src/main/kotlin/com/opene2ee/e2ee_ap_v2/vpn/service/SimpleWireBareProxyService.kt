@@ -22,6 +22,6 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.service
+package com.opene2ee.e2ee_ap_v2.vpn.service
 
 class SimpleWireBareProxyService : WireBareProxyService()

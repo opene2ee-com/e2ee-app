@@ -22,21 +22,21 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.udp
+package com.opene2ee.e2ee_ap_v2.vpn.udp
 
 import android.net.VpnService
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.EventSynopsis
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.ImportantEvent
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IPHeader
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IPVersion
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.UdpHeader
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.UdpSession
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.nio.DatagramSocketNioTunnel
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.closeSafely
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.ipVersion
+import com.opene2ee.e2ee_ap_v2.vpn.common.EventSynopsis
+import com.opene2ee.e2ee_ap_v2.vpn.common.ImportantEvent
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.net.IPHeader
+import com.opene2ee.e2ee_ap_v2.vpn.net.IPVersion
+import com.opene2ee.e2ee_ap_v2.vpn.net.UdpHeader
+import com.opene2ee.e2ee_ap_v2.vpn.net.UdpSession
+import com.opene2ee.e2ee_ap_v2.vpn.nio.DatagramSocketNioTunnel
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.util.closeSafely
+import com.opene2ee.e2ee_ap_v2.vpn.util.ipVersion
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer

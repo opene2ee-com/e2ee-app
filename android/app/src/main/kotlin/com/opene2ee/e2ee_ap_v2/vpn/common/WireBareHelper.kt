@@ -22,12 +22,12 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.common
+package com.opene2ee.e2ee_ap_v2.vpn.common
 
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IPVersion
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl.JKS
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.convertIPv4ToInt
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.convertIPv6ToInt
+import com.opene2ee.e2ee_ap_v2.vpn.net.IPVersion
+import com.opene2ee.e2ee_ap_v2.vpn.ssl.JKS
+import com.opene2ee.e2ee_ap_v2.vpn.util.convertIPv4ToInt
+import com.opene2ee.e2ee_ap_v2.vpn.util.convertIPv6ToInt
 import java.security.KeyStore
 import java.security.cert.X509Certificate
 import javax.net.ssl.TrustManagerFactory

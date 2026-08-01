@@ -22,10 +22,10 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.ssl
+package com.opene2ee.e2ee_ap_v2.vpn.ssl
 
 import android.os.Build
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue

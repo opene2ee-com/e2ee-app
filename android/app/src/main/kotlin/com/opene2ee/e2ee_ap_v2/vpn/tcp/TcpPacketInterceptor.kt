@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-package com.opene2ee.e2ee_ap_v2.vpn.kernel.tcp
+package com.opene2ee.e2ee_ap_v2.vpn.tcp
 
 import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
@@ -30,23 +30,23 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.BandwidthLimiter
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBare
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.common.WireBareConfiguration
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.dashboard.BandwidthStat
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.dashboard.WireBareDashboard
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.interceptor.tcp.TcpVirtualGateway
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IPHeader
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IPVersion
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.IpAddress
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Packet
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.Port
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.TcpHeader
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.net.TcpSessionStore
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.service.PacketInterceptor
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.service.WireBareProxyService
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.WireBareLogger
-import com.opene2ee.e2ee_ap_v2.vpn.kernel.util.convertPortToInt
+import com.opene2ee.e2ee_ap_v2.vpn.common.BandwidthLimiter
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBare
+import com.opene2ee.e2ee_ap_v2.vpn.common.WireBareConfiguration
+import com.opene2ee.e2ee_ap_v2.vpn.dashboard.BandwidthStat
+import com.opene2ee.e2ee_ap_v2.vpn.dashboard.WireBareDashboard
+import com.opene2ee.e2ee_ap_v2.vpn.interceptor.tcp.TcpVirtualGateway
+import com.opene2ee.e2ee_ap_v2.vpn.net.IPHeader
+import com.opene2ee.e2ee_ap_v2.vpn.net.IPVersion
+import com.opene2ee.e2ee_ap_v2.vpn.net.IpAddress
+import com.opene2ee.e2ee_ap_v2.vpn.net.Packet
+import com.opene2ee.e2ee_ap_v2.vpn.net.Port
+import com.opene2ee.e2ee_ap_v2.vpn.net.TcpHeader
+import com.opene2ee.e2ee_ap_v2.vpn.net.TcpSessionStore
+import com.opene2ee.e2ee_ap_v2.vpn.service.PacketInterceptor
+import com.opene2ee.e2ee_ap_v2.vpn.service.WireBareProxyService
+import com.opene2ee.e2ee_ap_v2.vpn.util.WireBareLogger
+import com.opene2ee.e2ee_ap_v2.vpn.util.convertPortToInt
 import java.io.OutputStream
 import java.util.Queue
 import java.util.concurrent.LinkedBlockingQueue
