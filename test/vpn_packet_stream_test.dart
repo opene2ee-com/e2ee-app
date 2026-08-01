@@ -17,8 +17,6 @@
 //      batch size to `paketGecmisi` — without waiting
 //      for the 5-second poll.
 
-import 'dart:async';
-
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

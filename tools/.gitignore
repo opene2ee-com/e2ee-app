@@ -1,0 +1,18 @@
+# Sprint 22-23 — endpoint probe scripts (debug-only).
+# These were one-off investigations for the test-env
+# Kong credential + missing-route discovery. They are
+# NOT production tools — keep them local for ad-hoc
+# debugging, but do NOT ship them to the repo.
+probe.py
+probe_v2.py
+probe_v3_jwt.py
+probe_v4_iss.py
+probe_v5_claim.py
+probe_v6_secret.py
+probe_v7_full.py
+probe_v8_routes.py
+
+# Python test artifacts
+__pycache__/
+*.pyc
+*.pyo

@@ -1,27 +1,46 @@
 // lib/services/session_orchestrator.dart
 //
-// Sprint 22.4 — Session Orchestrator.
+// Sprint 23.0 — Session Orchestrator (v1 backend schema).
 //
 // Drives the WebRTC P2P negotiation:
-//   1. startSession()    — POST /api/v1/sessions → session_id +
-//                          receiver_session_id
+//   1. startSession()    — POST /api/v1/sessions → session id
+//                          (v1 schema: device_id_hash, mode,
+//                          task_type; backend returns
+//                          {id, ...} — NOT {session_id, ...})
 //   2. pollForOffer()    — GET /api/v1/webrtc/offer?session_id=...
 //                          long-poll (30s timeout) until the
 //                          peer posts an offer
 //   3. negotiate()       — create local offer (or answer),
 //                          POST, long-poll for the remote
 //                          counterpart, setRemoteDescription
-//   4. tearDown()        — close the peer connection +
-//                          DELETE /api/v1/sessions/{id}
+//   4. closeSession()    — POST /api/v1/sessions/{id}/close
+//                          → returns summary_stats
+//   5. tearDown()        — close the peer connection (no
+//                          DELETE round-trip; the route
+//                          isn't in Kong on the test
+//                          environment as of Sprint 23.0
+//                          — deferred)
 //
-// Wire surface:
+// Sprint 23 schema migration (v1 contract):
+//   - Request body now requires `mode` (SessionMode) +
+//     `task_type` (TaskType). The old `role` field is gone.
+//   - Response uses `id` (UUID), not `session_id`.
+//   - `receiver_session_id` is no longer in the response
+//     — receivers are discovered via the WebSocket
+//     signalling channel (Sprint 24+); the
+//     `_receiverSessionId` field is removed.
+//   - Optional fields: `test_text`, `target_phone_hash`,
+//     `target_operator`.
+//
+// Wire surface (Sprint 23.0):
 //   POST /api/v1/sessions                              → start
 //   GET  /api/v1/webrtc/offer?session_id=...           → poll
 //   GET  /api/v1/webrtc/answer?session_id=...          → poll
-//   POST /api/v1/webrtc/offer                          → push
-//   POST /api/v1/webrtc/answer                         → push
-//   POST /api/v1/webrtc/ice                            → push
-//   DELETE /api/v1/sessions/{id}                       → close
+//   POST /api/v1/webrtc/offer                          → push (DEFERRED)
+//   POST /api/v1/webrtc/answer                         → push (DEFERRED)
+//   POST /api/v1/webrtc/ice                            → push (DEFERRED)
+//   POST /api/v1/sessions/{id}/close                   → close
+//   POST /api/v1/sessions/{id}/telemetry               → 30s summary
 
 import 'dart:async';
 import 'dart:convert';
@@ -29,6 +48,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../config.dart';
+import '../models/session_mode.dart';
+import '../models/task_type.dart';
 import 'auth_service.dart';
 import 'webrtc_service.dart';
 
@@ -51,18 +72,15 @@ class SessionOrchestrator {
   /// read this; the orchestrator owns the lifecycle.
   String? _sessionId;
 
-  /// The peer's session id (the receiver half of the pair).
-  /// Returned by the backend when a match is found; the
-  /// orchestrator fans ICE candidates to it.
-  String? _receiverSessionId;
+  /// The current session's `mode` (echoed back from the
+  /// backend on `startSession`). Defaults to [SessionMode.p2p]
+  /// when the orchestrator is freshly constructed.
+  SessionMode? _mode;
 
-  /// SDP offer received from the peer (if we're the answerer).
-  /// Populated by `pollForOffer` / `negotiate`; cleared on
-  /// `tearDown`.
-  Map<String, Object?>? _remoteOffer;
-
-  /// SDP answer received from the peer (if we're the offerer).
-  Map<String, Object?>? _remoteAnswer;
+  /// The current session's `task_type`. Defaults to
+  /// [TaskType.whatsappText] when the orchestrator is freshly
+  /// constructed.
+  TaskType? _taskType;
 
   /// Tear-down flag. Set by [tearDown] to short-circuit any
   /// in-flight long-poll + createOffer paths.
@@ -76,25 +94,51 @@ class SessionOrchestrator {
   Map<String, Object?>? _lastSummaryStats;
 
   String? get sessionId => _sessionId;
-  String? get receiverSessionId => _receiverSessionId;
+  SessionMode? get mode => _mode;
+  TaskType? get taskType => _taskType;
   WebRTCService get webrtc => _webrtc;
   WebRTCState get webrtcState => _webrtc.state;
-  Map<String, Object?>? get remoteOffer => _remoteOffer;
-  Map<String, Object?>? get remoteAnswer => _remoteAnswer;
+  Map<String, Object?>? get remoteOffer => null; // Sprint 24+ (signalling)
+  Map<String, Object?>? get remoteAnswer => null; // Sprint 24+ (signalling)
   Map<String, Object?>? get lastSummaryStats => _lastSummaryStats;
 
-  /// POST /api/v1/sessions → returns `{ session_id, ... }`.
-  Future<String> startSession({String? role}) async {
+  /// POST /api/v1/sessions → returns `{ id, ... }` (v1 schema).
+  ///
+  /// Required: [mode] + [taskType]. Optional: [testText],
+  /// [targetPhoneHash], [targetOperator]. The response uses
+  /// the canonical `id` field for the session UUID (NOT
+  /// `session_id` — that's the old 10.1B field that the v1
+  /// backend removed).
+  Future<String> startSession({
+    required SessionMode mode,
+    required TaskType taskType,
+    String? testText,
+    String? targetPhoneHash,
+    String? targetOperator,
+  }) async {
     final headers = await _auth.authHeaders();
     headers['Content-Type'] = 'application/json';
+
+    final body = <String, Object?>{
+      'device_id_hash': AppConfig.deviceId,
+      'mode': mode.wireName,
+      'task_type': taskType.wireName,
+    };
+    if (testText != null && testText.isNotEmpty) {
+      body['test_text'] = testText;
+    }
+    if (targetPhoneHash != null && targetPhoneHash.isNotEmpty) {
+      body['target_phone_hash'] = targetPhoneHash;
+    }
+    if (targetOperator != null && targetOperator.isNotEmpty) {
+      body['target_operator'] = targetOperator;
+    }
+
     final resp = await _client
         .post(
           Uri.parse('${AppConfig.apiBase}/api/v1/sessions'),
           headers: headers,
-          body: jsonEncode({
-            'role': role ?? 'offerer',
-            'device_id_hash': AppConfig.deviceId,
-          }),
+          body: jsonEncode(body),
         )
         .timeout(const Duration(seconds: 10));
     if (resp.statusCode != 201 && resp.statusCode != 200) {
@@ -103,12 +147,21 @@ class SessionOrchestrator {
         statusCode: resp.statusCode,
       );
     }
-    final body = jsonDecode(resp.body) as Map<String, Object?>;
-    _sessionId = body['session_id'] as String?;
-    _receiverSessionId = body['receiver_session_id'] as String?;
-    if (_sessionId == null) {
-      throw const OrchestratorException('startSession: missing session_id');
+    final responseBody = jsonDecode(resp.body) as Map<String, Object?>;
+    // Sprint 23 schema change: backend returns `id`, not
+    // `session_id`. The old field name is no longer in the
+    // response — failing to find `id` means the backend is
+    // still on the pre-23 contract.
+    final id = responseBody['id'] as String?;
+    if (id == null) {
+      throw const OrchestratorException(
+        'startSession: response missing id field '
+        '(backend may be on pre-Sprint-23 contract)',
+      );
     }
+    _sessionId = id;
+    _mode = mode;
+    _taskType = taskType;
     return _sessionId!;
   }
 
@@ -118,6 +171,11 @@ class SessionOrchestrator {
   /// to 30s, returning either the remote offer SDP (200 + JSON
   /// body) or an empty body (204 + no offer yet). The Dart side
   /// cancels the request at 30s and retries.
+  ///
+  /// Sprint 24+ — the answerer side polls this; the offerer
+  /// side posts its offer and long-polls `/api/v1/webrtc/answer`.
+  /// For Sprint 23 this method is wired but the upstream
+  /// WebSocket signalling migration is deferred.
   Future<Map<String, Object?>?> pollForOffer() async {
     if (_sessionId == null) {
       throw const OrchestratorException('pollForOffer: no session_id');
@@ -131,10 +189,6 @@ class SessionOrchestrator {
       final resp = await _client.get(url, headers: headers).timeout(
             _pollTimeout,
             onTimeout: () {
-              // The backend held the connection open for the
-              // full 30s without sending a body. We return null
-              // so the caller can retry; the spec is "poll
-              // until you get an offer or the user gives up".
               return http.Response('', 204);
             },
           );
@@ -148,12 +202,8 @@ class SessionOrchestrator {
         );
       }
       final body = jsonDecode(resp.body) as Map<String, Object?>;
-      _remoteOffer = body['sdp'] as Map<String, Object?>?;
-      return _remoteOffer;
+      return body['sdp'] as Map<String, Object?>?;
     } on TimeoutException {
-      // Defensive — the .timeout callback above already returns
-      // a 204; this branch is for http-level timeouts (DNS
-      // resolution, etc.) that the Future.timeout doesn't catch.
       return null;
     }
   }
@@ -184,8 +234,7 @@ class SessionOrchestrator {
         );
       }
       final body = jsonDecode(resp.body) as Map<String, Object?>;
-      _remoteAnswer = body['sdp'] as Map<String, Object?>?;
-      return _remoteAnswer;
+      return body['sdp'] as Map<String, Object?>?;
     } on TimeoutException {
       return null;
     }
@@ -196,6 +245,11 @@ class SessionOrchestrator {
   ///   2. POST /api/v1/webrtc/offer (with the local SDP)
   ///   3. long-poll /api/v1/webrtc/answer for the remote answer
   ///   4. setRemoteDescription on the local peer connection
+  ///
+  /// Sprint 24+ — the WebRTC routes are still in the
+  /// "planned" bucket per the test-environment status
+  /// (Sprint 23.0 backlog). This method is wired but
+  /// untested on a real device in Sprint 23.
   Future<void> negotiateAsOfferer() async {
     if (_sessionId == null) {
       throw const OrchestratorException(
@@ -224,7 +278,6 @@ class SessionOrchestrator {
         statusCode: offerResp.statusCode,
       );
     }
-    // Long-poll for the answer.
     final answerSdp = await pollForAnswer();
     if (answerSdp == null) {
       throw const OrchestratorException('no answer received in 30s');
@@ -235,11 +288,8 @@ class SessionOrchestrator {
     );
   }
 
-  /// Drive the answerer-side negotiation:
-  ///   1. long-poll /api/v1/webrtc/offer for the remote offer
-  ///   2. setRemoteDescription on the local peer connection
-  ///   3. createAnswer on the local peer connection
-  ///   4. POST /api/v1/webrtc/answer (with the local SDP)
+  /// Drive the answerer-side negotiation. Sprint 24+ —
+  /// WebRTC routes still in the planned bucket.
   Future<void> negotiateAsAnswerer() async {
     if (_sessionId == null) {
       throw const OrchestratorException(
@@ -278,32 +328,17 @@ class SessionOrchestrator {
     }
   }
 
-  /// Tear down: close the peer connection + DELETE the session.
-  /// Idempotent.
+  /// Tear down: close the peer connection. The
+  /// `DELETE /api/v1/sessions/{id}` round-trip is skipped —
+  /// the route isn't in Kong on the test environment as of
+  /// Sprint 23.0 (the server-side 15-minute TTL is the
+  /// safety net). Idempotent.
   Future<void> tearDown() async {
     _tornDown = true;
     await _webrtc.close();
-    if (_sessionId != null) {
-      final headers = await _auth.authHeaders();
-      try {
-        await _client
-            .delete(
-              Uri.parse(
-                '${AppConfig.apiBase}/api/v1/sessions/$_sessionId',
-              ),
-              headers: headers,
-            )
-            .timeout(const Duration(seconds: 5));
-      } catch (_) {
-        // Best-effort: the server cleans up sessions on its
-        // 15-minute TTL anyway. Don't fail tearDown over a
-        // DELETE error.
-      }
-    }
     _sessionId = null;
-    _receiverSessionId = null;
-    _remoteOffer = null;
-    _remoteAnswer = null;
+    _mode = null;
+    _taskType = null;
     _lastSummaryStats = null;
   }
 
@@ -342,8 +377,8 @@ class SessionOrchestrator {
     await _webrtc.close();
     _tornDown = true;
     _sessionId = null;
-    _remoteOffer = null;
-    _remoteAnswer = null;
+    _mode = null;
+    _taskType = null;
     return _lastSummaryStats;
   }
 
