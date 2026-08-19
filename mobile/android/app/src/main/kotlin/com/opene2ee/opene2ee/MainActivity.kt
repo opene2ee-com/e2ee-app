@@ -8,7 +8,9 @@
 package com.opene2ee.opene2ee
 
 import android.app.Activity
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
@@ -30,6 +32,7 @@ class MainActivity : FlutterActivity() {
         // channel also uses this value; onActivityResult dispatches
         // by pendingVpnResult state to keep both paths independent.
         private const val VPN_REQUEST_CODE = 1001
+        private const val NOTIFICATION_REQUEST_CODE = 1002
         private const val PERMISSIONS_CHANNEL = "opene2ee/vpn_permissions"
         private const val VPN_CHANNEL = "opene2ee/vpn"
     }
@@ -38,6 +41,7 @@ class MainActivity : FlutterActivity() {
     private var vpnChannel: MethodChannel? = null
     private var vpnFlutterEngine: FlutterEngine? = null
     private var pendingVpnResult: MethodChannel.Result? = null
+    private var pendingNotificationResult: MethodChannel.Result? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -104,6 +108,9 @@ class MainActivity : FlutterActivity() {
             "status" -> {
                 result.success(mapOf("status" to VpnStatus.current().name))
             }
+            "getSampledPackets" -> {
+                result.success(OpenE2eeVpnService.drainSampledPackets())
+            }
             else -> result.notImplemented()
         }
     }
@@ -126,8 +133,24 @@ class MainActivity : FlutterActivity() {
         when (call.method) {
             "requestVpnPermission" -> requestVpnPermission(result)
             "isVpnPrepared" -> result.success(isVpnPrepared())
+            "ensureNotificationPermission" -> ensureNotificationPermission(result)
             else -> result.notImplemented()
         }
+    }
+
+    private fun ensureNotificationPermission(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        ) {
+            result.success(true)
+            return
+        }
+        if (pendingNotificationResult != null) {
+            result.error("notification_permission_in_flight", "Already awaiting notification permission", null)
+            return
+        }
+        pendingNotificationResult = result
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_REQUEST_CODE)
     }
 
     @RequiresApi(21)
@@ -182,9 +205,22 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != NOTIFICATION_REQUEST_CODE) return
+        val pending = pendingNotificationResult ?: return
+        pendingNotificationResult = null
+        pending.success(grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED)
+    }
+
     override fun onDestroy() {
         permissionsChannel?.setMethodCallHandler(null)
         permissionsChannel = null
+        pendingNotificationResult = null
         vpnChannel?.setMethodCallHandler(null)
         vpnChannel = null
         vpnFlutterEngine = null
