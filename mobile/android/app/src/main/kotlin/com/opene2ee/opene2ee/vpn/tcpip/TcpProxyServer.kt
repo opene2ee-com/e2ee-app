@@ -47,7 +47,8 @@ internal class TcpProxyServer(
     }
 
     override fun onAccept() {
-        val proxySocketChannel = proxyServerSocketChannel.accept()
+        val proxySocketChannel = proxyServerSocketChannel.accept() ?: return
+        proxySocketChannel.configureBlocking(false)
         val proxySocket = proxySocketChannel.socket()
         // KURAL 5: sourcePort = proxySocket.port (NOT localPort)
         val sourcePort = Port(proxySocket.port.toShort())
@@ -59,6 +60,10 @@ internal class TcpProxyServer(
         val realTunnel = TcpRealTunnel(SocketChannel.open(), selector, session, configuration, proxyService)
         proxyTunnel.attachRealChannel(realTunnel)
         realTunnel.attachProxyTunnel(proxyTunnel)
+        // Accepted channels do not receive an OP_CONNECT callback. Register
+        // their read side explicitly before connecting to the remote peer;
+        // otherwise the client request remains unread and times out.
+        proxyTunnel.prepareRead()
         realTunnel.connectRemoteServer()
     }
 

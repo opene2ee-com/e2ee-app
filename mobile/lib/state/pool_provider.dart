@@ -423,16 +423,36 @@ class PoolNotifier extends StateNotifier<PoolState> {
 /// tcpFlags may be null on UDP / ICMP / OTHER). Mirrors the
 /// 10.1B helper.
 ParsedPacket? _mapToParsedPacket(Map<String, Object?> m) {
-  // Sprint 10.1C conservative: in this branch the Kotlin
-  // `OpenE2eeVpnService.getSampledPackets` handler is not
-  // yet wired (the 10.1B integration touched the Kotlin
-  // side in `feat/pr-10.1-real-integration` only), so we
-  // return null and let `whereType<ParsedPacket>()` filter
-  // the result down to an empty list. The `telemetry.send`
-  // call short-circuits on empty input. When the Kotlin
-  // side is integrated in a follow-up sprint, replace this
-  // body with the field-by-field decode from 10.1B.
-  return null;
+  final protocolNumber = m['protocolNumber'];
+  if (protocolNumber is! int) return null;
+  final protocol = switch (protocolNumber) {
+    6 => Protocol.tcp,
+    17 => Protocol.udp,
+    1 => Protocol.icmp,
+    _ => Protocol.other,
+  };
+  final version = m['version'];
+  final packetLength = m['packetLength'];
+  final srcIpMasked = m['srcIpMasked'];
+  final dstIpMasked = m['dstIpMasked'];
+  if (version is! String ||
+      packetLength is! int ||
+      srcIpMasked is! String ||
+      dstIpMasked is! String) {
+    return null;
+  }
+  return ParsedPacket(
+    version: version == 'IPv6' ? 6 : 4,
+    protocol: protocol,
+    protocolNumber: protocolNumber,
+    totalLength: packetLength,
+    srcIpMasked: srcIpMasked,
+    dstIpMasked: dstIpMasked,
+    srcPort: m['srcPort'] as int?,
+    dstPort: m['dstPort'] as int?,
+    tcpFlags: m['tcpFlags'] as int?,
+    tlsFingerprint: m['tlsClientHelloFingerprint'] as String?,
+  );
 }
 
 final poolProvider = StateNotifierProvider<PoolNotifier, PoolState>(
