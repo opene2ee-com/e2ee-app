@@ -89,8 +89,7 @@
     },
     "session_id": {
       "type": "string",
-      "description": "İlgili test oturumu ID",
-      "format": "uuid"
+      "description": "İlgili test oturumu ID — Sprint 11+ server-mints UUID v4; older clients send 'ts-<nano>-<hex>' manager-minted ids. Schema accepts any string and the handler routes to the correct row by the value."
     },
     "match_mode": {
       "type": "string",

@@ -12,7 +12,7 @@
   "properties": {
     "sessionId": {
       "type": "string",
-      "format": "uuid"
+      "description": "Sprint 10.1D — server-mints UUID v4; older clients may send 'ts-<nano>-<hex>' manager-minted ids. Schema accepts any string and the handler routes to the correct row by the value."
     },
     "sampledAt": {
       "type": "string",

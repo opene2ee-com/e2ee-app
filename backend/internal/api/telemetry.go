@@ -173,13 +173,72 @@ func handleTelemetryPerPacket(a *API, w http.ResponseWriter, r *http.Request, bo
 
 	sessionID := pathSessionID
 	if sessionID == nil {
-		if t.SessionID == nil {
+		// Legacy /telemetry route — session_id comes from the
+		// body. Older clients sent manager-minted strings
+		// (e.g. 'ts-<nano>-<hex>') which are NOT valid UUIDs.
+		// We accept any non-empty string and try to coerce
+		// to a UUID. If it parses we use the parsed value;
+		// if it doesn't, we leave sessionID nil so the
+		// resulting telemetry row has a NULL session_id
+		// (the schema's session_id is nullable). The mobile
+		// side can then log a warning and continue without
+		// breaking the test pipeline.
+		if t.SessionIDRaw != nil && *t.SessionIDRaw != "" {
+			if parsed, err := uuid.Parse(*t.SessionIDRaw); err == nil {
+				sessionID = &parsed
+			} else {
+				a.deps.Cfg.Logger.Warn("telemetry session_id is not a valid UUID; storing with NULL session_id",
+					"err_kind", "parse",
+					"err", err.Error(),
+					"raw", *t.SessionIDRaw,
+				)
+				// sessionID stays nil — falls through to the
+				// legacy insert below.
+			}
+		}
+	} else if t.SessionIDRaw != nil && *t.SessionIDRaw != "" {
+		// Body session_id, if present, must match the URL
+		// path (defence in depth — catches stale mobile
+		// retries). For legacy non-UUID strings the path
+		// param is the source of truth.
+		if parsed, err := uuid.Parse(*t.SessionIDRaw); err == nil {
+			if parsed != *sessionID {
+				writeBadRequest(w, "Session id in body does not match URL.")
+				return
+			}
+		}
+	}
+
+	if sessionID == nil {
+		// Legacy /telemetry route — either the body omitted
+		// session_id entirely or the body value was not a
+		// valid UUID (e.g. 'ts-<nano>-<hex>' from older
+		// clients). Insert the telemetry row with session_id
+		// NULL; entropy / IP stats are still useful.
+		if t.SessionIDRaw == nil || *t.SessionIDRaw == "" {
 			writeBadRequest(w, "session_id is required (legacy /telemetry route).")
 			return
 		}
-		sessionID = t.SessionID
-	} else if t.SessionID != nil && *t.SessionID != *sessionID {
-		writeBadRequest(w, "Session id in body does not match URL.")
+		storageRow, err := t.toStorageLegacy()
+		if err != nil {
+			writeBadRequest(w, err.Error())
+			return
+		}
+		id, err := a.deps.Cfg.Telemetry.InsertTelemetry(r.Context(), storageRow)
+		if err != nil {
+			a.deps.Cfg.Logger.Error("insert telemetry failed",
+				"err_kind", "db",
+				"err", err.Error(),
+				"session_id", "(none)",
+			)
+			writeInternal(w)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, telemetryResponse{
+			ID:        id,
+			Accepted:  true,
+			SessionID: "",
+		})
 		return
 	}
 
@@ -356,6 +415,16 @@ func sniffTelemetryShape(body []byte) telemetryShape {
 // — the schema validator enforces the contract, this struct is
 // just the decoders' convenience.
 //
+// SessionIDRaw is the *string* body field (NOT *uuid.UUID) —
+// older mobile clients sent manager-minted strings like
+// 'ts-<nano>-<hex>' that the schema's `format: uuid`
+// rejected with HTTP 400. The schema has since dropped the
+// `format` constraint; toStorage attempts uuid.Parse and
+// falls back to nil when the body value is not a valid UUID
+// (the resulting telemetry row will have a NULL
+// session_id which is legal — schema does not enforce
+// non-null on session_id).
+//
 // IMPORTANT: fields the api package never wants to receive are
 // OMITTED here. If the schema ever adds a forbidden field, the
 // schema validator will still allow it through (the schema is
@@ -371,7 +440,7 @@ type decodedTelemetry struct {
 	TLSFP          string    `json:"tls_fp"`
 	Entropy        float64   `json:"entropy"`
 	IPSubnet       string    `json:"ip_subnet,omitempty"`
-	SessionID      *uuid.UUID `json:"session_id,omitempty"`
+	SessionIDRaw   *string   `json:"session_id,omitempty"`
 	Timestamp      string    `json:"timestamp"` // RFC 3339
 	SNI            string    `json:"sni,omitempty"`
 	TLSVersion     string    `json:"tls_version,omitempty"`
@@ -380,6 +449,34 @@ type decodedTelemetry struct {
 	PeerScore      *float64  `json:"peer_score,omitempty"`
 	Confidence     *float64  `json:"confidence,omitempty"`
 	Signature      string    `json:"signature,omitempty"`
+}
+
+// toStorage converts the wire shape into the storage type.
+// sessionID is passed in from the route handler (path or body).
+// The Sprint 11+ contract carries a UUID; older mobile
+// clients sent manager-minted strings like 'ts-<nano>-<hex>'
+// that are valid for the route's session_id foreign key
+// only when the column is TEXT. To keep schema compatibility
+// (session_id is UUID, nullable) we accept any string but
+// route the request through `pathSessionID` (the URL param),
+// which is the source of truth for both old and new clients.
+func (d decodedTelemetry) toStorage(sessionID uuid.UUID) (storage.Telemetry, error) {
+	ts, err := time.Parse(time.RFC3339, d.Timestamp)
+	if err != nil {
+		return storage.Telemetry{}, errors.New("invalid timestamp format (RFC 3339 required)")
+	}
+	sid := sessionID
+	return storage.Telemetry{
+		DeviceIDHash: d.DeviceIDHash,
+		PublicKeyFP:  d.PublicKeyFP,
+		Operator:     d.Operator,
+		App:          d.App,
+		TLSFP:        d.TLSFP,
+		Entropy:      d.Entropy,
+		IPSubnet:     d.IPSubnet,
+		SessionID:    &sid,
+		Timestamp:    ts.UTC(),
+	}, nil
 }
 
 // decodedTelemetryBatch is the Sprint 10.1D batch contract —
@@ -473,16 +570,17 @@ func (p decodedTelemetryBatchPacket) toStorageRow(batch decodedTelemetryBatch, s
 	}, nil
 }
 
-// toStorage converts the wire shape into the storage type.
-// We re-parse the timestamp string because storage.Telemetry
-// uses time.Time and the handler layer shouldn't rely on the
-// caller to send a time.Time JSON form.
-func (d decodedTelemetry) toStorage(sessionID uuid.UUID) (storage.Telemetry, error) {
+// toStorageLegacy converts the wire shape into a storage row
+// with a NULL session_id. Used when the mobile client sent
+// a non-UUID session_id value (Sprint 10.1D manager-minted
+// strings like 'ts-<nano>-<hex>'). The telemetry row is still
+// useful for entropy + IP stats; the only loss is the
+// foreign-key join from telemetry back to sessions.
+func (d decodedTelemetry) toStorageLegacy() (storage.Telemetry, error) {
 	ts, err := time.Parse(time.RFC3339, d.Timestamp)
 	if err != nil {
 		return storage.Telemetry{}, errors.New("invalid timestamp format (RFC 3339 required)")
 	}
-	sid := sessionID
 	return storage.Telemetry{
 		DeviceIDHash: d.DeviceIDHash,
 		PublicKeyFP:  d.PublicKeyFP,
@@ -491,7 +589,12 @@ func (d decodedTelemetry) toStorage(sessionID uuid.UUID) (storage.Telemetry, err
 		TLSFP:        d.TLSFP,
 		Entropy:      d.Entropy,
 		IPSubnet:     d.IPSubnet,
-		SessionID:    &sid,
+		SessionID:    nil,
 		Timestamp:    ts.UTC(),
 	}, nil
 }
+
+// toStorage converts the wire shape into the storage type.
+// We re-parse the timestamp string because storage.Telemetry
+// uses time.Time and the handler layer shouldn't rely on the
+// caller to send a time.Time JSON form.
