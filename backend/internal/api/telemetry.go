@@ -253,8 +253,10 @@ func handleTelemetryBatch(a *API, w http.ResponseWriter, r *http.Request, body [
 		if err != nil {
 			a.deps.Cfg.Logger.Error("insert telemetry (batch) failed",
 				"err_kind", "db",
+				"err", err.Error(),
 				"session_id", sessionID.String(),
 				"index", i,
+				"public_key_fp", row.PublicKeyFP,
 			)
 			writeInternal(w)
 			return

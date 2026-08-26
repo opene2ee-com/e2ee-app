@@ -194,10 +194,12 @@ func DeviceContextMiddleware() func(http.Handler) http.Handler {
 // ----- accessLog middleware -----
 
 // statusRecorder wraps http.ResponseWriter so the middleware can
-// observe the final status code.
+// observe the final status code AND capture the response body
+// for diagnostic logging on 4xx/5xx.
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int
+	body        []byte
 	wroteHeader bool
 }
 
@@ -215,6 +217,11 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 		s.status = http.StatusOK
 		s.wroteHeader = true
 	}
+	// Cap body capture at 4 KB — large responses (e.g. /matrix)
+	// would otherwise balloon log volume.
+	if len(s.body) < 4096 {
+		s.body = append(s.body, b...)
+	}
 	return s.ResponseWriter.Write(b)
 }
 
@@ -228,6 +235,10 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 //	latency_ms     wall-clock duration, integer milliseconds
 //	request_id     propagated from the request-id middleware
 //	device_prefix  first 8 hex chars of X-Device-Id-Hash, or "" when absent
+//
+// On 4xx/5xx the response body is appended (capped at 256
+// bytes) so schema validation messages, missing-field
+// names, etc. are visible in the log without re-curling.
 //
 // We deliberately do NOT log the raw URL (which can carry
 // PII-shaped query parameters for /api/v1/operator/lookup?phone=
@@ -250,14 +261,28 @@ func AccessLogMiddleware(log Logger) func(http.Handler) http.Handler {
 			if status == 0 {
 				status = http.StatusOK
 			}
-			log.Info("http",
+			args := []any{
 				"method", r.Method,
 				"path", RoutePath(r),
 				"status", status,
 				"latency_ms", latencyMS,
 				"request_id", RequestIDFromContext(r.Context()),
 				"device_prefix", DevicePrefix(DeviceHashFromContext(r.Context())),
-			)
+			}
+			if status >= 400 {
+				body := rec.body
+				if len(body) > 256 {
+					body = body[:256]
+				}
+				args = append(args, "resp_body", string(body))
+			}
+			if status >= 500 {
+				log.Error("http", args...)
+			} else if status >= 400 {
+				log.Warn("http", args...)
+			} else {
+				log.Info("http", args...)
+			}
 		})
 	}
 }
