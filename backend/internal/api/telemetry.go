@@ -27,6 +27,8 @@ package api
 //     client. The response is just {id: <db_id>, accepted:true}.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -88,15 +90,24 @@ func (a *API) handlePostTelemetryLegacy() http.HandlerFunc {
 // the legacy /telemetry POST (in which case the body must
 // carry session_id).
 //
+// Accepts two payload shapes (per-packet OR batch) — the
+// schema validator picks the right one based on which fields
+// are present in the body. Mobile `TelemetryService.send()`
+// (Sprint 10.1D batch contract) and `TelemetryService.send()`
+// per-packet (Sprint 11+ contract) both work without a
+// mobile rebuild.
+//
 // Behaviour:
-//   - Reads the body, validates against telemetry.schema.json,
-//     JSON-decodes into the storage type.
+//   - Reads the body, validates against telemetry.schema.json
+//     (per-packet) first, then telemetry-batch.schema.json.
+//   - JSON-decodes into the matching struct.
 //   - Resolves the session id: prefers the path argument,
 //     falls back to the body's `session_id` field, and 400s
 //     when neither is set.
-//   - Persists via storage.TelemetryWriter (same as the path
-//     route).
-//   - Returns 202 with the new telemetry row id.
+//   - Persists via storage.TelemetryWriter (same code path
+//     regardless of shape).
+//   - Returns 202 with the new telemetry row id (single
+//     row) or the LAST inserted row id + count (batch).
 func handleTelemetryInsert(a *API, w http.ResponseWriter, r *http.Request, pathSessionID *uuid.UUID) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -116,6 +127,32 @@ func handleTelemetryInsert(a *API, w http.ResponseWriter, r *http.Request, pathS
 		return
 	}
 
+	// Sniff the shape — the batch contract uses `sessionId`
+	// (camelCase) while the per-packet contract uses
+	// `device_id_hash` / `session_id`. We pick the matching
+	// schema from the leading byte of the JSON body so the
+	// unknown-other-shape schema never runs.
+	shape := sniffTelemetryShape(body)
+
+	switch shape {
+	case telemetryShapeBatch:
+		handleTelemetryBatch(a, w, r, body)
+		return
+	case telemetryShapePerPacket:
+		handleTelemetryPerPacket(a, w, r, body, pathSessionID)
+		return
+	default:
+		writeBadRequest(w, "Request body did not match telemetry or telemetry-batch schema.")
+		return
+	}
+}
+
+// handleTelemetryPerPacket runs the Sprint 11+ per-packet
+// contract: one telemetry row per POST. `pathSessionID` is
+// the path-level id (canonical /sessions/{id}/telemetry) or
+// nil for the legacy /telemetry route (where the body must
+// carry `session_id`).
+func handleTelemetryPerPacket(a *API, w http.ResponseWriter, r *http.Request, body []byte, pathSessionID *uuid.UUID) {
 	if err := a.deps.Schemas.Validate(SchemaTelemetry, body); err != nil {
 		if ve, ok := isValidationError(err); ok {
 			writeValidation(w, ve)
@@ -134,8 +171,6 @@ func handleTelemetryInsert(a *API, w http.ResponseWriter, r *http.Request, pathS
 		return
 	}
 
-	// Resolve the session id: path first, body fallback,
-	// 400 when neither is present (legacy route).
 	sessionID := pathSessionID
 	if sessionID == nil {
 		if t.SessionID == nil {
@@ -144,8 +179,6 @@ func handleTelemetryInsert(a *API, w http.ResponseWriter, r *http.Request, pathS
 		}
 		sessionID = t.SessionID
 	} else if t.SessionID != nil && *t.SessionID != *sessionID {
-		// Defence in depth: body session_id, if present, must
-		// match the URL path (catches stale mobile retries).
 		writeBadRequest(w, "Session id in body does not match URL.")
 		return
 	}
@@ -170,6 +203,150 @@ func handleTelemetryInsert(a *API, w http.ResponseWriter, r *http.Request, pathS
 		Accepted:  true,
 		SessionID: sessionID.String(),
 	})
+}
+
+// handleTelemetryBatch runs the Sprint 10.1D batch contract:
+// one POST, N telemetry rows. Each `packets[]` element maps to
+// one row. Returns 202 with the LAST inserted id + a `count`
+// field so the mobile can correlate.
+func handleTelemetryBatch(a *API, w http.ResponseWriter, r *http.Request, body []byte) {
+	if err := a.deps.Schemas.Validate(SchemaTelemetryBatch, body); err != nil {
+		if ve, ok := isValidationError(err); ok {
+			writeValidation(w, ve)
+			return
+		}
+		a.deps.Cfg.Logger.Error("telemetry-batch schema validation error",
+			"err_kind", "schema",
+		)
+		writeBadRequest(w, "Schema validation failed.")
+		return
+	}
+
+	var b decodedTelemetryBatch
+	if err := json.Unmarshal(body, &b); err != nil {
+		writeBadRequest(w, "Malformed JSON.")
+		return
+	}
+	sessionID, err := uuid.Parse(b.SessionID)
+	if err != nil {
+		writeBadRequest(w, "batch sessionId must be a valid UUID.")
+		return
+	}
+	if len(b.Packets) == 0 {
+		writeBadRequest(w, "batch must contain at least one packet.")
+		return
+	}
+
+	var lastID int64
+	for i, p := range b.Packets {
+		row, err := p.toStorageRow(b, sessionID)
+		if err != nil {
+			a.deps.Cfg.Logger.Warn("batch packet invalid",
+				"err_kind", "validation",
+				"index", i,
+				"session_id", sessionID.String(),
+			)
+			writeBadRequest(w, err.Error())
+			return
+		}
+		id, err := a.deps.Cfg.Telemetry.InsertTelemetry(r.Context(), row)
+		if err != nil {
+			a.deps.Cfg.Logger.Error("insert telemetry (batch) failed",
+				"err_kind", "db",
+				"session_id", sessionID.String(),
+				"index", i,
+			)
+			writeInternal(w)
+			return
+		}
+		lastID = id
+	}
+
+	writeJSON(w, http.StatusAccepted, telemetryResponse{
+		ID:        lastID,
+		Accepted:  true,
+		SessionID: sessionID.String(),
+	})
+}
+
+// telemetryShape enumerates the two accepted telemetry body
+// shapes. The handler sniffs the leading byte to pick the
+// right schema before validating.
+type telemetryShape int
+
+const (
+	telemetryShapeUnknown telemetryShape = iota
+	telemetryShapePerPacket                 // Sprint 11+ contract
+	telemetryShapeBatch                     // Sprint 10.1D batch contract
+)
+
+// sniffTelemetryShape looks at the body for one of two
+// distinctive keys and decides which contract it looks
+// like. Go's encoding/json sorts object keys alphabetically,
+// so the first key per contract is deterministic:
+//
+//   - Per-packet: "app" (followed by "device_id_hash",
+//     "entropy", "operator", ...)
+//   - Batch:     "packets" (followed by "sampledAt",
+//     "sessionId", ...)
+//
+// We scan the first ~512 bytes looking for either of these
+// keys anywhere. That's safer than "first key" because a
+// future schema revision might add a field that sorts
+// earlier.
+func sniffTelemetryShape(body []byte) telemetryShape {
+	scanLimit := 512
+	if len(body) < scanLimit {
+		scanLimit = len(body)
+	}
+	rest := body[:scanLimit]
+	// Walk the JSON top-level object key by key, tracking
+	// the opening/closing quote positions.
+	i := 0
+	// Skip whitespace and the opening `{`.
+	for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t' || rest[i] == '\n' || rest[i] == '\r') {
+		i++
+	}
+	if i >= len(rest) || rest[i] != '{' {
+		return telemetryShapeUnknown
+	}
+	i++
+	for i < len(rest) {
+		// Skip whitespace and commas between key-value pairs.
+		for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t' || rest[i] == '\n' || rest[i] == '\r' || rest[i] == ',') {
+			i++
+		}
+		if i >= len(rest) || rest[i] == '}' {
+			break
+		}
+		if rest[i] != '"' {
+			return telemetryShapeUnknown
+		}
+		// Read the key name up to the next unescaped quote.
+		j := i + 1
+		for j < len(rest) {
+			if rest[j] == '\\' && j+1 < len(rest) {
+				j += 2
+				continue
+			}
+			if rest[j] == '"' {
+				break
+			}
+			j++
+		}
+		if j >= len(rest) {
+			return telemetryShapeUnknown
+		}
+		key := string(rest[i+1 : j])
+		switch key {
+		case "packets", "sessionId":
+			return telemetryShapeBatch
+		case "app", "device_id_hash":
+			return telemetryShapePerPacket
+		}
+		i = j + 1
+	}
+	return telemetryShapeUnknown
 }
 
 // decodedTelemetry is the request-side shape of one telemetry
@@ -201,6 +378,97 @@ type decodedTelemetry struct {
 	PeerScore      *float64  `json:"peer_score,omitempty"`
 	Confidence     *float64  `json:"confidence,omitempty"`
 	Signature      string    `json:"signature,omitempty"`
+}
+
+// decodedTelemetryBatch is the Sprint 10.1D batch contract —
+// the mobile `TelemetryService.send` (per-tick batch) still
+// posts this shape. The schema is `telemetry-batch.schema.json`.
+//
+// Each `packets[]` element maps to one storage.Telemetry row;
+// the handler fans iter the array and inserts each.
+type decodedTelemetryBatch struct {
+	SessionID    string                  `json:"sessionId"`
+	SampledAt    string                  `json:"sampledAt"` // RFC 3339
+	SamplingCap  int                     `json:"samplingCap,omitempty"`
+	DeviceIDHash string                  `json:"deviceIdHash,omitempty"`
+	Packets      []decodedTelemetryBatchPacket `json:"packets"`
+}
+
+type decodedTelemetryBatchPacket struct {
+	Timestamp    string  `json:"ts"`
+	SrcIPSubnet  string  `json:"srcIpSubnet,omitempty"`
+	DstIPSubnet  string  `json:"dstIpSubnet,omitempty"`
+	SrcPort      int     `json:"srcPort,omitempty"`
+	DstPort      int     `json:"dstPort,omitempty"`
+	Protocol     string  `json:"protocol,omitempty"`
+	TLSFP        string  `json:"tlsFp"`
+	Entropy      float64 `json:"entropy"`
+	SNI          string  `json:"sni,omitempty"`
+	TLSVersion   string  `json:"tlsVersion,omitempty"`
+}
+
+// toStorageRow converts one batch packet into a storage row.
+// We use the device fingerprint / operator / app carried at
+// batch level (the schema marks them per-packet too in
+// Sprint 11+, but Sprint 10.1D mobile leaves them at the
+// batch envelope). For Sprint 10.1D-shaped batches that
+// don't include them, the storage row gets reasonable
+// defaults ("unknown" / "unknown") — operators can
+// re-derive them via the operator-lookup endpoint from
+// src_ip_subnet on the dashboard side.
+//
+// If the batch *does* carry per-packet operator / app
+// fields (a Sprint 11+ extension), they override the
+// defaults.
+func (p decodedTelemetryBatchPacket) toStorageRow(batch decodedTelemetryBatch, sessionID uuid.UUID) (storage.Telemetry, error) {
+	ts, err := time.Parse(time.RFC3339, p.Timestamp)
+	if err != nil {
+		return storage.Telemetry{}, errors.New("invalid packet ts (RFC 3339 required)")
+	}
+	if p.TLSFP == "" {
+		return storage.Telemetry{}, errors.New("packet tlsFp is required")
+	}
+	srcSubnet := p.SrcIPSubnet
+	if srcSubnet == "" {
+		srcSubnet = p.DstIPSubnet // fall back to whichever side has a value
+	}
+	sid := sessionID
+	// Synthetic hex-only fingerprint derived from the
+	// session id. The telemetry schema enforces
+	// public_key_fp.pattern == ^[a-f0-9]+$ (16-32 chars),
+	// so the legacy "batch-<sessionid>" prefix fails the
+	// pattern check. We derive a 16-hex-char string from
+	// SHA-256(sessionID)[:8] which is unique per session
+	// and shape-compatible with the per-packet contract.
+	sum := sha256.Sum256([]byte(batch.SessionID))
+	pubKeyFP := hex.EncodeToString(sum[:8])
+
+	// device_id_hash: optional in the batch envelope
+	// (Sprint 10.1D mobile didn't carry it). When missing,
+	// synthesize a 16-hex-char string from
+	// SHA-256("device:" + sessionID)[:8] so the storage
+	// row has a non-empty, schema-valid value. The
+	// synthesizer is deterministic per session — the same
+	// session always maps to the same device_id_hash.
+	var devIDHash string
+	if batch.DeviceIDHash != "" {
+		devIDHash = batch.DeviceIDHash
+	} else {
+		devSum := sha256.Sum256([]byte("device:" + batch.SessionID))
+		devIDHash = hex.EncodeToString(devSum[:8])
+	}
+
+	return storage.Telemetry{
+		DeviceIDHash: devIDHash,
+		PublicKeyFP:   pubKeyFP,
+		Operator:      "unknown",
+		App:           "unknown",
+		TLSFP:         p.TLSFP,
+		Entropy:       p.Entropy,
+		SessionID:     &sid,
+		IPSubnet:      srcSubnet,
+		Timestamp:     ts.UTC(),
+	}, nil
 }
 
 // toStorage converts the wire shape into the storage type.

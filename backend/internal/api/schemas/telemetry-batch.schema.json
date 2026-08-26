@@ -1,0 +1,55 @@
+{
+  "$id": "https://opene2ee.com/schemas/telemetry-batch/v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OpenE2EE Telemetry Batch (Sprint 10.1D contract)",
+  "description": "Anonim E2EE bütünlük skoru — batch format. mobile/lib/services/telemetry_service.dart#send() gönderir; her paket telemetry tablosuna ayrı satır olarak insert edilir.",
+  "type": "object",
+  "required": [
+    "sessionId",
+    "sampledAt",
+    "packets"
+  ],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sampledAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "samplingCap": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "deviceIdHash": {
+      "type": "string",
+      "description": "Optional — Sprint 10.1D mobile didn't carry device_id at batch envelope. Handler synthesizes from sessionId when missing.",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[a-f0-9]+$"
+    },
+    "packets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["ts", "tlsFp", "entropy"],
+        "properties": {
+          "ts": {"type": "string", "format": "date-time"},
+          "srcIpSubnet": {"type": "string"},
+          "dstIpSubnet": {"type": "string"},
+          "srcPort": {"type": "integer"},
+          "dstPort": {"type": "integer"},
+          "protocol": {"type": "string"},
+          "tlsFp": {"type": "string", "minLength": 16, "maxLength": 128, "pattern": "^[a-f0-9]+$"},
+          "entropy": {"type": "number", "minimum": 0, "maximum": 8},
+          "sni": {"type": "string"},
+          "tlsVersion": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

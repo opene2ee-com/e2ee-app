@@ -35,6 +35,7 @@ import (
 // internal validator cache key.
 const (
 	SchemaTelemetry        = "telemetry"
+	SchemaTelemetryBatch   = "telemetry-batch"
 	SchemaSession          = "session"
 	SchemaSessionCreate    = "session-create"
 	SchemaOperatorLookup   = "operator-lookup"
@@ -43,6 +44,9 @@ const (
 
 //go:embed schemas/telemetry.schema.json
 var telemetrySchemaJSON []byte
+
+//go:embed schemas/telemetry-batch.schema.json
+var telemetryBatchSchemaJSON []byte
 
 //go:embed schemas/session.schema.json
 var sessionSchemaJSON []byte
@@ -64,6 +68,7 @@ var p2pSignallingSchemaJSON []byte
 // telemetry hot-path.
 type schemaSet struct {
 	telemetry      *gojsonschema.Schema
+	telemetryBatch *gojsonschema.Schema
 	session        *gojsonschema.Schema
 	sessionCreate  *gojsonschema.Schema
 	operatorLookup *gojsonschema.Schema
@@ -78,6 +83,10 @@ func loadSchemas() (*schemaSet, error) {
 	t, err := compileSchema(SchemaTelemetry, telemetrySchemaJSON)
 	if err != nil {
 		return nil, fmt.Errorf("api: compile %s schema: %w", SchemaTelemetry, err)
+	}
+	tb, err := compileSchema(SchemaTelemetryBatch, telemetryBatchSchemaJSON)
+	if err != nil {
+		return nil, fmt.Errorf("api: compile %s schema: %w", SchemaTelemetryBatch, err)
 	}
 	s, err := compileSchema(SchemaSession, sessionSchemaJSON)
 	if err != nil {
@@ -97,6 +106,7 @@ func loadSchemas() (*schemaSet, error) {
 	}
 	return &schemaSet{
 		telemetry:      t,
+		telemetryBatch: tb,
 		session:        s,
 		sessionCreate:  sc,
 		operatorLookup: o,
@@ -139,6 +149,8 @@ func (s *schemaSet) Validate(schemaName string, payload []byte) error {
 	switch schemaName {
 	case SchemaTelemetry:
 		schema = s.telemetry
+	case SchemaTelemetryBatch:
+		schema = s.telemetryBatch
 	case SchemaSession:
 		schema = s.session
 	case SchemaSessionCreate:

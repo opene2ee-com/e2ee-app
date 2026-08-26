@@ -161,6 +161,7 @@ func (a *API) handleCreateSession() http.HandlerFunc {
 		if err := a.deps.Cfg.Sessions.InsertSession(r.Context(), sess); err != nil {
 			a.deps.Cfg.Logger.Error("insert session failed",
 				"err_kind", "db",
+				"err", err.Error(),
 				"session_id", req.ID.String(),
 			)
 			writeInternal(w)
